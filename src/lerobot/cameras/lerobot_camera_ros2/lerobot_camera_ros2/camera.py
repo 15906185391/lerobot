@@ -342,7 +342,11 @@ class ROS2Camera(Camera):
             if src in ("rgb8", "bgr8"):
                 expected = h * w * 3
                 if raw.size < expected:
-                    logger.error("Manual conversion failed: RGB payload too small (%s < %s)", raw.size, expected)
+                    logger.error(
+                        "Manual conversion failed: RGB payload too small (%s < %s)",
+                        raw.size,
+                        expected,
+                    )
                     return None
                 img = raw[:expected].reshape(h, w, 3)
                 if src != dst and dst in ("rgb8", "bgr8"):
@@ -352,7 +356,11 @@ class ROS2Camera(Camera):
             if src in ("rgba8", "bgra8"):
                 expected = h * w * 4
                 if raw.size < expected:
-                    logger.error("Manual conversion failed: RGBA payload too small (%s < %s)", raw.size, expected)
+                    logger.error(
+                        "Manual conversion failed: RGBA payload too small (%s < %s)",
+                        raw.size,
+                        expected,
+                    )
                     return None
                 img = raw[:expected].reshape(h, w, 4)
                 if src == "rgba8":
@@ -366,7 +374,11 @@ class ROS2Camera(Camera):
             if src == "mono8":
                 expected = h * w
                 if raw.size < expected:
-                    logger.error("Manual conversion failed: mono payload too small (%s < %s)", raw.size, expected)
+                    logger.error(
+                        "Manual conversion failed: mono payload too small (%s < %s)",
+                        raw.size,
+                        expected,
+                    )
                     return None
                 gray = raw[:expected].reshape(h, w)
                 if dst in ("rgb8", "bgr8", "rgba8", "bgra8"):

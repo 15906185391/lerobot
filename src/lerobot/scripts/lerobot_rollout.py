@@ -152,7 +152,7 @@ Usage examples
 
 import logging
 
-from lerobot.cameras.lerobot_camera_ros2.lerobot_camera_ros2.config import ROS2CameraConfig  # noqa: F401
+from lerobot.cameras.lerobot_camera_ros2 import ROS2CameraConfig  # noqa: F401
 from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.cameras.zmq import ZMQCameraConfig  # noqa: F401

@@ -37,8 +37,7 @@ import numpy as np
 from PIL import Image
 
 from lerobot.cameras import ColorMode
-from lerobot.cameras.lerobot_camera_ros2.lerobot_camera_ros2 import ROS2Camera
-from lerobot.cameras.lerobot_camera_ros2.lerobot_camera_ros2.config import ROS2CameraConfig
+from lerobot.cameras.lerobot_camera_ros2 import ROS2Camera, ROS2CameraConfig
 from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
 from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
 from lerobot.utils.utils import init_logging
@@ -313,7 +312,10 @@ def main():
         nargs="?",
         default=None,
         choices=["realsense", "opencv", "ros2"],
-        help="Specify camera type to capture from (e.g., 'realsense', 'opencv', 'ros2'). Captures from all if omitted.",
+        help=(
+            "Specify camera type to capture from (e.g., 'realsense', 'opencv', 'ros2'). "
+            "Captures from all if omitted."
+        ),
     )
     parser.add_argument(
         "--output-dir",

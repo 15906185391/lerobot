@@ -48,7 +48,7 @@ def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> dict[s
             cameras[key] = ZMQCamera(cfg)
 
         elif cfg.type in {"ros2", "lerobot_camera_ros2"}:
-            from .lerobot_camera_ros2.lerobot_camera_ros2.camera import ROS2Camera
+            from .lerobot_camera_ros2 import ROS2Camera
 
             cameras[key] = ROS2Camera(cfg)
 
