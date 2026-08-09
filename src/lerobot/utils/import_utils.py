@@ -243,6 +243,12 @@ def register_third_party_plugins() -> None:
             importlib.import_module(module_name)
             imported.append(module_name)
             logging.info("Imported third-party plugin: %s", module_name)
+        except ValueError as exc:
+            if "is already registered as" in str(exc):
+                logging.debug("Skipped already-registered third-party plugin: %s", module_name)
+                return
+            logging.exception("Could not import third-party plugin: %s", module_name)
+            failed.append(module_name)
         except Exception:
             logging.exception("Could not import third-party plugin: %s", module_name)
             failed.append(module_name)

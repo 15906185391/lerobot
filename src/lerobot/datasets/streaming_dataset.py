@@ -16,7 +16,7 @@
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator
 from pathlib import Path
-from typing import Literal
+from typing import Generic, Literal, TypeVar
 
 import datasets
 import numpy as np
@@ -42,6 +42,8 @@ from .video_utils import (
     decode_video_frames_torchcodec,
 )
 
+T = TypeVar("T")
+
 
 class LookBackError(Exception):
     """
@@ -63,7 +65,7 @@ class _ShardExhaustedError(Exception):
     """Raised when a streaming dataset shard has no more items."""
 
 
-class Backtrackable[T]:
+class Backtrackable(Generic[T]):
     """
     Wrap any iterator/iterable so you can step back up to `history` items
     and look ahead up to `lookahead` items.

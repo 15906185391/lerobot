@@ -18,7 +18,9 @@ import functools
 import threading
 from collections.abc import Callable, Sequence
 from contextlib import suppress
-from typing import NotRequired, TypedDict
+from typing import TypedDict
+
+from typing_extensions import NotRequired
 
 import torch
 import torch.nn.functional as F  # noqa: N812

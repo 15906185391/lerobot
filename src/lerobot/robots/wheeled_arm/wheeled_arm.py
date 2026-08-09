@@ -54,6 +54,8 @@ def _make_lcm_handler() -> LCMHandler:
 _PART_SLICES: dict[str, slice] = {
     "left_arm": slice(0, 7),
     "right_arm": slice(7, 14),
+    "left_gripper": slice(14, 15),
+    "right_gripper": slice(15, 16),
 }
 
 _PART_MOVING_FLAGS: dict[str, str] = {
@@ -113,6 +115,19 @@ class WheeledArm(Robot):
     def is_calibrated(self) -> bool:
         return True
 
+    @property
+    def has_valid_feedback(self) -> bool:
+        if self._handler is None:
+            return False
+        if hasattr(self._handler, "has_arm_state_feedback"):
+            return bool(self._handler.has_arm_state_feedback(self.config.state_feedback_timeout_s))
+        return bool(
+            getattr(self._handler, "left_arm_state_updated", None)
+            and self._handler.left_arm_state_updated.is_set()
+            and getattr(self._handler, "right_arm_state_updated", None)
+            and self._handler.right_arm_state_updated.is_set()
+        )
+
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
         self._handler = _make_lcm_handler()
@@ -122,6 +137,12 @@ class WheeledArm(Robot):
         self.configure()
         if self.config.connect_timeout_s > 0:
             time.sleep(self.config.connect_timeout_s)
+        if not self.has_valid_feedback:
+            logger.warning(
+                "%s has not received fresh left/right arm state feedback. "
+                "Closed-loop teleoperator feedback will be skipped until LCM state arrives.",
+                self,
+            )
 
         logger.info(f"{self} connected.")
 

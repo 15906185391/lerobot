@@ -39,15 +39,48 @@ def _require_ros2_dependencies() -> None:
 
     try:
         import rclpy as _rclpy
-        from cv_bridge import CvBridge as _CvBridge
         from rclpy.executors import SingleThreadedExecutor as _SingleThreadedExecutor
         from rclpy.node import Node as _Node
         from sensor_msgs.msg import Image as _Image
+    except AttributeError as exc:
+        if "_ARRAY_API" in str(exc):
+            raise ImportError(
+                "ROS 2 `cv_bridge` was compiled against NumPy 1.x, but this Python "
+                "environment is using NumPy 2.x. Use a NumPy 1.x environment for ROS "
+                "Humble cv_bridge, for example `pip install 'numpy<2'`, or rebuild "
+                "cv_bridge against NumPy 2.x."
+            ) from exc
+        raise
     except ImportError as exc:
         raise ImportError(
-            "ROS 2 camera support requires `rclpy`, `cv_bridge`, and `sensor_msgs` "
-            "to be available in the current Python environment."
+            "ROS 2 camera support requires `rclpy` and `sensor_msgs` to be "
+            "available in the current Python environment."
         ) from exc
+
+    _CvBridge = None
+    numpy_major = int(np.__version__.split(".", maxsplit=1)[0])
+    should_try_cv_bridge = (
+        os.getenv("LEROBOT_ROS2_DISABLE_CV_BRIDGE", "0") != "1"
+        and (numpy_major < 2 or os.getenv("LEROBOT_ROS2_FORCE_CV_BRIDGE", "0") == "1")
+    )
+    if should_try_cv_bridge:
+        try:
+            from cv_bridge import CvBridge as _CvBridge
+        except AttributeError as exc:
+            if "_ARRAY_API" not in str(exc):
+                raise
+            logger.warning(
+                "ROS 2 `cv_bridge` is not compatible with the current NumPy; "
+                "falling back to manual RGB image conversion."
+            )
+        except ImportError:
+            logger.warning("`cv_bridge` is unavailable; falling back to manual RGB image conversion.")
+    elif numpy_major >= 2:
+        logger.warning(
+            "Skipping ROS 2 `cv_bridge` because NumPy %s is installed; "
+            "falling back to manual RGB image conversion.",
+            np.__version__,
+        )
 
     rclpy = _rclpy
     CvBridge = _CvBridge
@@ -68,7 +101,7 @@ class ROS2Camera(Camera):
 
         # Create configuration
         config = ROS2CameraConfig(
-            topic_name="/camera/image_raw",
+            topic_name="/camera/color/image_raw",
             fps=30,
             width=640,
             height=480
@@ -114,15 +147,24 @@ class ROS2Camera(Camera):
         self.depth_subscription = None
 
         # Image processing
-        self.bridge = CvBridge()
         self.latest_image: np.ndarray | None = None
         self.latest_depth: np.ndarray | None = None
+        self.latest_image_timestamp: float | None = None
+        self.latest_depth_timestamp: float | None = None
         self.image_lock = threading.Lock()
         self.depth_lock = threading.Lock()
         self.image_received_event = threading.Event()
         self.depth_received_event = threading.Event()
         self._dimensions_initialized = False
-        self._cv_bridge_enabled = os.getenv("LEROBOT_ROS2_DISABLE_CV_BRIDGE", "0") != "1"
+        self._cv_bridge_enabled = (
+            os.getenv("LEROBOT_ROS2_DISABLE_CV_BRIDGE", "0") != "1" and CvBridge is not None
+        )
+        if self.depth_topic_name and not self._cv_bridge_enabled:
+            raise ImportError(
+                "ROS 2 depth camera support requires `cv_bridge`. Fix the cv_bridge/NumPy "
+                "environment or disable `depth_topic_name`."
+            )
+        self.bridge = CvBridge() if self._cv_bridge_enabled else None
         self._last_cv_bridge_error_log_ts = 0.0
         self._cv_bridge_error_log_interval_s = 2.0
 
@@ -236,7 +278,8 @@ class ROS2Camera(Camera):
             # Start executor in separate thread
             self.executor = SingleThreadedExecutor()
             self.executor.add_node(self.ros_node)
-            self.executor_thread = threading.Thread(target=self.executor.spin, daemon=True)
+            self.executor_thread = threading.Thread(
+                target=self.executor.spin, daemon=True)
             self.executor_thread.start()
             self._connected = True
 
@@ -248,7 +291,8 @@ class ROS2Camera(Camera):
             if warmup:
                 logger.info(f"Warming up {self}...")
                 if not self.image_received_event.wait(timeout=max(self.warmup_s, self.timeout_ms / 1000.0)):
-                    logger.warning(f"No image received from {self.topic_name} during warmup")
+                    logger.warning(
+                        f"No image received from {self.topic_name} during warmup")
 
             logger.info(f"Connected to ROS 2 camera: {self.topic_name}")
 
@@ -273,7 +317,8 @@ class ROS2Camera(Camera):
                 if self.width is None or self.height is None:
                     self.width = actual_width
                     self.height = actual_height
-                    logger.info(f"Auto-detected image dimensions: {actual_width}x{actual_height}")
+                    logger.info(
+                        f"Auto-detected image dimensions: {actual_width}x{actual_height}")
                 elif self.width != actual_width or self.height != actual_height:
                     logger.warning(
                         f"Image dimensions mismatch: configured {self.width}x{self.height}, "
@@ -292,7 +337,8 @@ class ROS2Camera(Camera):
                 except Exception as e:
                     now = time.monotonic()
                     if (now - self._last_cv_bridge_error_log_ts) >= self._cv_bridge_error_log_interval_s:
-                        logger.error(f"Failed to convert ROS image message: {e}")
+                        logger.error(
+                            f"Failed to convert ROS image message: {e}")
                         logger.warning(
                             "Disabling cv_bridge for camera '%s' and falling back to manual converter.",
                             self.topic_name,
@@ -323,6 +369,7 @@ class ROS2Camera(Camera):
 
             with self.image_lock:
                 self.latest_image = rgb_image.copy()
+                self.latest_image_timestamp = time.perf_counter()
                 self.image_received_event.set()
 
         except Exception as e:
@@ -335,7 +382,8 @@ class ROS2Camera(Camera):
             dst = (encoding or src or "bgr8").lower()
             h, w = int(msg.height), int(msg.width)
             if h <= 0 or w <= 0:
-                logger.error("Manual conversion got invalid image size: %sx%s", w, h)
+                logger.error(
+                    "Manual conversion got invalid image size: %sx%s", w, h)
                 return None
 
             raw = np.frombuffer(msg.data, dtype=np.uint8)
@@ -385,7 +433,8 @@ class ROS2Camera(Camera):
                     return np.repeat(gray[:, :, None], 3, axis=2)
                 return gray.copy()
 
-            logger.error("Manual conversion unsupported encoding: src=%s dst=%s", src, dst)
+            logger.error(
+                "Manual conversion unsupported encoding: src=%s dst=%s", src, dst)
             return None
         except Exception as exc:
             logger.error("Manual conversion exception: %s", exc)
@@ -397,7 +446,8 @@ class ROS2Camera(Camera):
         try:
             cv_depth = self.bridge.imgmsg_to_cv2(msg, self.depth_encoding)
             depth_float = np.array(cv_depth, dtype=np.float32, copy=False)
-            depth_clean = np.nan_to_num(depth_float, nan=0.0, posinf=0.0, neginf=0.0)
+            depth_clean = np.nan_to_num(
+                depth_float, nan=0.0, posinf=0.0, neginf=0.0)
 
             valid_mask = np.isfinite(depth_clean)
             if np.any(valid_mask):
@@ -412,7 +462,8 @@ class ROS2Camera(Camera):
             else:
                 depth_norm = np.zeros_like(depth_clean, dtype=np.float32)
 
-            depth_vis = np.clip(depth_norm * 255.0, 0.0, 255.0).astype(np.uint8)
+            depth_vis = np.clip(depth_norm * 255.0, 0.0,
+                                255.0).astype(np.uint8)
             if depth_vis.ndim == 2:
                 depth_vis = np.repeat(depth_vis[:, :, None], 3, axis=2)
             elif depth_vis.shape[-1] == 1:
@@ -420,6 +471,7 @@ class ROS2Camera(Camera):
 
             with self.depth_lock:
                 self.latest_depth = depth_vis.copy()
+                self.latest_depth_timestamp = time.perf_counter()
                 self.depth_received_event.set()
         except Exception as exc:
             logger.error(f"Failed to process depth image: {exc}")
@@ -453,6 +505,48 @@ class ROS2Camera(Camera):
             raise RuntimeError("No image available")
         return rgb_image
 
+    def read_latest(self, max_age_ms: int = 500) -> Any:
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected")
+
+        with self.image_lock:
+            rgb_image = self.latest_image.copy() if self.latest_image is not None else None
+            timestamp = self.latest_image_timestamp
+
+        if rgb_image is None or timestamp is None:
+            raise RuntimeError(f"{self} has not received any images yet")
+
+        age_ms = (time.perf_counter() - timestamp) * 1e3
+        if age_ms > max_age_ms:
+            raise TimeoutError(
+                f"{self} latest image is too old: {age_ms:.1f} ms "
+                f"(max allowed: {max_age_ms} ms)."
+            )
+
+        return rgb_image
+
+    def read_latest_depth(self, max_age_ms: int = 500) -> Any:
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected")
+        if not self.depth_topic_name:
+            raise RuntimeError(f"{self} is not configured with a depth topic")
+
+        with self.depth_lock:
+            depth_image = self.latest_depth.copy() if self.latest_depth is not None else None
+            timestamp = self.latest_depth_timestamp
+
+        if depth_image is None or timestamp is None:
+            raise RuntimeError(f"{self} has not received any depth images yet")
+
+        age_ms = (time.perf_counter() - timestamp) * 1e3
+        if age_ms > max_age_ms:
+            raise TimeoutError(
+                f"{self} latest depth image is too old: {age_ms:.1f} ms "
+                f"(max allowed: {max_age_ms} ms)."
+            )
+
+        return depth_image
+
     def disconnect(self) -> None:
         """Disconnect from the camera and release resources."""
         self._connected = False
@@ -477,10 +571,12 @@ class ROS2Camera(Camera):
         # Clean up resources
         with self.image_lock:
             self.latest_image = None
+            self.latest_image_timestamp = None
             self.image_received_event.clear()
             self._dimensions_initialized = False
         with self.depth_lock:
             self.latest_depth = None
+            self.latest_depth_timestamp = None
             self.depth_received_event.clear()
 
         logger.info(f"Disconnected from ROS 2 camera: {self.topic_name}")

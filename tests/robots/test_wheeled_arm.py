@@ -31,6 +31,7 @@ class FakeLCMHandler:
         self.joint_current_pos_lock = threading.Lock()
         self.last_package = None
         self.stopped = False
+        self.has_feedback = True
 
         for flag in (
             "left_arm_moving",
@@ -46,6 +47,9 @@ class FakeLCMHandler:
     def upper_body_data_publisher(self, package):
         self.last_package = np.asarray(package).copy()
 
+    def has_arm_state_feedback(self, max_age_s=None):
+        return self.has_feedback
+
     def stop(self):
         self.stopped = True
 
@@ -53,14 +57,16 @@ class FakeLCMHandler:
 def _make_robot(**overrides):
     handler = FakeLCMHandler()
     with patch("lerobot.robots.wheeled_arm.wheeled_arm._make_lcm_handler", return_value=handler):
-        robot = WheeledArm(WheeledArmConfig(cameras={}, connect_timeout_s=0, **overrides))
+        robot = WheeledArm(WheeledArmConfig(
+            cameras={}, connect_timeout_s=0, **overrides))
         robot.connect()
     return robot, handler
 
 
 def test_wheeled_arm_config_is_registered():
     assert "wheeled_arm" in RobotConfig.get_known_choices()
-    assert isinstance(make_robot_from_config(WheeledArmConfig(cameras={}, connect_timeout_s=0)), WheeledArm)
+    assert isinstance(make_robot_from_config(
+        WheeledArmConfig(cameras={}, connect_timeout_s=0)), WheeledArm)
 
 
 def test_default_camera_config_uses_ros2_camera():
@@ -68,7 +74,7 @@ def test_default_camera_config_uses_ros2_camera():
 
     assert list(cameras) == ["front"]
     assert cameras["front"].type == "lerobot_camera_ros2"
-    assert cameras["front"].topic_name == "/camera/image_raw"
+    assert cameras["front"].topic_name == "/camera/color/image_raw"
 
 
 def test_get_observation_reads_left_and_right_arm_joint_positions():
@@ -76,11 +82,22 @@ def test_get_observation_reads_left_and_right_arm_joint_positions():
 
     obs = robot.get_observation()
 
-    assert len(obs) == 14
+    assert len(obs) == 16
     assert obs["left_arm_0.pos"] == 0.0
     assert obs["right_arm_0.pos"] == 7.0
     assert obs["right_arm_6.pos"] == 13.0
-    assert "left_gripper.pos" not in obs
+    assert obs["left_gripper.pos"] == 14.0
+    assert obs["right_gripper.pos"] == 15.0
+
+
+def test_has_valid_feedback_reflects_lcm_arm_state_availability():
+    robot, handler = _make_robot()
+
+    assert robot.has_valid_feedback is True
+
+    handler.has_feedback = False
+
+    assert robot.has_valid_feedback is False
 
 
 def test_send_action_publishes_23_dim_package_for_arm_joints_only():
@@ -90,21 +107,24 @@ def test_send_action_publishes_23_dim_package_for_arm_joints_only():
         {
             "left_arm_0.pos": 1.5,
             "right_arm_6.pos": 2.5,
+            "left_gripper.pos": 0.25,
         }
     )
 
     assert returned == {
         "left_arm_0.pos": 1.5,
         "right_arm_6.pos": 2.5,
+        "left_gripper.pos": 0.25,
     }
     assert handler.last_package[0] == 1.5
     assert handler.last_package[13] == 2.5
+    assert handler.last_package[14] == 0.25
     assert handler.last_package[1] == 1.0
-    assert handler.last_package[14] == 14.0
+    assert handler.last_package[15] == 15.0
 
     assert handler.left_arm_moving is True
     assert handler.right_arm_moving is True
-    assert handler.left_gripper_moving is False
+    assert handler.left_gripper_moving is True
     assert handler.right_gripper_moving is False
     assert handler.head_moving is False
     assert handler.waist_moving is False
@@ -112,15 +132,19 @@ def test_send_action_publishes_23_dim_package_for_arm_joints_only():
 
 
 def test_send_action_respects_disabled_parts_and_relative_limit():
-    robot, handler = _make_robot(controlled_parts=["left_arm"], max_relative_target=2.0)
+    robot, handler = _make_robot(
+        controlled_parts=["left_arm", "left_gripper"], max_relative_target=2.0)
 
-    returned = robot.send_action({"left_arm_0.pos": 100.0, "right_arm_0.pos": 100.0})
+    returned = robot.send_action(
+        {"left_arm_0.pos": 100.0, "right_arm_0.pos": 100.0, "left_gripper.pos": 100.0})
 
-    assert returned == {"left_arm_0.pos": 2.0, "right_arm_0.pos": 9.0}
+    assert returned == {"left_arm_0.pos": 2.0, "right_arm_0.pos": 9.0, "left_gripper.pos": 16.0}
     assert handler.last_package[0] == 2.0
     assert handler.last_package[7] == 9.0
+    assert handler.last_package[14] == 16.0
     assert handler.left_arm_moving is True
     assert handler.right_arm_moving is False
+    assert handler.left_gripper_moving is True
 
 
 def test_disconnect_stops_handler():
@@ -140,4 +164,5 @@ def test_unknown_action_key_raises():
     except ValueError as exc:
         assert "not_a_joint.pos" in str(exc)
     else:
-        raise AssertionError("Expected ValueError for an unknown wheeled_arm action key.")
+        raise AssertionError(
+            "Expected ValueError for an unknown wheeled_arm action key.")

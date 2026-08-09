@@ -32,6 +32,8 @@ class LCMHandler:
         self.dim = 23
         self.joint_current_pos = np.zeros(23)
         self.joint_current_speed = np.zeros(23)
+        self.left_arm_state_time_s = None
+        self.right_arm_state_time_s = None
 
         self.motion_mode = 0
         self.com_mode = 1
@@ -100,6 +102,7 @@ class LCMHandler:
             with self.joint_current_pos_lock:
                 for i in range(7):
                     self.joint_current_pos[i] = msg.joints[i].posH
+                self.left_arm_state_time_s = time.monotonic()
             self.left_arm_state_updated.set()
         except Exception as exc:
             logger.debug("Failed to decode left arm state: %s", exc)
@@ -111,9 +114,23 @@ class LCMHandler:
             with self.joint_current_pos_lock:
                 for i in range(7):
                     self.joint_current_pos[7 + i] = msg.joints[i].posH
+                self.right_arm_state_time_s = time.monotonic()
             self.right_arm_state_updated.set()
         except Exception as exc:
             logger.debug("Failed to decode right arm state: %s", exc)
+
+    def has_arm_state_feedback(self, max_age_s=None):
+        with self.joint_current_pos_lock:
+            left_time = self.left_arm_state_time_s
+            right_time = self.right_arm_state_time_s
+
+        if left_time is None or right_time is None:
+            return False
+        if max_age_s is None:
+            return True
+
+        now = time.monotonic()
+        return (now - left_time) <= max_age_s and (now - right_time) <= max_age_s
 
     def manip_left_gripper_state_listener(self, channel, data):
         try:

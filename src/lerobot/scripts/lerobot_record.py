@@ -151,6 +151,7 @@ from lerobot.teleoperators import (  # noqa: F401
     rebot_102_leader,
     so_leader,
     unitree_g1,
+    wheeled_arm_pico,
 )
 from lerobot.teleoperators.keyboard import KeyboardTeleop
 from lerobot.utils.constants import ACTION, OBS_STR
@@ -299,6 +300,8 @@ def record_loop(
 
         # Get action from teleop
         if isinstance(teleop, Teleoperator):
+            if robot.name == "wheeled_arm" and getattr(robot, "has_valid_feedback", True):
+                teleop.send_feedback(obs)
             act = teleop.get_action()
             if robot.name == "unitree_g1":
                 teleop.send_feedback(obs)

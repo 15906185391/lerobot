@@ -69,6 +69,7 @@ from lerobot.teleoperators import (  # noqa: F401
     openarm_mini,
     rebot_102_leader,
     so_leader,
+    wheeled_arm_pico,
 )
 from lerobot.utils.robot_utils import precise_sleep
 

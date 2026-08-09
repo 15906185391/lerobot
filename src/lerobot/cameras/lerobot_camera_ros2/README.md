@@ -10,7 +10,7 @@ Example:
 lerobot-record \
     --robot.type=so101_follower \
     --robot.port=/dev/ttyACM0 \
-    --robot.cameras="{ front: {type: ros2, topic_name: /camera/image_raw, width: 640, height: 480, fps: 30} }" \
+    --robot.cameras="{ front: {type: ros2, topic_name: /camera/color/image_raw, width: 640, height: 480, fps: 30} }" \
     --dataset.repo_id=${HF_USER}/my-dataset \
     --dataset.num_episodes=5
 ```

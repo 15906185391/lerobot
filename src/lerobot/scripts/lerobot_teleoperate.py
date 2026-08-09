@@ -122,6 +122,7 @@ from lerobot.teleoperators import (  # noqa: F401
     rebot_102_leader,
     so_leader,
     unitree_g1,
+    wheeled_arm_pico,
 )
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
@@ -196,6 +197,8 @@ def teleop_loop(
         # given that it is the identity processor as default
         obs = robot.get_observation()
 
+        if robot.name == "wheeled_arm" and getattr(robot, "has_valid_feedback", True):
+            teleop.send_feedback(obs)
         if robot.name == "unitree_g1":
             teleop.send_feedback(obs)
 

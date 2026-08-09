@@ -16,7 +16,7 @@ class ROS2CameraConfig(CameraConfig):
     Example:
         ```python
         config = ROS2CameraConfig(
-            topic_name="/camera/image_raw",
+            topic_name="/camera/color/image_raw",
             node_name="wrist_camera_node",
             namespace="robot",
             fps=30,
@@ -26,7 +26,7 @@ class ROS2CameraConfig(CameraConfig):
         ```
 
     Args:
-        topic_name: ROS 2 image topic name (e.g., "/camera/image_raw")
+        topic_name: ROS 2 image topic name (e.g., "/camera/color/image_raw")
         node_name: ROS 2 node name for this camera (e.g., "wrist_camera_node")
         namespace: ROS 2 namespace (optional, defaults to empty string)
         timeout_ms: Timeout for receiving images in milliseconds
@@ -35,7 +35,7 @@ class ROS2CameraConfig(CameraConfig):
         warmup_s: Time waiting for a first frame before returning from connect
     """
 
-    topic_name: str = "/camera/image_raw"
+    topic_name: str = "/camera/color/image_raw"
     node_name: str = "lerobot_ros2_camera"
     namespace: str = ""
     timeout_ms: float = 1000.0
