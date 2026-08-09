@@ -44,6 +44,10 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
         self_collision_safe_displacement_gain=6.0,
         collision_warning_distance=0.02,
         solver_kwargs={"verbose": False},
+        rerun_visualize_robot=False,
+        rerun_robot_update_hz=5.0,
+        rerun_robot_prefix="ik_robot",
+        rerun_robot_axis_length=0.2,
     )
 
     assert cfg.position_cost == [5.0, 4.0, 3.0]
@@ -61,6 +65,10 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
     assert cfg.self_collision_safe_displacement_gain == 6.0
     assert cfg.collision_warning_distance == 0.02
     assert cfg.solver_kwargs == {"verbose": False}
+    assert cfg.rerun_visualize_robot is False
+    assert cfg.rerun_robot_update_hz == 5.0
+    assert cfg.rerun_robot_prefix == "ik_robot"
+    assert cfg.rerun_robot_axis_length == 0.2
 
 
 def test_action_features_match_wheeled_arm_arm_and_gripper_joints():

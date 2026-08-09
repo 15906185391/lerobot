@@ -66,6 +66,9 @@
 - `wheel_arm_teleop.py` 是独立可视化验证脚本。
 - 支持 `--mock-xr`，不连接 PICO 也能看 IK/URDF/action 链路。
 - 可视化依赖 `viser`、`yourdfpy` 只在开启可视化时导入，不应影响普通 teleop import。
+- 数据采集使用 `--display_data=true --display_mode=rerun` 时，Rerun 窗口会额外显示 `robot`
+  3D view，包含 IK 机器人骨架、左右 TCP 坐标轴、PICO target、target error 连线和碰撞状态。
+- `--teleop.visualize=true` 的 viser 完整 URDF 可视化仍然保留，可与 Rerun 同时打开。
 
 ## 已遇到的问题和处理方案
 
@@ -239,6 +242,11 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
   - `--teleop.self_collision_gain=10.0`
   - `--teleop.self_collision_safe_displacement_gain=5.0`
   - `--teleop.collision_warning_distance=0.01`
+- Rerun robot 3D visualization:
+  - `--teleop.rerun_visualize_robot=true`
+  - `--teleop.rerun_robot_update_hz=10.0`
+  - `--teleop.rerun_robot_prefix=robot`
+  - `--teleop.rerun_robot_axis_length=0.12`
 
 `position_cost` / `orientation_cost` 可传单个标量，也可传 3 维列表做各轴 anisotropic cost。
 

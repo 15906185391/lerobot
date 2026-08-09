@@ -73,6 +73,9 @@ def mock_rerun(monkeypatch):
         Spatial2DView=lambda origin=None, name=None: SimpleNamespace(
             kind="Spatial2DView", origin=origin, name=name
         ),
+        Spatial3DView=lambda origin=None, name=None: SimpleNamespace(
+            kind="Spatial3DView", origin=origin, name=name
+        ),
         TimeSeriesView=lambda name=None, contents=None: SimpleNamespace(
             kind="TimeSeriesView", name=name, contents=contents
         ),
@@ -199,6 +202,8 @@ def test_log_rerun_data_envtransition_scalars_and_image(mock_rerun):
     # One spatial view per image path
     spatial_views = _views_by_kind(bp, "Spatial2DView")
     assert {v.origin for v in spatial_views} == {"observation.camera"}
+    robot_views = _views_by_kind(bp, "Spatial3DView")
+    assert [(v.origin, v.name) for v in robot_views] == [("robot", "robot")]
 
     # One time-series view each for observation and action scalars
     ts_views = {v.name: v for v in _views_by_kind(bp, "TimeSeriesView")}

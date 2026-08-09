@@ -87,7 +87,8 @@ def _build_blueprint(
     # Safe + zero-overhead: `log_rerun_data` already ran the `require_package` guard and imported rerun.
     import rerun.blueprint as rrb
 
-    views = [rrb.Spatial2DView(origin=path, name=path) for path in sorted(image_paths)]
+    views = [rrb.Spatial3DView(origin="robot", name="robot")]
+    views.extend(rrb.Spatial2DView(origin=path, name=path) for path in sorted(image_paths))
 
     if observation_paths:
         views.append(rrb.TimeSeriesView(name="observation", contents=sorted(observation_paths)))

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from functools import cached_property
 
 import numpy as np
@@ -82,6 +83,10 @@ class WheeledArmPico(Teleoperator):
         self._solver = None
         self._dt = 0.0
         self._visualizer = None
+        self._urdf_path = None
+        self._rerun_robot_last_update_t = 0.0
+        self._rerun_robot_failed = False
+        self._last_visualization_state = None
         self._left_mapper = RelativeTeleopTarget()
         self._right_mapper = RelativeTeleopTarget()
         self._last_reset_button = False
@@ -122,6 +127,7 @@ class WheeledArmPico(Teleoperator):
                 "Provide the robot model with `--teleop.urdf_path=/path/to/real_robot.urdf`, "
                 "or place the URDF at the default bundled path."
             )
+        self._urdf_path = urdf_path
 
         pin = self._deps.pin
         self._robot = pin.RobotWrapper.BuildFromURDF(
@@ -438,6 +444,15 @@ class WheeledArmPico(Teleoperator):
         collision_status: str,
         min_barrier: float | None,
     ) -> None:
+        self._last_visualization_state = {
+            "left_target_pose": left_target_pose.copy(),
+            "right_target_pose": right_target_pose.copy(),
+            "xr_ok": xr_ok,
+            "left_active": left_active,
+            "right_active": right_active,
+            "collision_status": collision_status,
+            "min_barrier": min_barrier,
+        }
         if self._visualizer is None:
             return
         self._visualizer.update(
@@ -450,6 +465,42 @@ class WheeledArmPico(Teleoperator):
             min_barrier=min_barrier,
         )
 
+    def log_rerun_robot_visualization(
+        self, frame_index: int | None = None, timestamp: float | None = None
+    ) -> None:
+        if (
+            not self.config.rerun_visualize_robot
+            or self._rerun_robot_failed
+            or self._last_visualization_state is None
+        ):
+            return
+        if self.config.rerun_robot_update_hz > 0:
+            now = time.monotonic()
+            if now - self._rerun_robot_last_update_t < 1.0 / self.config.rerun_robot_update_hz:
+                return
+            self._rerun_robot_last_update_t = now
+
+        assert self._deps is not None
+        assert self._robot is not None
+        assert self._configuration is not None
+
+        try:
+            from .rerun_robot_visualization import log_rerun_robot_visualization
+
+            log_rerun_robot_visualization(
+                self.config,
+                self._deps,
+                self._robot,
+                self._configuration,
+                frame_index=frame_index,
+                timestamp=timestamp,
+                urdf_path=self._urdf_path,
+                **self._last_visualization_state,
+            )
+        except Exception as exc:
+            self._rerun_robot_failed = True
+            logger.warning("Disabling wheeled_arm_pico Rerun robot visualization: %s", exc)
+
     @check_if_not_connected
     def disconnect(self) -> None:
         if self._xr_client is not None:
@@ -458,5 +509,6 @@ class WheeledArmPico(Teleoperator):
             self._visualizer.close()
         self._xr_client = None
         self._visualizer = None
+        self._last_visualization_state = None
         self._connected = False
         logger.info("%s disconnected.", self)

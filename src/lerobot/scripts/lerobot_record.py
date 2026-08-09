@@ -379,6 +379,13 @@ def record_loop(
                 frame_index=display_frame_index,
                 timestamp=display_frame_index / fps if display_frame_index is not None else None,
             )
+            if display_mode == "rerun":
+                log_robot_visualization = getattr(teleop, "log_rerun_robot_visualization", None)
+                if callable(log_robot_visualization):
+                    log_robot_visualization(
+                        frame_index=display_frame_index,
+                        timestamp=display_frame_index / fps if display_frame_index is not None else None,
+                    )
 
         dt_s = time.perf_counter() - start_loop_t
 

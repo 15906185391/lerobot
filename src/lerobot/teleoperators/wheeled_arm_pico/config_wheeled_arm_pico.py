@@ -120,6 +120,15 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     # viser 刷新频率。0 表示每帧都更新；降低可减少可视化开销。
     visualization_update_hz: float = 10.0
 
+    # 在 Rerun 数据窗口中同步显示机器人 IK 骨架、TCP、PICO target 和碰撞状态。
+    rerun_visualize_robot: bool = True
+    # Rerun 机器人可视化刷新频率。0 表示每帧都更新；降低可减少 Rerun 写入开销。
+    rerun_robot_update_hz: float = 10.0
+    # Rerun 机器人可视化实体路径前缀，默认会出现在 Rerun 的 robot 3D view 下。
+    rerun_robot_prefix: str = "robot"
+    # Rerun 中 TCP/target 坐标轴长度，单位米。
+    rerun_robot_axis_length: float = 0.12
+
     def __post_init__(self) -> None:
         _validate_non_negative("scale", self.scale)
         _validate_gain("activation_threshold", self.activation_threshold)
@@ -145,3 +154,7 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
         _validate_gain("locked_joints_gain", self.locked_joints_gain)
         _validate_non_negative("locked_joints_lm_damping", self.locked_joints_lm_damping)
         _validate_non_negative("visualization_update_hz", self.visualization_update_hz)
+        _validate_non_negative("rerun_robot_update_hz", self.rerun_robot_update_hz)
+        _validate_non_negative("rerun_robot_axis_length", self.rerun_robot_axis_length)
+        if not self.rerun_robot_prefix:
+            raise ValueError("`rerun_robot_prefix` must not be empty.")
