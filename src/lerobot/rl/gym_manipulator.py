@@ -56,6 +56,7 @@ from lerobot.robots import (  # noqa: F401
     RobotConfig,
     make_robot_from_config,
     so_follower,
+    wheeled_arm,
 )
 from lerobot.robots.robot import Robot
 from lerobot.robots.so_follower.robot_kinematic_processor import (

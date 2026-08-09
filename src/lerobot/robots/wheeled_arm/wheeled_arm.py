@@ -1,0 +1,220 @@
+#!/usr/bin/env python
+
+# Copyright 2026 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import logging
+import time
+from functools import cached_property
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+from lerobot.cameras import make_cameras_from_configs
+from lerobot.lerobot_types import RobotAction, RobotObservation
+from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
+
+from ..robot import Robot
+from ..utils import ensure_safe_goal_position
+from .config_wheeled_arm import WheeledArmConfig
+
+if TYPE_CHECKING:
+    from .hardware_interface.lcm_handler import LCMHandler
+
+logger = logging.getLogger(__name__)
+
+
+def _make_lcm_handler() -> LCMHandler:
+    try:
+        from .hardware_interface.lcm_handler import LCMHandler
+    except ModuleNotFoundError as exc:
+        if exc.name == "lcm":
+            raise ImportError(
+                "'lcm' is required to control wheeled_arm. Install the robot SDK dependencies "
+                "that provide the Python `lcm` module before connecting the robot."
+            ) from exc
+        raise
+
+    return LCMHandler()
+
+
+_PART_SLICES: dict[str, slice] = {
+    "left_arm": slice(0, 7),
+    "right_arm": slice(7, 14),
+}
+
+_PART_MOVING_FLAGS: dict[str, str] = {
+    "left_arm": "left_arm_moving",
+    "right_arm": "right_arm_moving",
+    "left_gripper": "left_gripper_moving",
+    "right_gripper": "right_gripper_moving",
+    "head": "head_moving",
+    "waist": "waist_moving",
+    "leg": "leg_moving",
+}
+
+
+class WheeledArm(Robot):
+    """LeRobot wrapper for the LCM-controlled wheeled arm upper body."""
+
+    config_class = WheeledArmConfig
+    name = "wheeled_arm"
+
+    def __init__(self, config: WheeledArmConfig):
+        super().__init__(config)
+        self.config = config
+        self.cameras = make_cameras_from_configs(config.cameras)
+        self._handler: LCMHandler | None = None
+
+        self._joint_index_by_action_key = {
+            f"{joint_name}.pos": idx for idx, joint_name in enumerate(self.config.joint_names)
+        }
+
+    @property
+    def _joints_ft(self) -> dict[str, type]:
+        return {f"{joint_name}.pos": float for joint_name in self.config.joint_names}
+
+    @property
+    def _cameras_ft(self) -> dict[str, tuple]:
+        features: dict[str, tuple] = {}
+        for cam_name, cam in self.cameras.items():
+            if getattr(cam, "use_rgb", True):
+                features[cam_name] = (cam.height, cam.width, 3)
+            if getattr(cam, "use_depth", False):
+                features[f"{cam_name}_depth"] = (cam.height, cam.width, 1)
+        return features
+
+    @cached_property
+    def observation_features(self) -> dict[str, type | tuple]:
+        return {**self._joints_ft, **self._cameras_ft}
+
+    @cached_property
+    def action_features(self) -> dict[str, type]:
+        return self._joints_ft
+
+    @property
+    def is_connected(self) -> bool:
+        return self._handler is not None and all(cam.is_connected for cam in self.cameras.values())
+
+    @property
+    def is_calibrated(self) -> bool:
+        return True
+
+    @check_if_already_connected
+    def connect(self, calibrate: bool = True) -> None:
+        self._handler = _make_lcm_handler()
+        for cam in self.cameras.values():
+            cam.connect()
+
+        self.configure()
+        if self.config.connect_timeout_s > 0:
+            time.sleep(self.config.connect_timeout_s)
+
+        logger.info(f"{self} connected.")
+
+    def calibrate(self) -> None:
+        logger.info("%s does not require LeRobot-side calibration.", self)
+
+    def configure(self) -> None:
+        if self._handler is None:
+            return
+
+        self._set_moving_flags(set())
+
+    @check_if_not_connected
+    def get_observation(self) -> RobotObservation:
+        assert self._handler is not None
+
+        start = time.perf_counter()
+        with self._handler.joint_current_pos_lock:
+            joint_positions = np.asarray(self._handler.joint_current_pos, dtype=np.float32).copy()
+
+        obs_dict: RobotObservation = {
+            f"{joint_name}.pos": float(joint_positions[idx])
+            for idx, joint_name in enumerate(self.config.joint_names)
+        }
+        dt_ms = (time.perf_counter() - start) * 1e3
+        logger.debug(f"{self} read state: {dt_ms:.1f}ms")
+
+        for cam_key, cam in self.cameras.items():
+            if getattr(cam, "use_rgb", True):
+                start = time.perf_counter()
+                obs_dict[cam_key] = cam.read_latest()
+                dt_ms = (time.perf_counter() - start) * 1e3
+                logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+
+            if getattr(cam, "use_depth", False):
+                start = time.perf_counter()
+                obs_dict[f"{cam_key}_depth"] = cam.read_latest_depth()
+                dt_ms = (time.perf_counter() - start) * 1e3
+                logger.debug(f"{self} read {cam_key} depth: {dt_ms:.1f}ms")
+
+        return obs_dict
+
+    @check_if_not_connected
+    def send_action(self, action: RobotAction) -> RobotAction:
+        assert self._handler is not None
+
+        unknown_keys = set(action) - set(self.action_features)
+        if unknown_keys:
+            raise ValueError(f"Unknown wheeled_arm action keys: {sorted(unknown_keys)}")
+
+        with self._handler.joint_current_pos_lock:
+            package = np.asarray(self._handler.joint_current_pos, dtype=np.float32).copy()
+
+        goal_pos = {key: float(value) for key, value in action.items() if key.endswith(".pos")}
+
+        if self.config.max_relative_target is not None:
+            goal_present_pos = {
+                key: (target, float(package[self._joint_index_by_action_key[key]]))
+                for key, target in goal_pos.items()
+            }
+            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+
+        for key, value in goal_pos.items():
+            package[self._joint_index_by_action_key[key]] = value
+
+        self._set_moving_flags(set(goal_pos))
+        self._handler.upper_body_data_publisher(package)
+
+        return goal_pos
+
+    def _set_moving_flags(self, action_keys: set[str]) -> None:
+        assert self._handler is not None
+
+        controlled_parts = set(self.config.controlled_parts)
+        for part, flag_name in _PART_MOVING_FLAGS.items():
+            part_slice = _PART_SLICES.get(part)
+            part_action_keys = (
+                {f"{joint_name}.pos" for joint_name in self.config.joint_names[part_slice]}
+                if part_slice is not None
+                else set()
+            )
+            should_move = part in controlled_parts and bool(action_keys & part_action_keys)
+            setattr(self._handler, flag_name, should_move)
+
+    @check_if_not_connected
+    def disconnect(self) -> None:
+        assert self._handler is not None
+
+        if hasattr(self._handler, "stop"):
+            self._handler.stop()
+        self._handler = None
+
+        for cam in self.cameras.values():
+            cam.disconnect()
+
+        logger.info(f"{self} disconnected.")

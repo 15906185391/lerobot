@@ -1,0 +1,143 @@
+#!/usr/bin/env python
+
+# Copyright 2026 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import threading
+from unittest.mock import patch
+
+import numpy as np
+
+from lerobot.robots import make_robot_from_config
+from lerobot.robots.config import RobotConfig
+from lerobot.robots.wheeled_arm import WheeledArm, WheeledArmConfig
+from lerobot.robots.wheeled_arm.config_wheeled_arm import wheeled_arm_cameras_config
+
+
+class FakeLCMHandler:
+    def __init__(self):
+        self.joint_current_pos = np.arange(23, dtype=np.float32)
+        self.joint_current_pos_lock = threading.Lock()
+        self.last_package = None
+        self.stopped = False
+
+        for flag in (
+            "left_arm_moving",
+            "right_arm_moving",
+            "left_gripper_moving",
+            "right_gripper_moving",
+            "head_moving",
+            "waist_moving",
+            "leg_moving",
+        ):
+            setattr(self, flag, True)
+
+    def upper_body_data_publisher(self, package):
+        self.last_package = np.asarray(package).copy()
+
+    def stop(self):
+        self.stopped = True
+
+
+def _make_robot(**overrides):
+    handler = FakeLCMHandler()
+    with patch("lerobot.robots.wheeled_arm.wheeled_arm._make_lcm_handler", return_value=handler):
+        robot = WheeledArm(WheeledArmConfig(cameras={}, connect_timeout_s=0, **overrides))
+        robot.connect()
+    return robot, handler
+
+
+def test_wheeled_arm_config_is_registered():
+    assert "wheeled_arm" in RobotConfig.get_known_choices()
+    assert isinstance(make_robot_from_config(WheeledArmConfig(cameras={}, connect_timeout_s=0)), WheeledArm)
+
+
+def test_default_camera_config_uses_ros2_camera():
+    cameras = wheeled_arm_cameras_config()
+
+    assert list(cameras) == ["front"]
+    assert cameras["front"].type == "lerobot_camera_ros2"
+    assert cameras["front"].topic_name == "/camera/image_raw"
+
+
+def test_get_observation_reads_left_and_right_arm_joint_positions():
+    robot, _handler = _make_robot()
+
+    obs = robot.get_observation()
+
+    assert len(obs) == 14
+    assert obs["left_arm_0.pos"] == 0.0
+    assert obs["right_arm_0.pos"] == 7.0
+    assert obs["right_arm_6.pos"] == 13.0
+    assert "left_gripper.pos" not in obs
+
+
+def test_send_action_publishes_23_dim_package_for_arm_joints_only():
+    robot, handler = _make_robot()
+
+    returned = robot.send_action(
+        {
+            "left_arm_0.pos": 1.5,
+            "right_arm_6.pos": 2.5,
+        }
+    )
+
+    assert returned == {
+        "left_arm_0.pos": 1.5,
+        "right_arm_6.pos": 2.5,
+    }
+    assert handler.last_package[0] == 1.5
+    assert handler.last_package[13] == 2.5
+    assert handler.last_package[1] == 1.0
+    assert handler.last_package[14] == 14.0
+
+    assert handler.left_arm_moving is True
+    assert handler.right_arm_moving is True
+    assert handler.left_gripper_moving is False
+    assert handler.right_gripper_moving is False
+    assert handler.head_moving is False
+    assert handler.waist_moving is False
+    assert handler.leg_moving is False
+
+
+def test_send_action_respects_disabled_parts_and_relative_limit():
+    robot, handler = _make_robot(controlled_parts=["left_arm"], max_relative_target=2.0)
+
+    returned = robot.send_action({"left_arm_0.pos": 100.0, "right_arm_0.pos": 100.0})
+
+    assert returned == {"left_arm_0.pos": 2.0, "right_arm_0.pos": 9.0}
+    assert handler.last_package[0] == 2.0
+    assert handler.last_package[7] == 9.0
+    assert handler.left_arm_moving is True
+    assert handler.right_arm_moving is False
+
+
+def test_disconnect_stops_handler():
+    robot, handler = _make_robot()
+
+    robot.disconnect()
+
+    assert handler.stopped is True
+    assert robot.is_connected is False
+
+
+def test_unknown_action_key_raises():
+    robot, _handler = _make_robot()
+
+    try:
+        robot.send_action({"not_a_joint.pos": 1.0})
+    except ValueError as exc:
+        assert "not_a_joint.pos" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for an unknown wheeled_arm action key.")
