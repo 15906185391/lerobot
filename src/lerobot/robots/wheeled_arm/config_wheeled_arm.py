@@ -47,8 +47,8 @@ def wheeled_arm_cameras_config() -> dict[str, CameraConfig]:
         "front": LeRobotCameraROS2Config(
             topic_name="/camera/color/image_raw",
             node_name="wheeled_arm_front_camera",
-            width=1280,
-            height=720,
+            width=640,
+            height=480,
             fps=30,
         )
     }
@@ -72,6 +72,9 @@ class WheeledArmConfig(RobotConfig):
 
     # Wait after creating the LCM handler so subscriptions can receive the first robot state.
     connect_timeout_s: float = 1.0
+
+    # Manipulation LCM URL used to communicate with the robot controller.
+    lcm_url: str = "udpm://239.255.76.67:8880?ttl=1"
 
     # Robot joint feedback older than this is ignored by closed-loop teleoperators.
     # Set to None to accept the latest received feedback regardless of age.

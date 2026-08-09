@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import time
 import webbrowser
 from pathlib import Path
@@ -33,6 +34,21 @@ from .ik_utils import (
 )
 
 
+def require_visualization_dependencies() -> None:
+    missing = [
+        package_name
+        for module_name, package_name in (("viser", "viser"), ("yourdfpy", "yourdfpy"))
+        if importlib.util.find_spec(module_name) is None
+    ]
+    if missing:
+        raise ImportError(
+            "WheeledArmPico visualization requires "
+            f"{', '.join(f'`{package}`' for package in missing)}. "
+            "Install the missing package(s), or set `--teleop.visualize=false` if you only need "
+            "the Rerun data view from `--display_data=true --display_mode=rerun`."
+        )
+
+
 class WheeledArmPicoVisualizer:
     def __init__(
         self,
@@ -43,6 +59,7 @@ class WheeledArmPicoVisualizer:
         arm_q_indices: np.ndarray,
         urdf_path: Path,
     ) -> None:
+        require_visualization_dependencies()
         try:
             import viser
             import yourdfpy

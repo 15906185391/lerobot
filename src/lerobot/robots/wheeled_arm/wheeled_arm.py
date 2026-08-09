@@ -37,18 +37,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _make_lcm_handler() -> LCMHandler:
+def _make_lcm_handler(lcm_url: str) -> LCMHandler:
     try:
         from .hardware_interface.lcm_handler import LCMHandler
     except ModuleNotFoundError as exc:
         if exc.name == "lcm":
             raise ImportError(
                 "'lcm' is required to control wheeled_arm. Install the robot SDK dependencies "
-                "that provide the Python `lcm` module before connecting the robot."
+                "that provide the Python `lcm` module before connecting the robot. "
+                "For the `xr` conda environment, run: "
+                "`/home/kuanli/miniconda3/envs/xr/bin/python -m pip install lcm`."
             ) from exc
         raise
 
-    return LCMHandler()
+    try:
+        return LCMHandler(lcm_url=lcm_url)
+    except RuntimeError as exc:
+        if "Couldn't create LCM" in str(exc):
+            raise RuntimeError(
+                f"Could not create wheeled_arm LCM connection for URL '{lcm_url}'. "
+                "Ensure Linux has a multicast route for LCM. For loopback-only testing, "
+                "run: `sudo ip link set lo multicast on` and "
+                "`sudo ip route add 224.0.0.0/4 dev lo`."
+            ) from exc
+        raise
 
 
 _PART_SLICES: dict[str, slice] = {
@@ -130,7 +142,7 @@ class WheeledArm(Robot):
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
-        self._handler = _make_lcm_handler()
+        self._handler = _make_lcm_handler(self.config.lcm_url)
         for cam in self.cameras.values():
             cam.connect()
 

@@ -210,7 +210,141 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 - `WheeledArm.send_action()` 支持发送左右夹爪，并设置 `left_gripper_moving` / `right_gripper_moving`。
 - `WheeledArmPico.get_action()` 从 PICO trigger 生成 `left_gripper.pos` / `right_gripper.pos`。
 
+### 8. `wheeled_arm_pico` IK 依赖缺失
+
+现象：
+
+```text
+ModuleNotFoundError: No module named 'hppfcl'
+ImportError: wheeled_arm_pico requires Pinocchio/Pink IK dependencies plus the PICO SDK.
+```
+
+根因：
+
+- `wheeled_arm_pico` 运行 IK 时必须有 Pinocchio；默认开启 self-collision 时还需要 FCL 碰撞库。
+- 当前 `xr` 环境里缺 `pinocchio`，也缺 `hppfcl` / `coal`。
+
+处理：
+
+- `import_runtime_dependencies()` 会一次性列出缺失依赖，不再只停在第一个 import error。
+- FCL 后端兼容 `hppfcl` 和新版 `coal` 模块名。
+- 如果临时不需要 self-collision，可加：
+  - `--teleop.use_self_collision=false`
+
+注意：
+
+- 即使关闭 self-collision，仍然需要安装 `pinocchio`。
+- 当前 LeRobot 依赖集更推荐 Python 3.12+；Python 3.10 环境可能需要走 conda-forge 安装 Pinocchio/FCL。
+
+### 9. 默认 URDF 文件位置
+
+- `real_robot.urdf` 已放在：
+  - `src/lerobot/teleoperators/wheeled_arm_pico/assets/wheeled_robot_sim/urdf/real_robot.urdf`
+- `default_urdf_path()` 默认使用这个位置。
+- 日常运行采集或独立可视化时不需要再传 `--teleop.urdf_path` / `--urdf-path`。
+
+### 10. PICO/IK `viser` 可视化依赖缺失
+
+现象：
+
+```text
+ModuleNotFoundError: No module named 'viser'
+ImportError: WheeledArmPico visualization requires `viser` and `yourdfpy`.
+```
+
+根因：
+
+- `--teleop.visualize=true` 打开的是 PICO/IK 的 `viser` 界面，需要 `viser` 和 `yourdfpy`。
+- `--display_data=true --display_mode=rerun` 打开的是采集数据流的 Rerun 界面，不依赖 `viser`。
+
+处理：
+
+- 当前 `xr` 环境已通过 conda-forge 安装 `viser`。
+- 程序会在启动 PICO SDK 前先检查 `viser` / `yourdfpy`，避免可视化依赖缺失后设备侧异常退出。
+- 如果只需要 Rerun 数据界面，可关闭 PICO/IK 可视化：
+  - `--teleop.visualize=false`
+
+### 11. `wheeled_arm` LCM 依赖和 multicast route
+
+现象：
+
+```text
+ModuleNotFoundError: No module named 'lcm'
+ImportError: 'lcm' is required to control wheeled_arm.
+```
+
+处理：
+
+- 当前 `xr` 环境已通过 pip 安装 Python LCM binding：
+  - `/home/kuanli/miniconda3/envs/xr/bin/python -m pip install lcm`
+- `WheeledArmConfig` 增加 `lcm_url`，默认：
+  - `udpm://239.255.76.67:8880?ttl=1`
+- 如需切换 LCM 地址，可在 CLI 覆盖：
+  - `--robot.lcm_url='udpm://239.255.76.67:8880?ttl=1'`
+
+如果安装后出现：
+
+```text
+RuntimeError: Couldn't create LCM
+LCM requires a valid multicast route.
+```
+
+说明 Linux 当前网络没有可用 multicast route。仅本机/回环测试时可临时执行：
+
+```bash
+sudo ip link set lo multicast on
+sudo ip route add 224.0.0.0/4 dev lo
+```
+
+连接真实机器人时，应确保连接到机器人所在网络，并且该网络接口有 multicast route。
+
+### 12. 相机图像尺寸与 dataset feature 不一致
+
+现象：
+
+```text
+ValueError: The feature 'observation.images.front' of shape '(480, 640, 3)'
+does not have the expected shape '(720, 1280, 3)' or '(1280, 3, 720)'.
+```
+
+根因：
+
+- `wheeled_arm` 默认相机配置登记的是 1280x720。
+- 当前 ROS2 前置相机实际发布的是 640x480 图像。
+- 数据集 feature 在 `robot.connect()` 前根据 config 创建，因此 ROS2 camera 连接后读取到的实际尺寸不会反向更新本次 dataset metadata。
+
+处理：
+
+- `wheeled_arm_cameras_config()` 的默认 `front` 相机尺寸改为：
+  - `width=640`
+  - `height=480`
+
+注意：
+
+- 如果后续相机 topic 改成其他分辨率，需要同步修改 robot camera config，或在 CLI 中覆盖 `--robot.cameras=...`。
+
 ## 常用命令
+
+### 安装 Python 运行依赖
+
+在已有 conda 环境中安装当前 wheeled_arm/PICO 采集所需依赖：
+
+```bash
+bash scripts/setup_wheeled_arm_pico_conda.bash --env xr
+```
+
+如果要创建新环境：
+
+```bash
+bash scripts/setup_wheeled_arm_pico_conda.bash --create-env --env xr --python 3.12
+```
+
+该脚本会安装：
+
+- 本地 editable LeRobot：`pip install -e ".[core_scripts]"`
+- IK/碰撞/QP/可视化依赖：`pinocchio`、`hpp-fcl`、`qpsolvers`、`daqp`、`viser`、`yourdfpy`
+- LCM Python binding：`lcm`
+- PICO SDK：`XRoboToolkit-PC-Service-Pybind`
 
 ### 独立可视化验证，不连接机器人
 
@@ -231,6 +365,8 @@ lerobot-record \
   --robot.type=wheeled_arm \
   --teleop.type=wheeled_arm_pico \
   --teleop.visualize=true \
+  --display_data=true \
+  --display_mode=rerun \
   --dataset.repo_id=kuanli/wheeled_arm_pico_test \
   --dataset.single_task="PICO teleoperate wheeled arm" \
   --dataset.num_episodes=1 \
@@ -248,6 +384,8 @@ lerobot-record \
   --teleop.visualize=true \
   --teleop.gripper_open_pos=0.0 \
   --teleop.gripper_closed_pos=100.0 \
+  --display_data=true \
+  --display_mode=rerun \
   --dataset.repo_id=kuanli/wheeled_arm_pico_test \
   --dataset.single_task="PICO teleoperate wheeled arm" \
   --dataset.num_episodes=1 \
@@ -255,6 +393,9 @@ lerobot-record \
   --dataset.reset_time_s=5 \
   --dataset.push_to_hub=false
 ```
+
+`--teleop.visualize=true` 打开 PICO/IK 的 viser 界面；`--display_data=true --display_mode=rerun`
+打开数据采集流的 Rerun 界面，用于实时查看 observation、action、相机图像和 recording metadata。
 
 ### 本地数据集可视化
 
@@ -292,6 +433,19 @@ lerobot-dataset-viz \
   src/lerobot/teleoperators/wheeled_arm_pico/ik_utils.py \
   src/lerobot/teleoperators/wheeled_arm_pico/wheeled_arm_pico.py \
   src/lerobot/teleoperators/wheeled_arm_pico/wheel_arm_teleop.py
+```
+
+本次相机尺寸修复已通过：
+
+```bash
+/home/kuanli/miniconda3/envs/xr/bin/python -m py_compile \
+  src/lerobot/robots/wheeled_arm/config_wheeled_arm.py \
+  tests/robots/test_wheeled_arm.py
+
+git -c filter.lfs.process= -c filter.lfs.clean=cat -c filter.lfs.required=false diff --check -- \
+  src/lerobot/robots/wheeled_arm/config_wheeled_arm.py \
+  tests/robots/test_wheeled_arm.py \
+  src/lerobot/robots/wheeled_arm/WHEELED_ARM_PICO_HANDOFF.md
 ```
 
 已通过 mock 可视化短跑：

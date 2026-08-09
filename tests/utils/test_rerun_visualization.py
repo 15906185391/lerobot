@@ -36,6 +36,7 @@ def mock_rerun(monkeypatch):
     """
     calls = []
     blueprints = []
+    time_calls = []
 
     class DummyScalar:
         def __init__(self, value):
@@ -64,6 +65,9 @@ def mock_rerun(monkeypatch):
     def dummy_send_blueprint(blueprint, *a, **k):
         blueprints.append(blueprint)
 
+    def dummy_set_time(timeline, **kwargs):
+        time_calls.append((timeline, kwargs))
+
     # Mock the `rerun.blueprint` submodule used to build the layout.
     dummy_rrb = SimpleNamespace(
         Spatial2DView=lambda origin=None, name=None: SimpleNamespace(
@@ -85,6 +89,7 @@ def mock_rerun(monkeypatch):
         DepthImage=DummyDepthImage,
         components=SimpleNamespace(Colormap=SimpleNamespace(Viridis="viridis")),
         log=dummy_log,
+        set_time=dummy_set_time,
         send_blueprint=dummy_send_blueprint,
         init=lambda *a, **k: None,
         spawn=lambda *a, **k: None,
@@ -101,7 +106,7 @@ def mock_rerun(monkeypatch):
     importlib.reload(rv)
 
     # Expose the reloaded module, the call recorder and the captured blueprints
-    yield rv, calls, blueprints
+    yield rv, calls, blueprints, time_calls
 
 
 def _keys(calls):
@@ -130,7 +135,7 @@ def _views_by_kind(blueprint, kind):
 
 
 def test_log_rerun_data_envtransition_scalars_and_image(mock_rerun):
-    rv, calls, blueprints = mock_rerun
+    rv, calls, blueprints, _time_calls = mock_rerun
 
     # Build EnvTransition dict
     obs = {
@@ -203,7 +208,7 @@ def test_log_rerun_data_envtransition_scalars_and_image(mock_rerun):
 
 
 def test_log_rerun_data_plain_list_ordering_and_prefixes(mock_rerun):
-    rv, calls, blueprints = mock_rerun
+    rv, calls, blueprints, _time_calls = mock_rerun
 
     # First dict without prefixes treated as observation
     # Second dict without prefixes treated as action
@@ -263,7 +268,7 @@ def test_log_rerun_data_plain_list_ordering_and_prefixes(mock_rerun):
 
 
 def test_log_rerun_data_kwargs_only(mock_rerun):
-    rv, calls, blueprints = mock_rerun
+    rv, calls, blueprints, _time_calls = mock_rerun
 
     rv.log_rerun_data(
         observation={"observation.temp": 10.0, "observation.gray": np.zeros((8, 8, 1), dtype=np.uint8)},
@@ -299,7 +304,7 @@ def test_log_rerun_data_kwargs_only(mock_rerun):
 
 def test_log_rerun_data_blueprint_sent_only_once(mock_rerun):
     """The blueprint is built from the first call and not resent on subsequent calls."""
-    rv, calls, blueprints = mock_rerun
+    rv, calls, blueprints, _time_calls = mock_rerun
 
     rv.log_rerun_data(observation={"temp": 1.0}, action={"a": 2.0})
     assert len(blueprints) == 1
@@ -309,3 +314,32 @@ def test_log_rerun_data_blueprint_sent_only_once(mock_rerun):
     # Still only one blueprint, and the cached one is unchanged.
     assert len(blueprints) == 1
     assert rv.log_rerun_data.blueprint is first_blueprint
+
+
+def test_log_rerun_data_metadata_and_timelines(mock_rerun):
+    rv, calls, blueprints, time_calls = mock_rerun
+
+    rv.log_rerun_data(
+        observation={"temp": 1.0},
+        action={"a": 2.0},
+        metadata={"episode_index": 3, "is_recording": True},
+        frame_index=42,
+        timestamp=1.25,
+    )
+
+    assert time_calls == [
+        ("frame_index", {"sequence": 42}),
+        ("timestamp", {"timestamp": 1.25}),
+    ]
+
+    keys = set(_keys(calls))
+    assert "recording.episode_index" in keys
+    assert "recording.is_recording" in keys
+    assert float(_obj_for(calls, "recording.episode_index").value) == pytest.approx(3.0)
+    assert float(_obj_for(calls, "recording.is_recording").value) == pytest.approx(1.0)
+
+    ts_views = {v.name: v for v in _views_by_kind(blueprints[0], "TimeSeriesView")}
+    assert ts_views["recording"].contents == [
+        "recording.episode_index",
+        "recording.is_recording",
+    ]

@@ -114,10 +114,14 @@ class WheeledArmPico(Teleoperator):
             raise ValueError("`visualization_update_hz` must be non-negative.")
         self._dt = 1.0 / self.config.solve_frequency_hz
 
-        self._deps = import_runtime_dependencies()
+        self._deps = import_runtime_dependencies(require_collision_backend=self.config.use_self_collision)
         urdf_path = self.config.urdf_path or default_urdf_path()
         if not urdf_path.is_file():
-            raise FileNotFoundError(f"Cannot find wheeled_arm URDF: {urdf_path}")
+            raise FileNotFoundError(
+                f"Cannot find wheeled_arm URDF: {urdf_path}. "
+                "Provide the robot model with `--teleop.urdf_path=/path/to/real_robot.urdf`, "
+                "or place the URDF at the default bundled path."
+            )
 
         pin = self._deps.pin
         self._robot = pin.RobotWrapper.BuildFromURDF(
@@ -181,12 +185,15 @@ class WheeledArmPico(Teleoperator):
         for task in self._tasks:
             task.set_target_from_configuration(self._configuration)
 
+        if self.config.visualize:
+            from .visualization import WheeledArmPicoVisualizer, require_visualization_dependencies
+
+            require_visualization_dependencies()
+
         self._solver = select_solver(self._deps.qpsolvers, self.config.solver)
         self._xr_client = MockXrClient() if self.config.mock_xr else self._make_xr_client()
         self._last_action = self._make_action(self._configuration.q)
         if self.config.visualize:
-            from .visualization import WheeledArmPicoVisualizer
-
             self._visualizer = WheeledArmPicoVisualizer(
                 self.config,
                 self._deps,

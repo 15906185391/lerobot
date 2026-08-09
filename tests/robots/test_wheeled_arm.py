@@ -75,6 +75,8 @@ def test_default_camera_config_uses_ros2_camera():
     assert list(cameras) == ["front"]
     assert cameras["front"].type == "lerobot_camera_ros2"
     assert cameras["front"].topic_name == "/camera/color/image_raw"
+    assert cameras["front"].width == 640
+    assert cameras["front"].height == 480
 
 
 def test_get_observation_reads_left_and_right_arm_joint_positions():

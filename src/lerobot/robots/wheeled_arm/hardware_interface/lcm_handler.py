@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class LCMHandler:
-    def __init__(self):
+    def __init__(self, lcm_url: str = "udpm://239.255.76.67:8880?ttl=1"):
         self.dim = 23
         self.joint_current_pos = np.zeros(23)
         self.joint_current_speed = np.zeros(23)
@@ -62,7 +62,7 @@ class LCMHandler:
         self.leg_state_updated = threading.Event()
 
         # Manipulation LCM - 与控制器通信 (port 8880)
-        self.manip_lcm = lcm.LCM('udpm://239.255.76.67:8880?ttl=1')
+        self.manip_lcm = lcm.LCM(lcm_url)
 
         # 订阅控制器转发的Manipulation状态话题
         self.manip_lcm.subscribe('MANIP_LEFT_ARM_STATE', self.manip_left_arm_state_listener)

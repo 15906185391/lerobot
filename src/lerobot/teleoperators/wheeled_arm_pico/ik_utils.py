@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import importlib
 import sys
 import time
 from pathlib import Path
@@ -44,9 +45,7 @@ JOINT_COLORS = (
 def default_urdf_path() -> Path:
     return (
         Path(__file__).parent
-        / "pink"
-        / "examples"
-        / "robots"
+        / "assets"
         / PACKAGE_NAME
         / "urdf"
         / "real_robot.urdf"
@@ -60,23 +59,58 @@ def ensure_vendor_path() -> Path:
     return vendor_root
 
 
-def import_runtime_dependencies() -> SimpleNamespace:
+def import_runtime_dependencies(require_collision_backend: bool = True) -> SimpleNamespace:
     ensure_vendor_path()
+    missing = []
+
     try:
-        import hppfcl as fcl
         import pinocchio as pin
+    except ImportError as exc:
+        pin = None
+        missing.append(f"pinocchio (install package `pin`): {exc}")
+
+    fcl = None
+    if require_collision_backend:
+        fcl_errors = []
+        for module_name in ("hppfcl", "coal"):
+            try:
+                fcl = importlib.import_module(module_name)
+                break
+            except ImportError as exc:
+                fcl_errors.append(f"{module_name}: {exc}")
+        if fcl is None:
+            missing.append(
+                "collision geometry backend (install package `hpp-fcl` or `coal-library`; "
+                f"tried imports: {'; '.join(fcl_errors)})"
+            )
+
+    try:
         import qpsolvers
+    except ImportError as exc:
+        qpsolvers = None
+        missing.append(f"qpsolvers: {exc}")
+
+    try:
         import pink
         from pink import solve_ik
         from pink.barriers import SelfCollisionBarrier
         from pink.exceptions import NoSolutionFound
         from pink.tasks import FrameTask, PostureTask, Task
     except ImportError as exc:
+        pink = None
+        solve_ik = SelfCollisionBarrier = NoSolutionFound = FrameTask = PostureTask = Task = None
+        missing.append(f"bundled pink IK package: {exc}")
+
+    if missing:
         raise ImportError(
             "wheeled_arm_pico requires Pinocchio/Pink IK dependencies plus the PICO SDK. "
-            "Install runtime packages such as pin, hpp-fcl, qpsolvers, daqp and xrobotoolkit_sdk "
-            "in the current Python environment."
-        ) from exc
+            "Missing runtime dependencies in the current Python environment:\n"
+            + "\n".join(f"  - {item}" for item in missing)
+            + "\nInstall runtime packages such as `pin`, `hpp-fcl` or `coal-library`, "
+            "`qpsolvers`, `daqp`, and `xrobotoolkit_sdk`. Python 3.12+ is recommended "
+            "for the current LeRobot dependency set. To run without collision checking, "
+            "pass `--teleop.use_self_collision=false`."
+        )
 
     return SimpleNamespace(
         fcl=fcl,
