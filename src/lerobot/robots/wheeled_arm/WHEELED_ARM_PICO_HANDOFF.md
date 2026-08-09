@@ -381,10 +381,84 @@ bash scripts/setup_wheeled_arm_pico_conda.bash --create-env --env xr --python 3.
 
 该脚本会安装：
 
-- 本地 editable LeRobot：`pip install -e ".[core_scripts]"`
+- 本地 editable LeRobot：`pip install -e ".[core_scripts,gui]"`
 - IK/碰撞/QP/可视化依赖：`pinocchio`、`hpp-fcl`、`qpsolvers`、`daqp`、`viser`、`yourdfpy`
 - LCM Python binding：`lcm`
 - PICO SDK：`XRoboToolkit-PC-Service-Pybind`
+- 可选数据格式转换依赖：使用 `--with-conversion-deps` 时安装 `tensorflow`、`tensorflow-datasets`、
+  `h5py`、`ray[default]`、`datatrove[ray]`、`apache-beam`
+
+### PySide6 图形界面
+
+面向不熟悉命令行的用户，可直接启动桌面 GUI：
+
+```bash
+conda activate xr
+lerobot-wheeled-arm-gui
+```
+
+GUI 入口文件：
+
+- `src/lerobot/scripts/wheeled_arm_gui.py`
+
+GUI 当前封装了这些流程：
+
+- 数据采集：默认生成 `wheeled_arm` + `wheeled_arm_pico` 的 `lerobot-record` 命令，支持
+  Rerun 数据窗口、Rerun 机器人 3D、viser URDF 窗口、mock PICO、采集参数和高级 CLI 参数追加。
+- 数据集查看：生成 `lerobot-dataset-viz` 命令查看本地 episode；采集结束后会尝试从
+  `$HF_LEROBOT_HOME` 中自动识别最近生成的带时间戳数据集并填入查看页。
+- 数据集编辑：生成 `lerobot-edit-dataset` 命令，支持查看信息、删除 episode、拆分、合并、
+  删除 feature、修改任务文本、图片转视频、重算统计和重编码视频。GUI 会对修改原数据集的操作给出确认提示。
+  该页借鉴 Unitree 数据编辑器思路并在当前 GUI 中实现了 LeRobot 数据集预览器：
+  可加载本地 episode、播放/暂停、切换 episode、查看最多 4 路相机画面、拖动帧进度条，并可一键把当前
+  episode 填入“删除 Episode”。区间选择目前仅用于预览和记录范围，GUI 不直接裁剪帧；LeRobot v3 数据集
+  需要通过正式 dataset operation 同步更新 parquet/video/meta，不能按参考程序的方式直接删除图片和 JSON。
+- 格式转换：基于保留的 `GUI_reference/Any4LeRobotGUI/backend` 增加独立“格式转换”页，支持 OpenX/AgiBot/RoboMIND/LIBERO
+  转 LeRobot、LeRobot 转 RLDS，以及 LeRobot v1.6/v2.0/v2.1/v3.0 之间的常见版本转换。该页默认调用
+  `GUI_reference/Any4LeRobotGUI/backend` 下的转换脚本；`LeRobot v2.1 -> v3.0` 例外，优先调用当前项目维护的
+  `src/lerobot/scripts/convert_dataset_v21_to_v30.py`，避免使用参考目录里的旧拷贝。可在界面中改 Python 路径和 backend 路径。
+  `GUI_reference` 目录已经精简，只保留转换 backend；`LeRobot v1.6 -> v2.0` 仍依赖旧版 `lerobot.common.*` 环境，
+  当前环境中 GUI 会显示命令，但实际转换请切换到匹配旧版 LeRobot 的环境。
+  默认安装脚本不会安装 TensorFlow/Ray/Datatrove/Beam 等重依赖，如需运行这些转换，可执行：
+  `bash scripts/setup_wheeled_arm_pico_conda.bash --env xr --with-conversion-deps`。
+  如果 GUI 被安装到 conda site-packages 后误判项目根目录，可设置 `LEROBOT_PROJECT_ROOT=/home/kuanli/Documents/lerobot`；
+  GUI 也会在已保存的 Backend 路径不存在时自动回退到当前仓库的 `GUI_reference/Any4LeRobotGUI/backend`。
+- 常用命令：生成 `src/lerobot/scripts` 下常用脚本命令，当前包含 `lerobot-info`、`lerobot-find-cameras`、
+  `lerobot-find-port`、`lerobot-teleoperate`、`lerobot-replay`、`lerobot-calibrate`、
+  `lerobot-setup-motors`、`lerobot-find-joint-limits`、`lerobot-setup-can`、`lerobot-train`、
+  `lerobot-eval`、`lerobot-rollout`、`lerobot-annotate`、`lerobot-imgtransform-viz`、
+  `augment_dataset_quantile_stats`、`lerobot-convert-dcp` 和 `lerobot-train-tokenizer`。
+  其中 `find-port` 这类需要交互的脚本可通过 GUI 的“发送 Enter”按钮继续。
+  `lerobot-record`、`lerobot-dataset-viz`、`lerobot-edit-dataset` 和 `convert_dataset_v21_to_v30`
+  分别由“采集”“查看数据集”“编辑数据集”“格式转换”专页覆盖。
+
+GUI 仍然以子进程方式运行原始 CLI，并在右侧显示完整命令预览和运行日志；因此现场排查时，
+可以直接复制命令到终端复现。
+
+如果启动 GUI 时出现 Qt xcb 插件错误：
+
+```text
+qt.qpa.plugin: From 6.5.0, xcb-cursor0 or libxcb-cursor0 is needed
+Could not load the Qt platform plugin "xcb"
+```
+
+说明系统缺少 PySide6/Qt 的桌面运行库。安装：
+
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+  libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0 \
+  libegl1 libgl1
+```
+
+`scripts/setup_wheeled_arm_pico_conda.bash` 已默认检查并安装这些 Ubuntu 系统包；若不想安装系统包，
+可传 `--skip-system-packages`。
+
+如果当前用户没有 sudo 权限，也可在 conda 环境里补运行库：
+
+```bash
+conda install -n xr -c conda-forge -y xcb-util-cursor
+```
 
 ### 独立可视化验证，不连接机器人
 
@@ -459,6 +533,19 @@ lerobot-dataset-viz \
 ```
 
 不要把 `--root` 只写成 `/home/kuanli/.cache/huggingface/lerobot`，当前版本会把 root 当成数据集根目录本身，导致查找 `/meta/info.json` 失败。
+
+如果 `lerobot-dataset-viz` 输出：
+
+```text
+Some episodes in the provided episodes list are out of range for this dataset (0)
+Ignoring episode indices outside the dataset range [0, 0): [0]
+```
+
+说明该数据集目录存在，但 `meta/info.json` 里的 `total_episodes` 是 0，没有任何可查看 episode。
+这通常是采集初始化后中途失败或停止，尚未执行成功的 `dataset.save_episode()`。
+
+PySide6 GUI 已在打开数据集前检查 `total_episodes`，空数据集会在界面内提示；“使用最近采集”会跳过空目录，
+自动选择最近一个已保存 episode 的数据集。
 
 ## 验证记录
 

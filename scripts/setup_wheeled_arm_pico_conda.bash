@@ -10,7 +10,9 @@ PYTHON_VERSION="3.12"
 CREATE_ENV=0
 SKIP_EDITABLE=0
 SKIP_PICO_SDK=0
+SKIP_SYSTEM_PACKAGES=0
 SKIP_VERIFY=0
+WITH_CONVERSION_DEPS=0
 
 usage() {
     cat <<EOF
@@ -23,9 +25,14 @@ Options:
   --env NAME          Conda environment to use. Default: current env, or xr.
   --python VERSION    Python version used with --create-env. Default: 3.12.
   --create-env        Create the conda env if it does not already exist.
-  --skip-editable     Do not run pip install -e ".[core_scripts]".
+  --skip-editable     Do not run pip install -e ".[core_scripts,gui]".
   --skip-pico-sdk     Do not clone/install XRoboToolkit PICO SDK.
+  --skip-system-packages
+                       Do not install Ubuntu Qt/xcb packages needed by PySide6.
   --skip-verify       Do not run import verification at the end.
+  --with-conversion-deps
+                       Also install optional Any4LeRobot conversion dependencies
+                       such as tensorflow-datasets, h5py, ray, datatrove and apache-beam.
   -h, --help          Show this help.
 
 Examples:
@@ -67,8 +74,16 @@ while [[ $# -gt 0 ]]; do
             SKIP_PICO_SDK=1
             shift
             ;;
+        --skip-system-packages)
+            SKIP_SYSTEM_PACKAGES=1
+            shift
+            ;;
         --skip-verify)
             SKIP_VERIFY=1
+            shift
+            ;;
+        --with-conversion-deps)
+            WITH_CONVERSION_DEPS=1
             shift
             ;;
         -h|--help)
@@ -94,6 +109,47 @@ if [[ -f /etc/os-release ]]; then
         log "Warning: this script has only been tested on Ubuntu 22.04/24.04. Detected: ${VERSION_ID:-unknown}"
     fi
 fi
+
+install_qt_system_packages() {
+    if [[ "${SKIP_SYSTEM_PACKAGES}" -eq 1 ]]; then
+        return
+    fi
+    if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg-query >/dev/null 2>&1; then
+        log "Warning: apt/dpkg not found; skipping Qt/xcb system package installation."
+        return
+    fi
+
+    local packages=(
+        libxcb-cursor0
+        libxcb-icccm4
+        libxcb-image0
+        libxcb-keysyms1
+        libxcb-render-util0
+        libxcb-xinerama0
+        libxcb-xkb1
+        libxkbcommon-x11-0
+        libegl1
+        libgl1
+    )
+    local missing=()
+    local pkg
+    for pkg in "${packages[@]}"; do
+        if ! dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null | grep -q "install ok installed"; then
+            missing+=("${pkg}")
+        fi
+    done
+
+    if [[ "${#missing[@]}" -eq 0 ]]; then
+        log "Qt/xcb system packages are already installed."
+        return
+    fi
+
+    log "Installing Qt/xcb system packages for PySide6: ${missing[*]}"
+    sudo apt-get update
+    sudo apt-get install -y "${missing[@]}"
+}
+
+install_qt_system_packages
 
 if [[ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
     # shellcheck disable=SC1091
@@ -127,18 +183,33 @@ conda install -c conda-forge -y \
     qpsolvers \
     daqp \
     viser \
-    yourdfpy
+    yourdfpy \
+    xcb-util-cursor
 
 log "Upgrading pip."
 python -m pip install --upgrade pip
 
 if [[ "${SKIP_EDITABLE}" -eq 0 ]]; then
-    log "Installing LeRobot editable package with core_scripts extra."
-    python -m pip install -e "${REPO_ROOT}[core_scripts]"
+    log "Installing LeRobot editable package with core_scripts and gui extras."
+    python -m pip install -e "${REPO_ROOT}[core_scripts,gui]"
 fi
 
 log "Installing pip-only runtime packages."
 python -m pip install lcm
+
+if [[ "${WITH_CONVERSION_DEPS}" -eq 1 ]]; then
+    log "Installing optional data conversion packages."
+    python -m pip install \
+        tensorflow \
+        tensorflow-datasets \
+        h5py \
+        "ray[default]" \
+        datatrove \
+        "datatrove[ray]" \
+        apache-beam
+else
+    log "Skipping optional data conversion packages. Use --with-conversion-deps when needed."
+fi
 
 if [[ "${SKIP_PICO_SDK}" -eq 0 ]]; then
     DEP_DIR="${REPO_ROOT}/dependencies"
@@ -163,6 +234,7 @@ if [[ "${SKIP_VERIFY}" -eq 0 ]]; then
 import importlib
 import importlib.util
 import sys
+from ctypes.util import find_library
 
 required = [
     "pinocchio",
@@ -172,6 +244,7 @@ required = [
     "yourdfpy",
     "lcm",
     "rerun",
+    "PySide6",
 ]
 
 missing = []
@@ -183,6 +256,12 @@ for name in required:
 
 if not any(importlib.util.find_spec(name) is not None for name in ("hppfcl", "coal")):
     missing.append("hppfcl/coal: no collision backend importable")
+
+if not find_library("xcb-cursor"):
+    missing.append(
+        "libxcb-cursor0: Qt xcb runtime library not found. "
+        "Install Ubuntu Qt/xcb packages or rerun without --skip-system-packages."
+    )
 
 try:
     importlib.import_module("xrobotoolkit_sdk")
@@ -196,6 +275,7 @@ if missing:
     raise SystemExit(1)
 
 print("All wheeled_arm_pico runtime imports are available.")
+print("Launch the GUI with: lerobot-wheeled-arm-gui")
 PY
 fi
 

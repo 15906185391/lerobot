@@ -127,6 +127,9 @@ viz = [
     "rerun-sdk>=0.24.0,<0.34.0",
     "foxglove-sdk>=0.25.1,<0.26.0",
 ]
+gui = [
+    "PySide6>=6.7.0,<6.11.0",
+]
 # ── User-facing composite extras (map to CLI scripts) ─────
 # lerobot-record, lerobot-replay, lerobot-calibrate, lerobot-teleoperate, etc.
 core_scripts = ["lerobot[dataset]", "lerobot[hardware]", "lerobot[viz]"]
@@ -358,6 +361,7 @@ lerobot-edit-dataset="lerobot.scripts.lerobot_edit_dataset:main"
 lerobot-setup-can="lerobot.scripts.lerobot_setup_can:main"
 lerobot-annotate="lerobot.scripts.lerobot_annotate:main"
 lerobot-rollout="lerobot.scripts.lerobot_rollout:main"
+lerobot-wheeled-arm-gui="lerobot.scripts.wheeled_arm_gui:main"
 
 # ---------------- Tool Configurations ----------------
 
