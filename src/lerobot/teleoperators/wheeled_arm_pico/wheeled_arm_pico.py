@@ -149,8 +149,8 @@ class WheeledArmPico(Teleoperator):
             )
             self._collision_barrier = self._deps.SelfCollisionBarrier(
                 n_collision_pairs=len(self._robot.collision_model.collisionPairs),
-                gain=10.0,
-                safe_displacement_gain=5.0,
+                gain=self.config.self_collision_gain,
+                safe_displacement_gain=self.config.self_collision_safe_displacement_gain,
                 d_min=self.config.d_min,
             )
             self._barriers = [self._collision_barrier]
@@ -158,7 +158,15 @@ class WheeledArmPico(Teleoperator):
             self._barriers = []
 
         LockedJointsTask = make_locked_joints_task_class(self._deps.Task)
-        self._constraints = [LockedJointsTask(self._locked_q_indices, locked_v_indices, self._q_ref)]
+        self._constraints = [
+            LockedJointsTask(
+                self._locked_q_indices,
+                locked_v_indices,
+                self._q_ref,
+                gain=self.config.locked_joints_gain,
+                lm_damping=self.config.locked_joints_lm_damping,
+            )
+        ]
 
         self._configuration = self._deps.pink.Configuration(
             self._robot.model,
@@ -172,15 +180,21 @@ class WheeledArmPico(Teleoperator):
             LEFT_TCP,
             position_cost=self.config.position_cost,
             orientation_cost=self.config.orientation_cost,
+            lm_damping=self.config.frame_lm_damping,
             gain=self.config.task_gain,
         )
         right_task = self._deps.FrameTask(
             RIGHT_TCP,
             position_cost=self.config.position_cost,
             orientation_cost=self.config.orientation_cost,
+            lm_damping=self.config.frame_lm_damping,
             gain=self.config.task_gain,
         )
-        posture_task = self._deps.PostureTask(cost=self.config.posture_cost)
+        posture_task = self._deps.PostureTask(
+            cost=self.config.posture_cost,
+            lm_damping=self.config.posture_lm_damping,
+            gain=self.config.posture_gain,
+        )
         self._tasks = [left_task, right_task, posture_task]
         for task in self._tasks:
             task.set_target_from_configuration(self._configuration)
@@ -353,7 +367,9 @@ class WheeledArmPico(Teleoperator):
                     min_barrier,
                 )
                 return self._last_action.copy()
-            collision_status = "warning" if min_barrier < 0.01 else "safe"
+            collision_status = (
+                "warning" if min_barrier < self.config.collision_warning_distance else "safe"
+            )
         else:
             collision_status = "disabled"
 
@@ -363,9 +379,12 @@ class WheeledArmPico(Teleoperator):
                 self._tasks,
                 self._dt,
                 solver=self._solver,
+                damping=self.config.ik_damping,
+                limits=None if self.config.enforce_limits else [],
                 barriers=self._barriers,
                 constraints=self._constraints,
-                safety_break=False,
+                safety_break=self.config.ik_safety_break,
+                **self.config.solver_kwargs,
             )
         except self._deps.NoSolutionFound as exc:
             logger.warning("PICO IK solver failed: %s", exc)

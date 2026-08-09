@@ -242,8 +242,15 @@ def locked_joint_indices(model) -> tuple[np.ndarray, np.ndarray]:
 
 def make_locked_joints_task_class(task_cls):
     class LockedJointsTask(task_cls):
-        def __init__(self, q_indices: np.ndarray, v_indices: np.ndarray, target_q: np.ndarray):
-            super().__init__(cost=None, gain=1.0)
+        def __init__(
+            self,
+            q_indices: np.ndarray,
+            v_indices: np.ndarray,
+            target_q: np.ndarray,
+            gain: float = 1.0,
+            lm_damping: float = 0.0,
+        ):
+            super().__init__(cost=None, gain=gain, lm_damping=lm_damping)
             self.q_indices = q_indices
             self.v_indices = v_indices
             self.target_q = target_q.copy()

@@ -210,7 +210,39 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 - `WheeledArm.send_action()` 支持发送左右夹爪，并设置 `left_gripper_moving` / `right_gripper_moving`。
 - `WheeledArmPico.get_action()` 从 PICO trigger 生成 `left_gripper.pos` / `right_gripper.pos`。
 
-### 8. `wheeled_arm_pico` IK 依赖缺失
+### 8. PICO IK 调参接口
+
+`wheeled_arm_pico` 当前暴露的 IK 相关 CLI/config 参数包括：
+
+- Frame task:
+  - `--teleop.position_cost=5.0`
+  - `--teleop.orientation_cost=1.0`
+  - `--teleop.frame_lm_damping=0.0`
+  - `--teleop.task_gain=0.5`
+- Posture task:
+  - `--teleop.posture_cost=0.0001`
+  - `--teleop.posture_gain=1.0`
+  - `--teleop.posture_lm_damping=0.0`
+- Locked-joints hard constraint:
+  - `--teleop.locked_joints_gain=1.0`
+  - `--teleop.locked_joints_lm_damping=0.0`
+- QP / solve_ik:
+  - `--teleop.solver=daqp`
+  - `--teleop.ik_damping=1e-12`
+  - `--teleop.ik_safety_break=false`
+  - `--teleop.enforce_limits=true`
+  - `--teleop.solver_kwargs='{\"verbose\": false}'`
+- Self-collision barrier:
+  - `--teleop.use_self_collision=true`
+  - `--teleop.d_min=0.03`
+  - `--teleop.initial_ignore_distance=0.03`
+  - `--teleop.self_collision_gain=10.0`
+  - `--teleop.self_collision_safe_displacement_gain=5.0`
+  - `--teleop.collision_warning_distance=0.01`
+
+`position_cost` / `orientation_cost` 可传单个标量，也可传 3 维列表做各轴 anisotropic cost。
+
+### 9. `wheeled_arm_pico` IK 依赖缺失
 
 现象：
 
@@ -236,14 +268,14 @@ ImportError: wheeled_arm_pico requires Pinocchio/Pink IK dependencies plus the P
 - 即使关闭 self-collision，仍然需要安装 `pinocchio`。
 - 当前 LeRobot 依赖集更推荐 Python 3.12+；Python 3.10 环境可能需要走 conda-forge 安装 Pinocchio/FCL。
 
-### 9. 默认 URDF 文件位置
+### 10. 默认 URDF 文件位置
 
 - `real_robot.urdf` 已放在：
   - `src/lerobot/teleoperators/wheeled_arm_pico/assets/wheeled_robot_sim/urdf/real_robot.urdf`
 - `default_urdf_path()` 默认使用这个位置。
 - 日常运行采集或独立可视化时不需要再传 `--teleop.urdf_path` / `--urdf-path`。
 
-### 10. PICO/IK `viser` 可视化依赖缺失
+### 11. PICO/IK `viser` 可视化依赖缺失
 
 现象：
 
@@ -264,7 +296,7 @@ ImportError: WheeledArmPico visualization requires `viser` and `yourdfpy`.
 - 如果只需要 Rerun 数据界面，可关闭 PICO/IK 可视化：
   - `--teleop.visualize=false`
 
-### 11. `wheeled_arm` LCM 依赖和 multicast route
+### 12. `wheeled_arm` LCM 依赖和 multicast route
 
 现象：
 
@@ -298,7 +330,7 @@ sudo ip route add 224.0.0.0/4 dev lo
 
 连接真实机器人时，应确保连接到机器人所在网络，并且该网络接口有 multicast route。
 
-### 12. 相机图像尺寸与 dataset feature 不一致
+### 13. 相机图像尺寸与 dataset feature 不一致
 
 现象：
 
