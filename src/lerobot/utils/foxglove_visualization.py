@@ -284,6 +284,9 @@ def log_foxglove_data(
     observation: RobotObservation | None = None,
     action: RobotAction | None = None,
     compress_images: bool = False,
+    metadata: dict[str, float | int | bool] | None = None,
+    frame_index: int | None = None,
+    timestamp: float | None = None,
 ) -> None:
     """
     Logs observation and action data to a Foxglove WebSocket server for real-time visualization.
@@ -304,6 +307,9 @@ def log_foxglove_data(
         action: An optional dictionary containing action data to log.
         compress_images: Whether to JPEG-compress images before logging to save bandwidth in exchange
             for CPU and quality.
+        metadata: Optional scalar metadata to log on ``/recording/state``.
+        frame_index: Optional frame index to include in recording metadata.
+        timestamp: Optional timestamp in seconds to use as the Foxglove message time.
     """
 
     require_package("foxglove-sdk", extra="viz", import_name="foxglove")
@@ -311,7 +317,7 @@ def log_foxglove_data(
     if getattr(log_foxglove_data, "server", None) is None:
         raise RuntimeError("init_foxglove() must be called before log_foxglove_data().")
 
-    now = time.time_ns()
+    now = time.time_ns() if timestamp is None else int(timestamp * 1_000_000_000)
 
     if observation:
         obs_scalars: dict[str, float] = {}
@@ -345,6 +351,16 @@ def log_foxglove_data(
             elif isinstance(v, np.ndarray):
                 action_scalars.update(_labeled_scalars(key, v.flatten()))
         _log_foxglove_scalars(_foxglove_topic(ACTION), action_scalars, log_time=now)
+
+    if metadata or frame_index is not None:
+        metadata_scalars = dict(metadata or {})
+        if frame_index is not None:
+            metadata_scalars.setdefault("frame_index", frame_index)
+        _log_foxglove_scalars(
+            "/recording/state",
+            {k: float(v) for k, v in metadata_scalars.items() if _is_scalar(v)},
+            log_time=now,
+        )
 
 
 # ── Dataset playback over a Foxglove WebSocket server ─────────────────────

@@ -201,6 +201,18 @@ class RecordConfig:
             )
 
 
+def _next_dataset_frame_index(dataset: LeRobotDataset | None) -> int | None:
+    if dataset is None:
+        return None
+
+    frame_index = dataset.num_frames
+    writer = getattr(dataset, "writer", None)
+    episode_buffer = getattr(writer, "episode_buffer", None)
+    if episode_buffer is not None:
+        frame_index += episode_buffer["size"]
+    return frame_index
+
+
 """ --------------- record_loop() data flow --------------------------
        [ Robot ]
            V
@@ -248,6 +260,7 @@ def record_loop(
     display_data: bool = False,
     display_mode: str = "rerun",
     display_compressed_images: bool = False,
+    display_episode_index: int | None = None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -281,6 +294,7 @@ def record_loop(
 
     no_action_count = 0
     timestamp = 0
+    local_frame_index = 0
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
@@ -330,6 +344,8 @@ def record_loop(
                 )
             continue
 
+        display_frame_index = _next_dataset_frame_index(dataset)
+
         # Send action to robot
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
@@ -343,11 +359,25 @@ def record_loop(
             dataset.add_frame(frame)
 
         if display_data:
+            elapsed_s = time.perf_counter() - start_episode_t
+            metadata = {
+                "elapsed_s": elapsed_s,
+                "is_recording": dataset is not None,
+                "loop_frame_index": local_frame_index,
+            }
+            if display_episode_index is not None:
+                metadata["episode_index"] = display_episode_index
+            elif dataset is not None:
+                metadata["episode_index"] = dataset.num_episodes
+
             log_visualization_data(
                 display_mode,
                 observation=obs_processed,
                 action=action_values,
                 compress_images=display_compressed_images,
+                metadata=metadata,
+                frame_index=display_frame_index,
+                timestamp=display_frame_index / fps if display_frame_index is not None else None,
             )
 
         dt_s = time.perf_counter() - start_loop_t
@@ -361,6 +391,7 @@ def record_loop(
         precise_sleep(max(sleep_time_s, 0.0))
 
         timestamp = time.perf_counter() - start_episode_t
+        local_frame_index += 1
 
 
 @parser.wrap()
@@ -489,6 +520,7 @@ def record(
                     display_data=cfg.display_data,
                     display_mode=cfg.display_mode,
                     display_compressed_images=display_compressed_images,
+                    display_episode_index=dataset.num_episodes,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -510,6 +542,8 @@ def record(
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
                         display_mode=cfg.display_mode,
+                        display_compressed_images=display_compressed_images,
+                        display_episode_index=dataset.num_episodes,
                     )
 
                 if events["rerecord_episode"]:

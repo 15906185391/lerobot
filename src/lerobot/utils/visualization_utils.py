@@ -57,13 +57,30 @@ def log_visualization_data(
     observation: RobotObservation | None = None,
     action: RobotAction | None = None,
     compress_images: bool = False,
+    metadata: dict[str, float | int | bool] | None = None,
+    frame_index: int | None = None,
+    timestamp: float | None = None,
 ) -> None:
     """Logs observation/action data to the backend selected by ``display_mode``."""
 
     if display_mode == "rerun":
-        log_rerun_data(observation=observation, action=action, compress_images=compress_images)
+        log_rerun_data(
+            observation=observation,
+            action=action,
+            compress_images=compress_images,
+            metadata=metadata,
+            frame_index=frame_index,
+            timestamp=timestamp,
+        )
     elif display_mode == "foxglove":
-        log_foxglove_data(observation=observation, action=action, compress_images=compress_images)
+        log_foxglove_data(
+            observation=observation,
+            action=action,
+            compress_images=compress_images,
+            metadata=metadata,
+            frame_index=frame_index,
+            timestamp=timestamp,
+        )
     else:
         raise ValueError(f"Unknown display_mode '{display_mode}'. Expected one of {VISUALIZATION_MODES}.")
 

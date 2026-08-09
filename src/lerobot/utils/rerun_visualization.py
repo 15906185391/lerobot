@@ -73,7 +73,12 @@ def shutdown_rerun() -> None:
     rr.rerun_shutdown()
 
 
-def _build_blueprint(observation_paths: set[str], action_paths: set[str], image_paths: set[str]):
+def _build_blueprint(
+    observation_paths: set[str],
+    action_paths: set[str],
+    image_paths: set[str],
+    metadata_paths: set[str],
+):
     """Build a Rerun blueprint laying out camera images, observation and action scalars in separate views.
 
     Camera images, observation and action scalars are arranged in a grid.
@@ -88,22 +93,29 @@ def _build_blueprint(observation_paths: set[str], action_paths: set[str], image_
         views.append(rrb.TimeSeriesView(name="observation", contents=sorted(observation_paths)))
     if action_paths:
         views.append(rrb.TimeSeriesView(name="action", contents=sorted(action_paths)))
+    if metadata_paths:
+        views.append(rrb.TimeSeriesView(name="recording", contents=sorted(metadata_paths)))
 
     return rrb.Blueprint(rrb.Grid(*views))
 
 
-def _ensure_blueprint(observation_paths: set[str], action_paths: set[str], image_paths: set[str]) -> None:
+def _ensure_blueprint(
+    observation_paths: set[str],
+    action_paths: set[str],
+    image_paths: set[str],
+    metadata_paths: set[str],
+) -> None:
     """Build and send the blueprint once, from the first observation and action data."""
     if getattr(log_rerun_data, "blueprint", None) is not None:
         return
 
-    if not (observation_paths or action_paths or image_paths):
+    if not (observation_paths or action_paths or image_paths or metadata_paths):
         return
 
     # Safe + zero-overhead: `log_rerun_data` already ran the `require_package` guard and imported rerun.
     import rerun as rr
 
-    blueprint = _build_blueprint(observation_paths, action_paths, image_paths)
+    blueprint = _build_blueprint(observation_paths, action_paths, image_paths, metadata_paths)
     log_rerun_data.blueprint = blueprint
     rr.send_blueprint(blueprint)
 
@@ -112,6 +124,9 @@ def log_rerun_data(
     observation: RobotObservation | None = None,
     action: RobotAction | None = None,
     compress_images: bool = False,
+    metadata: dict[str, float | int | bool] | None = None,
+    frame_index: int | None = None,
+    timestamp: float | None = None,
 ) -> None:
     """
     Logs observation and action data to Rerun for real-time visualization.
@@ -134,14 +149,23 @@ def log_rerun_data(
         observation: An optional dictionary containing observation data to log.
         action: An optional dictionary containing action data to log.
         compress_images: Whether to compress images before logging to save bandwidth & memory in exchange for cpu and quality.
+        metadata: Optional scalar metadata to log under ``recording.*``.
+        frame_index: Optional frame index for Rerun's ``frame_index`` timeline.
+        timestamp: Optional timestamp in seconds for Rerun's ``timestamp`` timeline.
     """
 
     require_package("rerun-sdk", extra="viz", import_name="rerun")
     import rerun as rr
 
+    if frame_index is not None:
+        rr.set_time("frame_index", sequence=frame_index)
+    if timestamp is not None:
+        rr.set_time("timestamp", timestamp=timestamp)
+
     observation_paths: set[str] = set()
     action_paths: set[str] = set()
     image_paths: set[str] = set()
+    metadata_paths: set[str] = set()
 
     if observation:
         for k, v in observation.items():
@@ -188,4 +212,13 @@ def log_rerun_data(
                 rr.log(key, rr.Scalars(v.reshape(-1).astype(float)))
                 action_paths.add(key)
 
-    _ensure_blueprint(observation_paths, action_paths, image_paths)
+    if metadata:
+        for k, v in metadata.items():
+            if v is None:
+                continue
+            key = str(k) if str(k).startswith("recording.") else f"recording.{k}"
+            if _is_scalar(v):
+                rr.log(key, rr.Scalars(float(v)))
+                metadata_paths.add(key)
+
+    _ensure_blueprint(observation_paths, action_paths, image_paths, metadata_paths)
