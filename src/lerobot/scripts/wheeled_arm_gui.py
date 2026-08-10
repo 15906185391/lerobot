@@ -1485,6 +1485,7 @@ class HelpDialog(QDialog):
         tabs.addTab(self._page(_HELP_TELEOP_HTML), "遥操作流程")
         tabs.addTab(self._page(_HELP_DATASET_HTML), "数据集")
         tabs.addTab(self._page(_HELP_COMMANDS_HTML), "常用命令")
+        tabs.addTab(self._page(_HELP_JOINT_JOG_HTML), "关节点动")
         tabs.addTab(self._page(_HELP_TROUBLESHOOTING_HTML), "故障排查")
         layout.addWidget(tabs, 1)
 
@@ -1735,6 +1736,39 @@ _HELP_COMMANDS_HTML = """
 </div>
 """
 
+_HELP_JOINT_JOG_HTML = """
+<h1>异常姿态救援：关节点动</h1>
+<p class="lead">当机器人因异常或急停卡在不合适的位置时，可用关节点动小步移动到安全姿态。这个功能默认不运行，必须手动打开。</p>
+
+<div class="warn">
+  <b>安全前提：</b>关节点动会向实物机器人发送关节命令。启动前确认硬件急停可用、机器人周围清空、操作者能随时停止发布。
+</div>
+
+<h2>为什么单独启动</h2>
+<table>
+  <tr><th>设计</th><th>作用</th></tr>
+  <tr><td>主 GUI 只打开控制台</td><td>平时不会创建 LCM 连接，也不会打开可视化服务。</td></tr>
+  <tr><td>控制台内再手动连接</td><td>给操作者一次二次确认，避免误触发硬件链路。</td></tr>
+  <tr><td>从 LCM 新鲜反馈开始</td><td>每次发布前检查左右臂状态反馈，禁止从零位或旧状态发命令。</td></tr>
+  <tr><td>小步限速发布</td><td>点动和批量目标都会按最大速度逐步接近目标，不直接跳到远处。</td></tr>
+</table>
+
+<h2>推荐流程</h2>
+<table>
+  <tr><th>步骤</th><th>操作</th><th>确认</th></tr>
+  <tr><td>1</td><td>进入“关节点动”页，确认 LCM URL 和 URDF 路径。</td><td>命令预览正确。</td></tr>
+  <tr><td>2</td><td>点击“打开点动控制台”。</td><td>此时还没有连接机器人。</td></tr>
+  <tr><td>3</td><td>在新窗口点击“启动连接”。</td><td>状态显示“反馈新鲜”，viser 显示当前姿态。</td></tr>
+  <tr><td>4</td><td>点击“同步当前为目标”。</td><td>目标列等于当前反馈。</td></tr>
+  <tr><td>5</td><td>用单关节 +/- 小步点动，或勾选关节后点动到目标。</td><td>观察实物和 URDF 是否一致。</td></tr>
+  <tr><td>6</td><td>到达安全姿态后点击“停止发布”和“停止连接”。</td><td>控制台关闭硬件连接。</td></tr>
+</table>
+
+<div class="safe">
+  <b>默认目标：</b>控制台提供左臂、右臂和双臂默认采集姿态按钮，只是填入目标并勾选关节；真正移动仍需点击“点动到勾选目标”。
+</div>
+"""
+
 _HELP_TROUBLESHOOTING_HTML = """
 <h1>故障排查</h1>
 <p class="lead">优先看 GUI 右侧“运行提醒”和“运行日志”。下面是现场最常见的问题和第一步处理。</p>
@@ -1803,7 +1837,15 @@ Y: 重置 PICO 相对位姿基线，不直接移动机器人。
 2. 再编辑失败 episode、任务文本、统计或视频。
 3. 删除、覆盖、重编码前建议备份，或输出到新 Repo ID/root。
 
-五、故障排查
+五、异常姿态救援：关节点动
+- 主 GUI 的“关节点动”页只负责打开独立控制台，平时不会连接机器人。
+- 独立控制台内仍需手动点击“启动连接”，之后才会创建 LCM handler 和 viser URDF 可视化。
+- 每次发布前检查左右臂新鲜 LCM 反馈，禁止从零位或旧状态发命令。
+- 推荐先点击“同步当前为目标”，再用单关节 +/- 小步点动。
+- 左臂/右臂/双臂默认目标按钮只填入目标并勾选关节，真正移动仍需点击“点动到勾选目标”。
+- 到达安全姿态后点击“停止发布”和“停止连接”。
+
+六、故障排查
 - GUI 无法启动: 运行 setup 脚本安装 PySide6 和 Qt/xcb 系统库。
 - 缺少 lcm: python -m pip install lcm
 - 没有机器人反馈: 检查 LCM URL、组播路由和左右臂状态话题。
@@ -1822,6 +1864,7 @@ class WheeledArmGui(QMainWindow):
         self.edit_runner = ProcessRunner("数据集编辑")
         self.conversion_runner = ProcessRunner("格式转换")
         self.common_runner = ProcessRunner("常用命令")
+        self.joint_jog_runner = ProcessRunner("关节点动")
         self._last_record_base_repo_id = ""
         self._last_record_root = ""
         self._last_record_no_stamp = False
@@ -1844,6 +1887,7 @@ class WheeledArmGui(QMainWindow):
         self.update_edit_preview()
         self.update_conversion_preview()
         self.update_common_preview()
+        self.update_joint_jog_preview()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if (
@@ -1852,11 +1896,12 @@ class WheeledArmGui(QMainWindow):
             or self.edit_runner.is_running
             or self.conversion_runner.is_running
             or self.common_runner.is_running
+            or self.joint_jog_runner.is_running
         ):
             answer = QMessageBox.question(
                 self,
                 "仍有任务运行",
-                "采集、查看、编辑、转换或常用命令进程仍在运行。是否先发送停止信号并关闭窗口？",
+                "采集、查看、编辑、转换、常用命令或关节点动进程仍在运行。是否先发送停止信号并关闭窗口？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
@@ -1867,6 +1912,7 @@ class WheeledArmGui(QMainWindow):
             self.edit_runner.interrupt()
             self.conversion_runner.interrupt()
             self.common_runner.interrupt()
+            self.joint_jog_runner.interrupt()
         self._save_settings()
         super().closeEvent(event)
 
@@ -1907,11 +1953,13 @@ class WheeledArmGui(QMainWindow):
         self.edit_tab = self._make_edit_tab()
         self.conversion_tab = self._make_conversion_tab()
         self.common_tab = self._make_common_tab()
+        self.joint_jog_tab = self._make_joint_jog_tab()
         self.tabs.addTab(self.record_tab, "采集")
         self.tabs.addTab(self.viewer_tab, "查看数据集")
         self.tabs.addTab(self.edit_tab, "编辑数据集")
         self.tabs.addTab(self.conversion_tab, "格式转换")
         self.tabs.addTab(self.common_tab, "常用命令")
+        self.tabs.addTab(self.joint_jog_tab, "关节点动")
 
         sidebar = self._make_sidebar()
         root_layout.addWidget(sidebar, 1, 0)
@@ -1965,7 +2013,7 @@ class WheeledArmGui(QMainWindow):
         self.sidebar_group = QButtonGroup(self)
         self.sidebar_group.setExclusive(True)
         self.sidebar_buttons: list[QPushButton] = []
-        for index, label_text in enumerate(("采集", "查看", "编辑", "转换", "常用")):
+        for index, label_text in enumerate(("采集", "查看", "编辑", "转换", "常用", "点动")):
             button = QPushButton(label_text)
             button.setObjectName("SidebarButton")
             button.setCheckable(True)
@@ -2004,6 +2052,7 @@ class WheeledArmGui(QMainWindow):
             self.start_edit,
             self.start_conversion,
             self.start_common_command,
+            self.start_joint_jog,
         )
         callbacks[self.tabs.currentIndex()]()
 
@@ -2015,6 +2064,7 @@ class WheeledArmGui(QMainWindow):
             self.stop_edit,
             self.stop_conversion,
             self.stop_common_command,
+            self.stop_joint_jog,
         )
         callbacks[self.tabs.currentIndex()]()
 
@@ -2043,7 +2093,7 @@ class WheeledArmGui(QMainWindow):
         self.addAction(exit_action)
         file_menu.addAction(exit_action)
 
-        for index, label in enumerate(("采集", "查看数据集", "编辑数据集", "格式转换", "常用命令")):
+        for index, label in enumerate(("采集", "查看数据集", "编辑数据集", "格式转换", "常用命令", "关节点动")):
             action = QAction(label, self)
             action.triggered.connect(lambda _checked=False, tab_index=index: self.tabs.setCurrentIndex(tab_index))
             view_menu.addAction(action)
@@ -2496,6 +2546,89 @@ class WheeledArmGui(QMainWindow):
         self.common_dcp_checkpoint_dir.changed.connect(self.update_common_preview)
         self.common_tokenizer_root.changed.connect(self.update_common_preview)
         self.common_tokenizer_output_dir.changed.connect(self.update_common_preview)
+
+        return self._scrollable(page)
+
+    def _make_joint_jog_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 12, 12)
+        layout.setSpacing(14)
+
+        safety_box = QGroupBox("用途与安全边界")
+        safety_layout = QVBoxLayout(safety_box)
+        safety_text = QLabel(
+            "关节点动只用于异常姿态救援。点击“打开点动控制台”只会启动独立窗口；"
+            "独立窗口内仍需手动点击“启动连接”才会连接 LCM、读取反馈和打开 URDF 可视化。"
+            "每次发布前都会检查左右臂新鲜反馈，避免从零位或旧状态发命令。"
+        )
+        safety_text.setWordWrap(True)
+        safety_text.setObjectName("MutedLabel")
+        safety_layout.addWidget(safety_text)
+        layout.addWidget(safety_box)
+
+        config_box = QGroupBox("点动控制台启动参数")
+        form = QFormLayout(config_box)
+        self._setup_form_layout(form)
+        self.joint_jog_lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
+        self.joint_jog_urdf_path = PathPicker("默认使用 wheeled_arm_pico assets/real_robot.urdf", directory=False)
+        self.joint_jog_urdf_path.setText(str(DEFAULT_WHEELED_ARM_URDF))
+        self.joint_jog_visualize = QCheckBox("启动 viser URDF 可视化")
+        self.joint_jog_visualize.setChecked(True)
+        self.joint_jog_visualization_host = QLineEdit("0.0.0.0")
+        self.joint_jog_visualization_port = self._spin(1, 65535, 8092)
+        self.joint_jog_open_browser = QCheckBox("自动打开浏览器")
+        self.joint_jog_open_browser.setChecked(True)
+        form.addRow("LCM URL", self.joint_jog_lcm_url)
+        form.addRow("URDF", self.joint_jog_urdf_path)
+        form.addRow("", self.joint_jog_visualize)
+        form.addRow("viser host", self.joint_jog_visualization_host)
+        form.addRow("viser port", self.joint_jog_visualization_port)
+        form.addRow("", self.joint_jog_open_browser)
+        layout.addWidget(config_box)
+
+        workflow_box = QGroupBox("推荐操作流程")
+        workflow_layout = QVBoxLayout(workflow_box)
+        workflow = QLabel(
+            "1. 确认硬件急停可用，机器人周围清空。\n"
+            "2. 打开点动控制台，但先不要连接。\n"
+            "3. 在控制台点击“启动连接”，等待显示“反馈新鲜”。\n"
+            "4. 点击“同步当前为目标”，再用单关节 +/- 小步点动，或勾选关节后“点动到勾选目标”。\n"
+            "5. 到达安全姿态后点击“停止发布”和“停止连接”。"
+        )
+        workflow.setWordWrap(True)
+        workflow.setObjectName("MutedLabel")
+        workflow_layout.addWidget(workflow)
+        layout.addWidget(workflow_box)
+
+        button_row = QHBoxLayout()
+        self.start_joint_jog_btn = QPushButton("打开点动控制台")
+        self.start_joint_jog_btn.setObjectName("PrimaryButton")
+        self.stop_joint_jog_btn = QPushButton("关闭点动控制台")
+        self.stop_joint_jog_btn.setObjectName("DangerButton")
+        self.stop_joint_jog_btn.setEnabled(False)
+        self.copy_joint_jog_btn = QPushButton("复制命令")
+        self.start_joint_jog_btn.clicked.connect(self.start_joint_jog)
+        self.stop_joint_jog_btn.clicked.connect(self.stop_joint_jog)
+        self.copy_joint_jog_btn.clicked.connect(
+            lambda: self.copy_command(self.joint_jog_command_preview.toPlainText())
+        )
+        button_row.addWidget(self.start_joint_jog_btn)
+        button_row.addWidget(self.stop_joint_jog_btn)
+        button_row.addWidget(self.copy_joint_jog_btn)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+        layout.addStretch(1)
+
+        for widget in (
+            self.joint_jog_lcm_url,
+            self.joint_jog_visualize,
+            self.joint_jog_visualization_host,
+            self.joint_jog_visualization_port,
+            self.joint_jog_open_browser,
+        ):
+            self._connect_preview_signal(widget, self.update_joint_jog_preview)
+        self.joint_jog_urdf_path.changed.connect(self.update_joint_jog_preview)
 
         return self._scrollable(page)
 
@@ -3238,12 +3371,15 @@ class WheeledArmGui(QMainWindow):
         self.conversion_command_preview.setReadOnly(True)
         self.common_command_preview = QPlainTextEdit()
         self.common_command_preview.setReadOnly(True)
+        self.joint_jog_command_preview = QPlainTextEdit()
+        self.joint_jog_command_preview.setReadOnly(True)
         for edit in (
             self.record_command_preview,
             self.viewer_command_preview,
             self.edit_command_preview,
             self.conversion_command_preview,
             self.common_command_preview,
+            self.joint_jog_command_preview,
         ):
             edit.setObjectName("CommandPreview")
             edit.setFont(QFont("monospace", 10))
@@ -3253,6 +3389,7 @@ class WheeledArmGui(QMainWindow):
         self.preview_tabs.addTab(self.edit_command_preview, "编辑")
         self.preview_tabs.addTab(self.conversion_command_preview, "转换")
         self.preview_tabs.addTab(self.common_command_preview, "常用")
+        self.preview_tabs.addTab(self.joint_jog_command_preview, "点动")
         self.preview_tabs.setMinimumHeight(240)
         preview_layout.addWidget(self.preview_tabs)
         layout.addWidget(preview_box, 1)
@@ -3568,6 +3705,11 @@ class WheeledArmGui(QMainWindow):
         self.common_runner.failed.connect(lambda message: self.handle_runner_failure("常用", message))
         self.common_runner.finished.connect(self._on_common_finished)
 
+        self.joint_jog_runner.started.connect(lambda command: self._on_started("点动", command))
+        self.joint_jog_runner.output.connect(lambda line: self.handle_runner_output("点动", line))
+        self.joint_jog_runner.failed.connect(lambda message: self.handle_runner_failure("点动", message))
+        self.joint_jog_runner.finished.connect(self._on_joint_jog_finished)
+
     def _load_settings(self) -> None:
         self.repo_id.setText(self.settings.value("record/repo_id", self.repo_id.text()))
         self.task.setText(self.settings.value("record/task", self.task.text()))
@@ -3608,6 +3750,30 @@ class WheeledArmGui(QMainWindow):
             self.settings.value("common/custom_module", self.common_custom_module.text())
         )
         self.common_advanced_args.setPlainText(self.settings.value("common/advanced_args", ""))
+        self.joint_jog_lcm_url.setText(
+            self.settings.value("joint_jog/lcm_url", self.joint_jog_lcm_url.text())
+        )
+        self.joint_jog_urdf_path.setText(
+            self.settings.value("joint_jog/urdf_path", self.joint_jog_urdf_path.text())
+        )
+        self.joint_jog_visualization_host.setText(
+            self.settings.value("joint_jog/visualization_host", self.joint_jog_visualization_host.text())
+        )
+        self.joint_jog_visualization_port.setValue(
+            int(self.settings.value("joint_jog/visualization_port", self.joint_jog_visualization_port.value()))
+        )
+        self.joint_jog_visualize.setChecked(
+            _settings_bool(
+                self.settings.value("joint_jog/visualize", self.joint_jog_visualize.isChecked()),
+                self.joint_jog_visualize.isChecked(),
+            )
+        )
+        self.joint_jog_open_browser.setChecked(
+            _settings_bool(
+                self.settings.value("joint_jog/open_browser", self.joint_jog_open_browser.isChecked()),
+                self.joint_jog_open_browser.isChecked(),
+            )
+        )
 
     def _save_settings(self) -> None:
         self.settings.setValue("record/repo_id", self.repo_id.text())
@@ -3638,6 +3804,12 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("common/replay_root", self.common_replay_root.text())
         self.settings.setValue("common/custom_module", self.common_custom_module.text())
         self.settings.setValue("common/advanced_args", self.common_advanced_args.toPlainText())
+        self.settings.setValue("joint_jog/lcm_url", self.joint_jog_lcm_url.text())
+        self.settings.setValue("joint_jog/urdf_path", self.joint_jog_urdf_path.text())
+        self.settings.setValue("joint_jog/visualization_host", self.joint_jog_visualization_host.text())
+        self.settings.setValue("joint_jog/visualization_port", self.joint_jog_visualization_port.value())
+        self.settings.setValue("joint_jog/visualize", self.joint_jog_visualize.isChecked())
+        self.settings.setValue("joint_jog/open_browser", self.joint_jog_open_browser.isChecked())
 
     def build_record_command(self) -> list[str]:
         command = _module_command("lerobot.scripts.lerobot_record")
@@ -4173,6 +4345,16 @@ class WheeledArmGui(QMainWindow):
             command.extend(shlex.split(extra))
         return command
 
+    def build_joint_jog_command(self) -> list[str]:
+        command = _module_command("lerobot.scripts.wheeled_arm_joint_jog")
+        command.extend(["--lcm-url", self.joint_jog_lcm_url.text().strip()])
+        command.extend(["--urdf-path", self.joint_jog_urdf_path.text()])
+        command.extend(["--visualization-host", self.joint_jog_visualization_host.text().strip() or "0.0.0.0"])
+        command.extend(["--visualization-port", str(self.joint_jog_visualization_port.value())])
+        command.append("--visualize" if self.joint_jog_visualize.isChecked() else "--no-visualize")
+        command.append("--open-browser" if self.joint_jog_open_browser.isChecked() else "--no-open-browser")
+        return command
+
     @Slot()
     def update_record_preview(self, *_args) -> None:
         try:
@@ -4220,6 +4402,10 @@ class WheeledArmGui(QMainWindow):
         except (ValueError, json.JSONDecodeError) as exc:
             text = f"常用命令参数解析失败：{exc}"
         self.common_command_preview.setPlainText(text)
+
+    @Slot()
+    def update_joint_jog_preview(self, *_args) -> None:
+        self.joint_jog_command_preview.setPlainText(_format_command(self.build_joint_jog_command()))
 
     def validate_record_form(self) -> bool:
         if not self.repo_id.text().strip():
@@ -4499,6 +4685,24 @@ class WheeledArmGui(QMainWindow):
             return False
         return True
 
+    def validate_joint_jog_form(self) -> bool:
+        if not self.joint_jog_lcm_url.text().strip():
+            QMessageBox.warning(self, "缺少 LCM URL", "请填写机器人 LCM URL。")
+            return False
+        urdf_path = Path(self.joint_jog_urdf_path.text()).expanduser()
+        if not urdf_path.exists():
+            QMessageBox.warning(self, "URDF 不存在", f"请确认 URDF 路径存在：\n{urdf_path}")
+            return False
+        answer = QMessageBox.question(
+            self,
+            "确认打开关节点动",
+            "关节点动用于异常姿态救援，后续可能向实物机器人发送关节命令。\n\n"
+            "打开控制台不会自动连接机器人；请在新窗口内确认急停和工作空间安全后，再手动启动连接。\n\n"
+            "确认打开吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def _edit_operation_needs_confirmation(self, operation: str) -> bool:
         if operation == "modify_tasks":
             return True
@@ -4618,6 +4822,23 @@ class WheeledArmGui(QMainWindow):
         QTimer.singleShot(3000, self._offer_common_kill_if_running)
 
     @Slot()
+    def start_joint_jog(self) -> None:
+        if not self.validate_joint_jog_form():
+            return
+        self._save_settings()
+        if self.joint_jog_runner.start(self.build_joint_jog_command()):
+            self.start_joint_jog_btn.setEnabled(False)
+            self.stop_joint_jog_btn.setEnabled(True)
+            self.status_label.setText("关节点动控制台运行中")
+            self.preview_tabs.setCurrentWidget(self.joint_jog_command_preview)
+
+    @Slot()
+    def stop_joint_jog(self) -> None:
+        self._stop_requested_sources.add("点动")
+        self.joint_jog_runner.interrupt()
+        QTimer.singleShot(3000, self._offer_joint_jog_kill_if_running)
+
+    @Slot()
     def fill_latest_dataset(self) -> None:
         latest = find_latest_local_dataset(
             self.repo_id.text(),
@@ -4670,6 +4891,11 @@ class WheeledArmGui(QMainWindow):
         if not self.common_runner.is_running:
             return
         self.common_runner.kill()
+
+    def _offer_joint_jog_kill_if_running(self) -> None:
+        if not self.joint_jog_runner.is_running:
+            return
+        self.joint_jog_runner.kill()
 
     def _on_started(self, name: str, command: str) -> None:
         self.clear_runtime_alert()
@@ -4750,6 +4976,17 @@ class WheeledArmGui(QMainWindow):
         self._stop_requested_sources.discard("常用")
         self._refresh_visual_state()
 
+    @Slot(int)
+    def _on_joint_jog_finished(self, code: int) -> None:
+        self.start_joint_jog_btn.setEnabled(True)
+        self.stop_joint_jog_btn.setEnabled(False)
+        self.status_label.setText(self._current_status_text())
+        self.statusBar().showMessage(f"关节点动{_readable_exit(code)}")
+        self.append_log("点动", f"进程{_readable_exit(code)}")
+        self._maybe_show_failure_dialog("点动", code)
+        self._stop_requested_sources.discard("点动")
+        self._refresh_visual_state()
+
     def _current_status_text(self) -> str:
         if self.record_runner.is_running:
             return "采集中"
@@ -4761,6 +4998,8 @@ class WheeledArmGui(QMainWindow):
             return "转换中"
         if self.common_runner.is_running:
             return "常用命令运行中"
+        if self.joint_jog_runner.is_running:
+            return "关节点动控制台运行中"
         return "未运行"
 
     def _has_running_process(self) -> bool:
@@ -4770,6 +5009,7 @@ class WheeledArmGui(QMainWindow):
             or self.edit_runner.is_running
             or self.conversion_runner.is_running
             or self.common_runner.is_running
+            or self.joint_jog_runner.is_running
         )
 
     def _refresh_visual_state(self) -> None:
