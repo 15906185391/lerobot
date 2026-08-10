@@ -261,6 +261,126 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 
 `position_cost` / `orientation_cost` 可传单个标量，也可传 3 维列表做各轴 anisotropic cost。
 
+#### 30Hz 实物首测推荐 IK 参数
+
+当数据采集频率为 30Hz 时，建议 `solve_frequency_hz` 与采集/控制循环保持一致，也设为 30。
+不要为了“更稳”随意把 IK 频率设成 10/20Hz，因为当前 teleop 中 `solve_frequency_hz`
+会决定 IK 积分步长 `dt`；如果实际外层循环仍以 30Hz 调用，较低的 solve frequency 可能导致单步积分更大。
+
+首次上实物建议先使用偏保守、偏稳的参数，优先验证没有跳变和明显抖动：
+
+```bash
+--teleop.scale=0.5 \
+--teleop.position_only=true \
+--teleop.task_gain=0.25 \
+--teleop.position_cost=3.0 \
+--teleop.orientation_cost=0.2 \
+--teleop.frame_lm_damping=1e-3 \
+--teleop.ik_damping=1e-6 \
+--teleop.posture_cost=1e-3 \
+--teleop.posture_gain=0.5 \
+--teleop.use_self_collision=true \
+--teleop.d_min=0.04 \
+--teleop.self_collision_gain=5.0 \
+--teleop.self_collision_safe_displacement_gain=2.0 \
+--teleop.enforce_limits=true \
+--teleop.solve_frequency_hz=30
+```
+
+参数含义和首测理由：
+
+- `position_only=true`：首测先只跟踪末端位置。姿态跟踪更容易把 PICO 手柄姿态抖动放大到腕部/肘部。
+- `scale=0.5`：降低 PICO 位移到末端位移的比例，先牺牲灵敏度换稳定性。
+- `task_gain=0.25`：降低 FrameTask 跟踪增益，让目标跟踪更柔和。
+- `position_cost=3.0` / `orientation_cost=0.2`：位置为主，弱化姿态约束，减少腕部为了追姿态快速摆动。
+- `frame_lm_damping=1e-3`：给 FrameTask 加 LM damping，靠近奇异位形或目标快速变化时更稳。
+- `ik_damping=1e-6`：比默认 `1e-12` 更保守，改善数值稳定性。
+- `posture_cost=1e-3` / `posture_gain=0.5`：让冗余关节更愿意贴近参考姿态，减少肘部自由漂移。
+- `use_self_collision=true` / `enforce_limits=true`：首次实物测试建议保留自碰撞和关节限位。
+- `self_collision_gain=5.0` / `self_collision_safe_displacement_gain=2.0`：比默认更温和，避免接近 barrier 时动作突然弹开。
+
+实物首测顺序：
+
+1. 不按 grip，只连接，确认机器人保持当前姿态。
+2. 只按单侧 grip，手柄只做 1 到 2 cm 小幅平移。
+3. 先测试单臂，再测试双臂。
+4. 先保持 `position_only=true`，稳定后再尝试 `position_only=false`。
+5. 若稳定，再逐步提高 `scale`、提高 `task_gain`、降低 `frame_lm_damping`。
+
+如果观察到机器人抖动，优先按以下顺序调整：
+
+1. 降低 `--teleop.scale`。
+2. 降低 `--teleop.task_gain`。
+3. 保持或切回 `--teleop.position_only=true`。
+4. 提高 `--teleop.frame_lm_damping`，例如 `1e-3 -> 3e-3 -> 1e-2`。
+5. 提高 `--teleop.ik_damping`，例如 `1e-6 -> 1e-5`。
+6. 降低 `--teleop.orientation_cost`。
+7. 略微提高 `--teleop.posture_cost`，例如 `1e-3 -> 3e-3`。
+
+不建议首次实物测试关闭 `enforce_limits` 或 `use_self_collision`。这两个选项更适合短时排查问题，
+不适合作为首测默认配置。
+
+#### 实物首测总建议
+
+实物首测建议按“安全、可观测、可回退”三条线准备。第一次上实物不要急着追求“跟手”，
+先追求“慢但完全可预测”：只要不跳、不抖、不乱跑，后续手感可以逐步调回来。
+
+安全策略：
+
+- 第一次测试只做空载、小幅、低速动作，工作空间内不要放物体。
+- 硬件急停一定先验证有效，再启动 teleop。
+- 开始时不要按 grip，只连接并观察机器人是否保持当前位置。
+- 每次改 IK 参数只改一两个，不要一次改很多。
+- 保留 `enforce_limits=true` 和 `use_self_collision=true`。
+
+推荐启动顺序：
+
+1. 先确认 LCM 左右臂状态持续发布。
+2. 打开 GUI，但先不采集。
+3. 用“常用命令 > 遥操作”先跑短时间测试。
+4. 只测试单臂 grip，小幅平移 1 到 2 cm。
+5. 再测试双臂。
+6. 最后再进入正式数据采集。
+
+重点观察：
+
+- 不按 grip 时机器人是否完全静止。
+- 按 grip 瞬间是否跳变。
+- 松开 grip 后是否保持当前位置。
+- PICO 小幅移动时，关节是否连续、无突跳。
+- Rerun/viser 中机器人状态是否和实物一致。
+- LCM feedback 是否持续新鲜，没有间歇超时。
+
+如果出现抖动，优先按以下方向处理：
+
+1. 降低 `scale`。
+2. 降低 `task_gain`。
+3. 确认或切回 `position_only=true`。
+4. 提高 `frame_lm_damping`。
+5. 提高 `ik_damping`。
+6. 降低 `orientation_cost`。
+7. 小幅提高 `posture_cost`。
+
+现场建议额外准备：
+
+- 开一个终端实时看 GUI 日志，或复制 GUI 里的命令单独运行，方便看到完整 traceback。
+- 记录每次测试使用的参数组合，不要靠记忆。
+- 正式采集前，用关节点动控制台确认能从异常位置安全回到默认姿态。
+- 第一轮数据采集建议每集时间短一点，例如 10 到 15 秒；确认保存和复位流程稳定后再加长。
+
+一个实用的首测最小参数组合：
+
+```bash
+--teleop.scale=0.5 \
+--teleop.position_only=true \
+--teleop.task_gain=0.25 \
+--teleop.frame_lm_damping=1e-3 \
+--teleop.ik_damping=1e-6 \
+--teleop.posture_cost=1e-3 \
+--teleop.use_self_collision=true \
+--teleop.enforce_limits=true
+```
+
 ### 9. `wheeled_arm_pico` IK 依赖缺失
 
 现象：
