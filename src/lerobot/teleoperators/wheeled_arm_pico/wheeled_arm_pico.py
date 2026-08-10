@@ -90,6 +90,7 @@ class WheeledArmPico(Teleoperator):
         self._left_mapper = RelativeTeleopTarget()
         self._right_mapper = RelativeTeleopTarget()
         self._last_reset_button = False
+        self._last_recording_control_buttons: dict[str, bool] = {}
         self._gripper_positions = {
             f"{name}.pos": self.config.gripper_open_pos for name in self.gripper_names
         }
@@ -247,6 +248,63 @@ class WheeledArmPico(Teleoperator):
     def reset_baseline(self) -> None:
         self._left_mapper.reset()
         self._right_mapper.reset()
+
+    @check_if_not_connected
+    def get_recording_control(self) -> str | None:
+        """Return a keyboard-compatible recording control triggered by a PICO button.
+
+        The return values match ``lerobot.utils.keyboard_input.apply_recording_control``:
+        ``"right"`` advances the current recording phase, ``"left"`` requests a re-record,
+        and ``"esc"`` stops the whole recording session.
+        """
+        if not self.config.recording_control:
+            return None
+
+        assert self._xr_client is not None
+
+        controls = (
+            (self.config.recording_advance_button, "right"),
+            (self.config.recording_rerecord_button, "left"),
+            (self.config.recording_stop_button, "esc"),
+        )
+        for button_name, control in controls:
+            if not button_name:
+                continue
+            try:
+                pressed = bool(self._xr_client.get_button_state_by_name(button_name))
+            except Exception as exc:
+                logger.warning(
+                    "Could not read PICO recording control button '%s': %s",
+                    button_name,
+                    exc,
+                )
+                continue
+
+            was_pressed = self._last_recording_control_buttons.get(button_name, False)
+            self._last_recording_control_buttons[button_name] = pressed
+            if pressed and not was_pressed:
+                logger.info(
+                    "PICO recording control '%s' triggered by button '%s'.", control, button_name
+                )
+                return control
+
+        return None
+
+    def emergency_stop_requested(self) -> bool:
+        """Return True while the configured PICO emergency stop button is pressed."""
+        button_name = self.config.emergency_stop_button
+        if not button_name or self._xr_client is None:
+            return False
+
+        try:
+            pressed = bool(self._xr_client.get_button_state_by_name(button_name))
+        except Exception as exc:
+            logger.warning("Could not read PICO emergency stop button '%s': %s", button_name, exc)
+            return False
+
+        if pressed:
+            logger.warning("PICO emergency stop requested by button '%s'.", button_name)
+        return pressed
 
     @check_if_not_connected
     def send_feedback(self, feedback: dict) -> None:

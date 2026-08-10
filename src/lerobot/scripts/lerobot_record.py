@@ -157,7 +157,7 @@ from lerobot.teleoperators.keyboard import KeyboardTeleop
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dicts
 from lerobot.utils.import_utils import register_third_party_plugins
-from lerobot.utils.keyboard_input import init_keyboard_listener
+from lerobot.utils.keyboard_input import apply_recording_control, init_keyboard_listener
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import (
     init_logging,
@@ -191,6 +191,9 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    # If True, run teleop without saving until the operator advances with keyboard/PICO controls.
+    # Useful when the operator cannot reach the keyboard while staging the robot.
+    wait_for_episode_start: bool = False
 
     def __post_init__(self):
         if self.teleop is None:
@@ -211,6 +214,56 @@ def _next_dataset_frame_index(dataset: LeRobotDataset | None) -> int | None:
     if episode_buffer is not None:
         frame_index += episode_buffer["size"]
     return frame_index
+
+
+def _poll_teleop_recording_control(teleop: Teleoperator | list[Teleoperator] | None, events: dict) -> None:
+    if isinstance(teleop, list):
+        teleops = teleop
+    elif teleop is None:
+        teleops = []
+    else:
+        teleops = [teleop]
+
+    for teleop_item in teleops:
+        get_recording_control = getattr(teleop_item, "get_recording_control", None)
+        if not callable(get_recording_control):
+            continue
+        control = get_recording_control()
+        if control is None:
+            continue
+        apply_recording_control(control, events)
+        return
+
+
+def _teleop_emergency_stop_requested(teleop: Teleoperator | list[Teleoperator] | None) -> bool:
+    if isinstance(teleop, list):
+        teleops = teleop
+    elif teleop is None:
+        teleops = []
+    else:
+        teleops = [teleop]
+
+    for teleop_item in teleops:
+        emergency_stop_requested = getattr(teleop_item, "emergency_stop_requested", None)
+        if callable(emergency_stop_requested) and emergency_stop_requested():
+            return True
+    return False
+
+
+def _sync_teleop_feedback_from_robot(robot: Robot, teleop: Teleoperator | list[Teleoperator] | None) -> None:
+    if not isinstance(teleop, Teleoperator):
+        return
+    if robot.name != "wheeled_arm" or not getattr(robot, "has_valid_feedback", True):
+        return
+
+    send_feedback = getattr(teleop, "send_feedback", None)
+    if not callable(send_feedback):
+        return
+
+    send_feedback(robot.get_observation())
+    reset_baseline = getattr(teleop, "reset_baseline", None)
+    if callable(reset_baseline):
+        reset_baseline()
 
 
 """ --------------- record_loop() data flow --------------------------
@@ -255,7 +308,7 @@ def record_loop(
     ],  # runs after robot
     dataset: LeRobotDataset | None = None,
     teleop: Teleoperator | list[Teleoperator] | None = None,
-    control_time_s: int | None = None,
+    control_time_s: int | float | None = None,
     single_task: str | None = None,
     display_data: bool = False,
     display_mode: str = "rerun",
@@ -296,7 +349,7 @@ def record_loop(
     timestamp = 0
     local_frame_index = 0
     start_episode_t = time.perf_counter()
-    while timestamp < control_time_s:
+    while control_time_s is None or timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
         if events["exit_early"]:
@@ -319,6 +372,7 @@ def record_loop(
             act = teleop.get_action()
             if robot.name == "unitree_g1":
                 teleop.send_feedback(obs)
+            _poll_teleop_recording_control(teleop, events)
 
             # Applies a pipeline to the raw teleop action, default is IdentityProcessor
             act_processed_teleop = teleop_action_processor((act, obs))
@@ -331,6 +385,7 @@ def record_loop(
             keyboard_action = teleop_keyboard.get_action()
             base_action = robot._from_keyboard_to_base_action(keyboard_action)
             act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
+            _poll_teleop_recording_control(teleop, events)
             act_processed_teleop = teleop_action_processor((act, obs))
             action_values = act_processed_teleop
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
@@ -343,6 +398,9 @@ def record_loop(
                     "The robot won't be at its rest position at the start of the next episode."
                 )
             continue
+
+        if events["exit_early"]:
+            break
 
         display_frame_index = _next_dataset_frame_index(dataset)
 
@@ -501,6 +559,7 @@ def record(
         if teleop is not None:
             teleop.connect()
         robot.connect()
+        _sync_teleop_feedback_from_robot(robot, teleop)
 
         listener, events = init_keyboard_listener()
 
@@ -512,6 +571,31 @@ def record(
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                if cfg.wait_for_episode_start:
+                    log_say(
+                        f"Waiting for episode {dataset.num_episodes} start command",
+                        cfg.play_sounds,
+                    )
+                    record_loop(
+                        robot=robot,
+                        events=events,
+                        fps=cfg.dataset.fps,
+                        teleop_action_processor=teleop_action_processor,
+                        robot_action_processor=robot_action_processor,
+                        robot_observation_processor=robot_observation_processor,
+                        teleop=teleop,
+                        control_time_s=None,
+                        single_task=cfg.dataset.single_task,
+                        display_data=cfg.display_data,
+                        display_mode=cfg.display_mode,
+                        display_compressed_images=display_compressed_images,
+                        display_episode_index=dataset.num_episodes,
+                    )
+                    if events["stop_recording"]:
+                        break
+                    events["exit_early"] = False
+                    events["rerecord_episode"] = False
+
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
                 record_loop(
                     robot=robot,
@@ -536,6 +620,17 @@ def record(
                     (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
                 ):
                     log_say("Reset the environment", cfg.play_sounds)
+                    reset_to_rest_pose = getattr(robot, "reset_to_rest_pose", None)
+                    if callable(reset_to_rest_pose):
+                        reset_completed = reset_to_rest_pose(
+                            stop_requested=lambda: _teleop_emergency_stop_requested(teleop)
+                        )
+                        if not reset_completed:
+                            events["stop_recording"] = True
+                            events["exit_early"] = True
+                            log_say("Emergency stop requested during robot reset", cfg.play_sounds)
+                            break
+                        _sync_teleop_feedback_from_robot(robot, teleop)
 
                     record_loop(
                         robot=robot,

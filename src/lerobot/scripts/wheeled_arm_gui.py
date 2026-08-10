@@ -106,11 +106,14 @@ try:
     from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
+        QButtonGroup,
         QCheckBox,
         QComboBox,
+        QDialog,
         QFileDialog,
         QFormLayout,
         QFrame,
+        QGraphicsDropShadowEffect,
         QGridLayout,
         QGroupBox,
         QHBoxLayout,
@@ -125,6 +128,7 @@ try:
         QSizePolicy,
         QSpinBox,
         QStackedWidget,
+        QTextBrowser,
         QTabWidget,
         QTextEdit,
         QVBoxLayout,
@@ -277,6 +281,14 @@ DEFAULT_WHEELED_ARM_URDF = (
 
 def _bool_arg(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _settings_bool(value, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in {"1", "true", "yes", "on"}
 
 
 def _module_command(module: str) -> list[str]:
@@ -1108,6 +1120,161 @@ class PathPicker(QWidget):
             self.edit.setText(selected)
 
 
+class HelpDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Wheeled Arm PICO 使用说明")
+        self.setMinimumSize(QSize(860, 640))
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("Wheeled Arm PICO 使用说明")
+        title.setObjectName("DialogTitle")
+        subtitle = QLabel("采集、遥操作、复位、查看和数据处理的现场操作速查。")
+        subtitle.setObjectName("MutedLabel")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._page(_HELP_RECORDING_HTML), "采集")
+        tabs.addTab(self._page(_HELP_TELEOP_HTML), "PICO 遥操作")
+        tabs.addTab(self._page(_HELP_DATASET_HTML), "数据集")
+        tabs.addTab(self._page(_HELP_COMMANDS_HTML), "常用命令")
+        tabs.addTab(self._page(_HELP_TROUBLESHOOTING_HTML), "故障排查")
+        layout.addWidget(tabs, 1)
+
+        button_row = QHBoxLayout()
+        copy_btn = QPushButton("复制说明")
+        close_btn = QPushButton("关闭")
+        close_btn.setObjectName("PrimaryButton")
+        copy_btn.clicked.connect(self._copy_all)
+        close_btn.clicked.connect(self.accept)
+        button_row.addStretch(1)
+        button_row.addWidget(copy_btn)
+        button_row.addWidget(close_btn)
+        layout.addLayout(button_row)
+
+    def _page(self, html: str) -> QTextBrowser:
+        page = QTextBrowser()
+        page.setReadOnly(True)
+        page.setObjectName("HelpText")
+        page.setStyleSheet(
+            "QTextBrowser#HelpText, QTextBrowser#HelpText viewport {"
+            "background-color: #ffffff; color: #172033;"
+            "}"
+        )
+        page.viewport().setStyleSheet("background-color: #ffffff; color: #172033;")
+        page.document().setDefaultStyleSheet(
+            "body { background-color: #ffffff; color: #172033; } "
+            "h2 { color: #101827; } "
+            "pre, code { background-color: #eef3f8; color: #172033; }"
+        )
+        page.setHtml(f"<body>{html}</body>")
+        return page
+
+    def _copy_all(self) -> None:
+        QApplication.clipboard().setText(HELP_PLAIN_TEXT)
+
+
+_HELP_RECORDING_HTML = """
+<h2>数据采集流程</h2>
+<ol>
+  <li>确认机器人控制器、PICO 服务、相机和 LCM 网络已经启动。</li>
+  <li>在“采集”页填写 Repo ID、任务、集数、单集秒数、FPS 和 LCM URL。</li>
+  <li>保持“等待 PICO 开始每集”开启时，程序会先遥操作但不保存，按 PICO A 开始保存当前集。</li>
+  <li>采集过程中右侧“命令预览”会展示实际执行命令，“运行日志”会持续输出进程日志。</li>
+  <li>每集结束后，程序会调用 wheeled_arm 的 movej 复位，再进入重置等待阶段。</li>
+  <li>复位 movej 过程中如发现异常，按住 PICO X 会停止继续发布复位轨迹并结束采集。</li>
+  <li>采集完成后可在“查看数据集”页点击“使用最近采集”并打开数据集。</li>
+</ol>
+<p><b>默认数据目录：</b>GUI 使用 LeRobot 的 HF_LEROBOT_HOME。自定义 root 时，查看和编辑也要填写同一个 root。</p>
+"""
+
+_HELP_TELEOP_HTML = """
+<h2>PICO 遥操作</h2>
+<ul>
+  <li>开始遥操作时，record 会从 LCM 读取当前机器人左右臂关节状态，并同步到 PICO IK 初始位姿。</li>
+  <li>左右 grip 超过阈值后，对应手臂才跟随控制器移动；松开后保持当前机器人末端位置。</li>
+  <li>trigger 映射到左右夹爪开合；开合范围可通过高级参数覆盖。</li>
+  <li>Y 默认重置 PICO 相对位姿基线，不直接移动机器人。</li>
+  <li>A 进入下一阶段或开始当前 episode；B 丢弃并重录当前 episode；X 停止整次采集。</li>
+  <li>机器人自动复位期间，X 也是急停按钮；按下后 movej 插补会中断并关闭 moving flags。</li>
+</ul>
+<h2>复位姿态</h2>
+<p>episode 间复位使用 movej。目标角度会从度转换为弧度：</p>
+<pre>左臂: [20, 70, -75, 100, -25, 0, 0]
+右臂: [-20, 70, 75, 100, 25, 0, 0]</pre>
+"""
+
+_HELP_DATASET_HTML = """
+<h2>查看与编辑数据集</h2>
+<ul>
+  <li>“查看数据集”用于启动 Rerun 或 Foxglove 查看指定 episode。</li>
+  <li>“编辑数据集”支持查看信息、删除 episode、拆分、合并、删除 feature、修改任务文本和重算统计。</li>
+  <li>编辑前先确认输入 Repo ID/root；会生成新数据集的操作需要填写输出 Repo ID/root。</li>
+  <li>内置预览可播放 episode，并把当前 episode 填入“删除 Episode”。</li>
+  <li>转换页面向 OpenX、AgiBot、RoboMIND、LIBERO、RLDS 和 LeRobot 版本转换。</li>
+</ul>
+<p>执行删除、覆盖、重编码等操作前，GUI 会弹出确认框；重要数据建议先备份。</p>
+"""
+
+_HELP_COMMANDS_HTML = """
+<h2>常用命令</h2>
+<ul>
+  <li>“系统信息”检查 Python、LeRobot、PyTorch、CUDA、FFmpeg 等环境。</li>
+  <li>“查找相机”和“查找串口”用于采集前确认硬件。</li>
+  <li>“遥操作”可不保存数据，只测试 PICO、IK、LCM 和可视化链路。</li>
+  <li>“回放 Episode”会把数据集动作重新下发给 wheeled_arm。</li>
+  <li>“训练策略”“评估策略”“策略 Rollout”用于数据采集后的训练和部署验证。</li>
+</ul>
+<p>所有页签都会生成命令预览；不确定时先复制命令到终端运行，便于定位环境问题。</p>
+"""
+
+_HELP_TROUBLESHOOTING_HTML = """
+<h2>故障排查</h2>
+<ul>
+  <li><b>GUI 无法启动：</b>运行 setup 脚本安装 PySide6 和 Qt/xcb 系统库。</li>
+  <li><b>缺少 lcm：</b>在当前 conda 环境执行 <code>python -m pip install lcm</code>。</li>
+  <li><b>没有机器人反馈：</b>确认 LCM URL、组播路由、控制器状态话题和左右臂状态是否正常。</li>
+  <li><b>PICO 不动：</b>确认 XRoboToolkit SDK 已安装，PICO 服务运行，控制器名称与配置一致。</li>
+  <li><b>IK 报碰撞或无解：</b>可临时在高级参数加入 <code>--teleop.use_self_collision=false</code> 排查。</li>
+  <li><b>相机无图：</b>先用“常用命令 > 查找相机”确认 topic、分辨率和 FPS。</li>
+  <li><b>数据集找不到：</b>确认 Repo ID 是否带用户名，以及 root 是否和采集时一致。</li>
+</ul>
+"""
+
+HELP_PLAIN_TEXT = """Wheeled Arm PICO 使用说明
+
+数据采集:
+1. 确认机器人控制器、PICO 服务、相机和 LCM 网络已经启动。
+2. 在“采集”页填写 Repo ID、任务、集数、单集秒数、FPS 和 LCM URL。
+3. “等待 PICO 开始每集”开启时，按 PICO A 开始保存当前集。
+4. 每集结束后会用 movej 复位，再进入重置等待阶段。
+5. 复位过程中如发现异常，按住 PICO X 会中断 movej 复位并停止采集。
+
+PICO 按键:
+A 进入下一阶段或开始当前 episode。
+B 丢弃并重录当前 episode。
+X 停止整次采集；复位 movej 期间也作为急停按钮。
+Y 重置 PICO 相对位姿基线，不直接移动机器人。
+
+复位姿态:
+左臂: [20, 70, -75, 100, -25, 0, 0] 度
+右臂: [-20, 70, 75, 100, 25, 0, 0] 度
+程序会转换为弧度并通过 movej 下发。
+
+故障排查:
+- GUI 无法启动: 运行 setup 脚本安装 PySide6 和 Qt/xcb 系统库。
+- 缺少 lcm: python -m pip install lcm
+- 没有机器人反馈: 检查 LCM URL、组播路由和左右臂状态话题。
+- PICO 不动: 检查 XRoboToolkit SDK、PICO 服务和控制器名称。
+- IK 碰撞/无解: 可临时加 --teleop.use_self_collision=false 排查。
+"""
+
+
 class WheeledArmGui(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -1123,7 +1290,7 @@ class WheeledArmGui(QMainWindow):
         self._last_record_resume = False
 
         self.setWindowTitle("LeRobot Wheeled Arm 控制台")
-        self.setMinimumSize(QSize(1180, 760))
+        self.setMinimumSize(QSize(1280, 800))
         self._build_ui()
         self._connect_runners()
         self._load_settings()
@@ -1179,6 +1346,16 @@ class WheeledArmGui(QMainWindow):
         title_block.addWidget(subtitle)
         root_layout.addLayout(title_block, 0, 0, 1, 2)
 
+        self.help_btn = QPushButton("使用说明")
+        self.help_btn.setObjectName("HelpButton")
+        self.help_btn.clicked.connect(self.show_help)
+        root_layout.addWidget(
+            self.help_btn,
+            0,
+            2,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
+        )
+
         self.tabs = QTabWidget()
         self.record_tab = self._make_record_tab()
         self.viewer_tab = self._make_viewer_tab()
@@ -1190,21 +1367,147 @@ class WheeledArmGui(QMainWindow):
         self.tabs.addTab(self.edit_tab, "编辑数据集")
         self.tabs.addTab(self.conversion_tab, "格式转换")
         self.tabs.addTab(self.common_tab, "常用命令")
-        root_layout.addWidget(self.tabs, 1, 0)
+
+        sidebar = self._make_sidebar()
+        root_layout.addWidget(sidebar, 1, 0)
+        root_layout.addWidget(self.tabs, 1, 1)
 
         right_panel = self._make_right_panel()
         self.tabs.currentChanged.connect(self.preview_tabs.setCurrentIndex)
-        root_layout.addWidget(right_panel, 1, 1)
-        root_layout.setColumnStretch(0, 5)
-        root_layout.setColumnStretch(1, 4)
+        self.tabs.currentChanged.connect(self._sync_sidebar)
+        root_layout.addWidget(right_panel, 1, 2)
+        root_layout.setColumnStretch(0, 0)
+        root_layout.setColumnStretch(1, 5)
+        root_layout.setColumnStretch(2, 4)
         root_layout.setRowStretch(1, 1)
 
         self.setCentralWidget(root)
         self.statusBar().showMessage("就绪")
 
+        self._build_menu_bar()
+
+    @Slot()
+    def show_help(self) -> None:
+        dialog = HelpDialog(self)
+        dialog.exec()
+
+    def _make_sidebar(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("SidebarPanel")
+        panel.setFixedWidth(178)
+        self._apply_panel_shadow(panel)
+
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 16, 14, 16)
+        layout.setSpacing(8)
+
+        label = QLabel("工作区")
+        label.setObjectName("SidebarTitle")
+        layout.addWidget(label)
+
+        self.sidebar_group = QButtonGroup(self)
+        self.sidebar_group.setExclusive(True)
+        self.sidebar_buttons: list[QPushButton] = []
+        for index, label_text in enumerate(("采集", "查看", "编辑", "转换", "常用")):
+            button = QPushButton(label_text)
+            button.setObjectName("SidebarButton")
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, tab_index=index: self.tabs.setCurrentIndex(tab_index)
+            )
+            self.sidebar_group.addButton(button, index)
+            self.sidebar_buttons.append(button)
+            layout.addWidget(button)
+
+        self.sidebar_buttons[0].setChecked(True)
+        layout.addStretch(1)
+
+        quick_help = QPushButton("F1 帮助")
+        quick_help.setObjectName("SidebarGhostButton")
+        quick_help.clicked.connect(self.show_help)
+        layout.addWidget(quick_help)
+        return panel
+
+    def _sync_sidebar(self, index: int) -> None:
+        if hasattr(self, "sidebar_buttons") and 0 <= index < len(self.sidebar_buttons):
+            self.sidebar_buttons[index].setChecked(True)
+
+    def _apply_panel_shadow(self, widget: QWidget) -> None:
+        shadow = QGraphicsDropShadowEffect(widget)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 10)
+        shadow.setColor(QColor(31, 45, 70, 42))
+        widget.setGraphicsEffect(shadow)
+
+    @Slot()
+    def start_active_tab(self) -> None:
+        callbacks = (
+            self.start_recording,
+            self.start_viewer,
+            self.start_edit,
+            self.start_conversion,
+            self.start_common_command,
+        )
+        callbacks[self.tabs.currentIndex()]()
+
+    @Slot()
+    def stop_active_tab(self) -> None:
+        callbacks = (
+            self.stop_recording,
+            self.stop_viewer,
+            self.stop_edit,
+            self.stop_conversion,
+            self.stop_common_command,
+        )
+        callbacks[self.tabs.currentIndex()]()
+
+    def _build_menu_bar(self) -> None:
+        file_menu = self.menuBar().addMenu("文件")
+        view_menu = self.menuBar().addMenu("视图")
+        run_menu = self.menuBar().addMenu("运行")
+        help_menu = self.menuBar().addMenu("帮助")
+
         copy_action = QAction("复制当前命令", self)
+        copy_action.setShortcut("Ctrl+Shift+C")
         copy_action.triggered.connect(self.copy_active_command)
         self.addAction(copy_action)
+        file_menu.addAction(copy_action)
+
+        clear_log_action = QAction("清空运行日志", self)
+        clear_log_action.setShortcut("Ctrl+L")
+        clear_log_action.triggered.connect(self.log_view.clear)
+        self.addAction(clear_log_action)
+        file_menu.addAction(clear_log_action)
+
+        file_menu.addSeparator()
+        exit_action = QAction("退出", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        self.addAction(exit_action)
+        file_menu.addAction(exit_action)
+
+        for index, label in enumerate(("采集", "查看数据集", "编辑数据集", "格式转换", "常用命令")):
+            action = QAction(label, self)
+            action.triggered.connect(lambda _checked=False, tab_index=index: self.tabs.setCurrentIndex(tab_index))
+            view_menu.addAction(action)
+
+        run_current_action = QAction("运行当前页命令", self)
+        run_current_action.setShortcut("Ctrl+R")
+        run_current_action.triggered.connect(self.start_active_tab)
+        self.addAction(run_current_action)
+        run_menu.addAction(run_current_action)
+
+        stop_current_action = QAction("停止当前页任务", self)
+        stop_current_action.setShortcut("Ctrl+.")
+        stop_current_action.triggered.connect(self.stop_active_tab)
+        self.addAction(stop_current_action)
+        run_menu.addAction(stop_current_action)
+
+        help_action = QAction("打开使用说明", self)
+        help_action.setShortcut("F1")
+        help_action.triggered.connect(self.show_help)
+        self.addAction(help_action)
+        help_menu.addAction(help_action)
 
     def _make_record_tab(self) -> QWidget:
         page = QWidget()
@@ -1233,6 +1536,8 @@ class WheeledArmGui(QMainWindow):
         self.private = QCheckBox("私有数据集")
         self.play_sounds = QCheckBox("英文语音提示")
         self.play_sounds.setChecked(True)
+        self.wait_for_episode_start = QCheckBox("等待 PICO 开始每集")
+        self.wait_for_episode_start.setChecked(True)
 
         dataset_form.addRow("Repo ID", self.repo_id)
         dataset_form.addRow("任务", self.task)
@@ -1248,6 +1553,7 @@ class WheeledArmGui(QMainWindow):
         dataset_form.addRow("", self.push_to_hub)
         dataset_form.addRow("", self.private)
         dataset_form.addRow("", self.play_sounds)
+        dataset_form.addRow("", self.wait_for_episode_start)
         layout.addWidget(dataset_box)
 
         robot_box = QGroupBox("机器人与可视化")
@@ -2333,8 +2639,9 @@ class WheeledArmGui(QMainWindow):
     def _make_right_panel(self) -> QWidget:
         panel = QWidget()
         panel.setObjectName("RightPanel")
+        self._apply_panel_shadow(panel)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 10, 4, 10)
+        layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
 
         status_box = QGroupBox("状态")
@@ -2448,6 +2755,7 @@ class WheeledArmGui(QMainWindow):
             self.push_to_hub,
             self.private,
             self.play_sounds,
+            self.wait_for_episode_start,
             self.display_data,
             self.display_mode,
             self.display_ip,
@@ -2694,6 +3002,14 @@ class WheeledArmGui(QMainWindow):
         self.dataset_root.setText(self.settings.value("record/root", ""))
         self.lcm_url.setText(self.settings.value("record/lcm_url", self.lcm_url.text()))
         self.advanced_args.setPlainText(self.settings.value("record/advanced_args", ""))
+        self.wait_for_episode_start.setChecked(
+            _settings_bool(
+                self.settings.value(
+                    "record/wait_for_episode_start", self.wait_for_episode_start.isChecked()
+                ),
+                self.wait_for_episode_start.isChecked(),
+            )
+        )
         self.viewer_repo_id.setText(self.settings.value("viewer/repo_id", ""))
         self.viewer_root.setText(self.settings.value("viewer/root", ""))
         self.edit_repo_id.setText(self.settings.value("edit/repo_id", ""))
@@ -2727,6 +3043,9 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("record/root", self.dataset_root.text())
         self.settings.setValue("record/lcm_url", self.lcm_url.text())
         self.settings.setValue("record/advanced_args", self.advanced_args.toPlainText())
+        self.settings.setValue(
+            "record/wait_for_episode_start", self.wait_for_episode_start.isChecked()
+        )
         self.settings.setValue("viewer/repo_id", self.viewer_repo_id.text())
         self.settings.setValue("viewer/root", self.viewer_root.text())
         self.settings.setValue("edit/repo_id", self.edit_repo_id.text())
@@ -2768,6 +3087,7 @@ class WheeledArmGui(QMainWindow):
                 f"--display_compressed_images={_bool_arg(self.display_compressed_images.isChecked())}",
                 f"--play_sounds={_bool_arg(self.play_sounds.isChecked())}",
                 f"--resume={_bool_arg(self.resume.isChecked())}",
+                f"--wait_for_episode_start={_bool_arg(self.wait_for_episode_start.isChecked())}",
                 f"--teleop.visualize={_bool_arg(self.viser.isChecked())}",
                 f"--teleop.rerun_visualize_robot={_bool_arg(self.rerun_robot.isChecked())}",
                 f"--teleop.mock_xr={_bool_arg(self.mock_xr.isChecked())}",
@@ -3860,7 +4180,12 @@ QWidget {
     font-size: 14px;
 }
 QMainWindow, #AppRoot {
-    background: #eef3f8;
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 1,
+        stop: 0 #e9f3f7,
+        stop: 0.46 #f4f7fb,
+        stop: 1 #e8edf6
+    );
 }
 QToolTip {
     background: #ffffff;
@@ -3874,8 +4199,62 @@ QToolTip {
     font-weight: 750;
     color: #101827;
 }
+#DialogTitle {
+    font-size: 22px;
+    font-weight: 750;
+    color: #101827;
+}
 #SubtitleLabel, #MutedLabel {
     color: #647084;
+}
+#HelpText {
+    background-color: #ffffff;
+    color: #172033;
+    border: 1px solid #cbd7e4;
+    border-radius: 8px;
+    padding: 12px;
+    line-height: 1.45;
+}
+QTextBrowser#HelpText {
+    background-color: #ffffff;
+    color: #172033;
+}
+QTextBrowser#HelpText QWidget {
+    background-color: #ffffff;
+    color: #172033;
+}
+#SidebarPanel, #RightPanel {
+    background: rgba(255, 255, 255, 184);
+    border: 1px solid rgba(255, 255, 255, 210);
+    border-radius: 14px;
+}
+#SidebarTitle {
+    color: #647084;
+    font-size: 12px;
+    font-weight: 800;
+    padding: 0 4px 8px 4px;
+}
+#SidebarButton {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    color: #344259;
+    padding: 10px 12px;
+    text-align: left;
+}
+#SidebarButton:hover {
+    background: rgba(255, 255, 255, 170);
+    border-color: rgba(137, 161, 189, 120);
+}
+#SidebarButton:checked {
+    background: rgba(47, 111, 237, 226);
+    color: #ffffff;
+    border-color: rgba(47, 111, 237, 240);
+}
+#SidebarGhostButton {
+    background: rgba(255, 255, 255, 142);
+    border-color: rgba(168, 199, 210, 180);
+    color: #2f5f72;
 }
 #PreviewEpisodeLabel {
     font-size: 17px;
@@ -3895,9 +4274,9 @@ QToolTip {
     border-radius: 8px;
 }
 QGroupBox {
-    background: #fbfdff;
-    border: 1px solid #d8e2ec;
-    border-radius: 8px;
+    background: rgba(255, 255, 255, 214);
+    border: 1px solid rgba(216, 226, 236, 210);
+    border-radius: 10px;
     margin-top: 18px;
     padding: 16px;
     font-weight: 650;
@@ -3907,7 +4286,7 @@ QGroupBox::title {
     left: 12px;
     padding: 0 8px;
     color: #2d3a4e;
-    background: #fbfdff;
+    background: rgba(255, 255, 255, 230);
 }
 QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
     background: #ffffff;
@@ -3982,9 +4361,9 @@ QComboBox QAbstractItemView::item:selected {
     color: #102036;
 }
 QTabWidget::pane {
-    border: 1px solid #d8e2ec;
-    border-radius: 8px;
-    background: #fbfdff;
+    border: 1px solid rgba(216, 226, 236, 210);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 178);
     top: -1px;
 }
 QTabBar::tab {
@@ -4024,6 +4403,19 @@ QPushButton:disabled {
     background: #edf2f7;
     border-color: #dbe4ee;
 }
+QMenuBar {
+    background: rgba(255, 255, 255, 190);
+    color: #243247;
+    border-bottom: 1px solid rgba(196, 211, 226, 160);
+}
+QMenuBar::item {
+    background: transparent;
+    padding: 7px 12px;
+    border-radius: 7px;
+}
+QMenuBar::item:selected {
+    background: rgba(232, 240, 255, 210);
+}
 #PrimaryButton {
     background: #2f6fed;
     color: #ffffff;
@@ -4047,6 +4439,18 @@ QPushButton:disabled {
 }
 #DangerButton:pressed {
     background: #a82626;
+}
+#HelpButton {
+    background: #ffffff;
+    color: #2f5f72;
+    border-color: #a8c7d2;
+}
+#HelpButton:hover {
+    background: #eef8fa;
+    border-color: #72aebb;
+}
+#HelpButton:pressed {
+    background: #dceff4;
 }
 #StatusPill {
     background: #e9f8f1;

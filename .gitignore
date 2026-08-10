@@ -174,5 +174,7 @@ outputs/
 .cache/*
 *.stl
 *.urdf
+!src/lerobot/teleoperators/wheeled_arm_pico/assets/**/*.stl
+!src/lerobot/teleoperators/wheeled_arm_pico/assets/**/*.urdf
 *.xml
 *.part

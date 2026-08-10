@@ -149,6 +149,73 @@ def test_send_action_respects_disabled_parts_and_relative_limit():
     assert handler.left_gripper_moving is True
 
 
+def test_reset_to_rest_pose_uses_movej_with_arm_targets_in_radians():
+    robot, handler = _make_robot()
+    calls = []
+
+    class FakeMOVEJ:
+        def __init__(self, lcm_handler, collision_detection, stop_requested=None):
+            self.lcm_handler = lcm_handler
+            self.collision_detection = collision_detection
+            self.stop_requested = stop_requested
+
+        def moveJ2target(self, current_position, target_position):
+            calls.append(
+                (np.asarray(current_position).copy(), np.asarray(target_position).copy())
+            )
+            return True
+
+    with patch("lerobot.robots.wheeled_arm.hardware_interface.trajectory_plan.moveJ.MOVEJ", FakeMOVEJ):
+        robot.reset_to_rest_pose()
+
+    assert len(calls) == 1
+    current_position, target_position = calls[0]
+    np.testing.assert_allclose(current_position, np.arange(23, dtype=np.float32))
+    np.testing.assert_allclose(
+        target_position[:7],
+        np.deg2rad([20.0, 70.0, -75.0, 100.0, -25.0, 0.0, 0.0]),
+    )
+    np.testing.assert_allclose(
+        target_position[7:14],
+        np.deg2rad([-20.0, 70.0, 75.0, 100.0, 25.0, 0.0, 0.0]),
+    )
+    np.testing.assert_allclose(target_position[14:], np.arange(14, 23, dtype=np.float32))
+    np.testing.assert_allclose(handler.joint_current_pos, target_position)
+    assert handler.left_arm_moving is True
+    assert handler.right_arm_moving is True
+    assert handler.left_gripper_moving is False
+    assert handler.right_gripper_moving is False
+    assert handler.head_moving is False
+    assert handler.waist_moving is False
+    assert handler.leg_moving is False
+
+
+def test_reset_to_rest_pose_stops_when_movej_is_interrupted():
+    robot, handler = _make_robot()
+
+    class InterruptedMOVEJ:
+        def __init__(self, lcm_handler, collision_detection, stop_requested=None):
+            self.stop_requested = stop_requested
+
+        def moveJ2target(self, current_position, target_position):
+            assert self.stop_requested is not None
+            assert self.stop_requested() is True
+            return False
+
+    with patch("lerobot.robots.wheeled_arm.hardware_interface.trajectory_plan.moveJ.MOVEJ", InterruptedMOVEJ):
+        completed = robot.reset_to_rest_pose(stop_requested=lambda: True)
+
+    assert completed is False
+    np.testing.assert_allclose(handler.joint_current_pos, np.arange(23, dtype=np.float32))
+    assert handler.left_arm_moving is False
+    assert handler.right_arm_moving is False
+    assert handler.left_gripper_moving is False
+    assert handler.right_gripper_moving is False
+    assert handler.head_moving is False
+    assert handler.waist_moving is False
+    assert handler.leg_moving is False
+
+
 def test_disconnect_stops_handler():
     robot, handler = _make_robot()
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -79,6 +80,13 @@ _PART_MOVING_FLAGS: dict[str, str] = {
     "waist": "waist_moving",
     "leg": "leg_moving",
 }
+
+_RESET_LEFT_ARM_RAD = np.deg2rad([20.0, 70.0, -75.0, 100.0, -25.0, 0.0, 0.0]).astype(
+    np.float32
+)
+_RESET_RIGHT_ARM_RAD = np.deg2rad([-20.0, 70.0, 75.0, 100.0, 25.0, 0.0, 0.0]).astype(
+    np.float32
+)
 
 
 class WheeledArm(Robot):
@@ -166,6 +174,63 @@ class WheeledArm(Robot):
             return
 
         self._set_moving_flags(set())
+
+    @check_if_not_connected
+    def reset_to_rest_pose(self, stop_requested: Callable[[], bool] | None = None) -> bool:
+        """Move both arms to the PICO data-collection reset pose using MOVEJ."""
+        assert self._handler is not None
+
+        from .hardware_interface.dynamics_related_functions.collision_detection import (
+            Collision_Detection,
+        )
+        from .hardware_interface.trajectory_plan.moveJ import MOVEJ
+
+        with self._handler.joint_current_pos_lock:
+            current_joint_position = np.asarray(
+                self._handler.joint_current_pos, dtype=np.float32
+            ).copy()
+
+        target_joint_position = current_joint_position.copy()
+        target_joint_position[_PART_SLICES["left_arm"]] = _RESET_LEFT_ARM_RAD
+        target_joint_position[_PART_SLICES["right_arm"]] = _RESET_RIGHT_ARM_RAD
+
+        self._set_movej_reset_flags()
+        movej = MOVEJ(
+            self._handler,
+            Collision_Detection(self._handler),
+            stop_requested=stop_requested,
+        )
+        completed = bool(movej.moveJ2target(current_joint_position, target_joint_position))
+        if not completed:
+            self._stop_all_moving_flags()
+            logger.warning("wheeled_arm movej reset interrupted by emergency stop request.")
+            return False
+
+        with self._handler.joint_current_pos_lock:
+            self._handler.joint_current_pos[: len(target_joint_position)] = target_joint_position
+        return True
+
+    def _set_movej_reset_flags(self) -> None:
+        assert self._handler is not None
+
+        self._handler.left_arm_moving = True
+        self._handler.right_arm_moving = True
+        self._handler.left_gripper_moving = False
+        self._handler.right_gripper_moving = False
+        self._handler.head_moving = False
+        self._handler.waist_moving = False
+        self._handler.leg_moving = False
+
+    def _stop_all_moving_flags(self) -> None:
+        assert self._handler is not None
+
+        self._handler.left_arm_moving = False
+        self._handler.right_arm_moving = False
+        self._handler.left_gripper_moving = False
+        self._handler.right_gripper_moving = False
+        self._handler.head_moving = False
+        self._handler.waist_moving = False
+        self._handler.leg_moving = False
 
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:

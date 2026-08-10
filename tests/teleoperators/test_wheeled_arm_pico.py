@@ -82,6 +82,58 @@ def test_action_features_match_wheeled_arm_arm_and_gripper_joints():
     ]
 
 
+def test_pico_recording_controls_are_edge_triggered():
+    class ButtonXrClient:
+        def __init__(self):
+            self.buttons = {"A": False, "B": False, "X": False}
+
+        def get_button_state_by_name(self, name: str) -> bool:
+            return self.buttons[name]
+
+    xr_client = ButtonXrClient()
+    teleop = WheeledArmPico(WheeledArmPicoConfig())
+    teleop._xr_client = xr_client
+    teleop._connected = True
+
+    assert teleop.get_recording_control() is None
+
+    xr_client.buttons["A"] = True
+    assert teleop.get_recording_control() == "right"
+    assert teleop.get_recording_control() is None
+
+    xr_client.buttons["A"] = False
+    assert teleop.get_recording_control() is None
+
+    xr_client.buttons["B"] = True
+    assert teleop.get_recording_control() == "left"
+
+    xr_client.buttons["B"] = False
+    xr_client.buttons["X"] = True
+    assert teleop.get_recording_control() == "esc"
+
+
+def test_pico_emergency_stop_button_is_level_triggered():
+    class ButtonXrClient:
+        def __init__(self):
+            self.buttons = {"X": False}
+
+        def get_button_state_by_name(self, name: str) -> bool:
+            return self.buttons[name]
+
+    xr_client = ButtonXrClient()
+    teleop = WheeledArmPico(WheeledArmPicoConfig())
+    teleop._xr_client = xr_client
+
+    assert teleop.emergency_stop_requested() is False
+
+    xr_client.buttons["X"] = True
+    assert teleop.emergency_stop_requested() is True
+    assert teleop.emergency_stop_requested() is True
+
+    xr_client.buttons["X"] = False
+    assert teleop.emergency_stop_requested() is False
+
+
 def test_arm_q_from_feedback_requires_complete_left_and_right_arm_state():
     joint_names = [
         *(f"left_arm_{idx}" for idx in range(7)),

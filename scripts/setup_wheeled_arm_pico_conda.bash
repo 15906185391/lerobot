@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 ENV_NAME="${CONDA_DEFAULT_ENV:-xr}"
-PYTHON_VERSION="3.12"
+PYTHON_VERSION="3.10"
 CREATE_ENV=0
 SKIP_EDITABLE=0
 SKIP_PICO_SDK=0
@@ -23,7 +23,7 @@ wheeled_arm + wheeled_arm_pico.
 
 Options:
   --env NAME          Conda environment to use. Default: current env, or xr.
-  --python VERSION    Python version used with --create-env. Default: 3.12.
+  --python VERSION    Python version used with --create-env. Default: 3.10.
   --create-env        Create the conda env if it does not already exist.
   --skip-editable     Do not run pip install -e ".[core_scripts,gui]".
   --skip-pico-sdk     Do not clone/install XRoboToolkit PICO SDK.
@@ -37,7 +37,7 @@ Options:
 
 Examples:
   bash scripts/setup_wheeled_arm_pico_conda.bash --env xr
-  bash scripts/setup_wheeled_arm_pico_conda.bash --create-env --env xr --python 3.12
+  bash scripts/setup_wheeled_arm_pico_conda.bash --create-env --env xr --python 3.10
 EOF
 }
 
@@ -48,6 +48,131 @@ log() {
 die() {
     echo "[setup-wheeled-arm-pico][ERROR] $*" >&2
     exit 1
+}
+
+python_module_available() {
+    local module="$1"
+    python - "${module}" <<'PY' >/dev/null 2>&1
+import importlib.util
+import sys
+
+raise SystemExit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)
+PY
+}
+
+python_any_module_available() {
+    local module
+    for module in "$@"; do
+        if python_module_available "${module}"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+conda_package_installed() {
+    local package="$1"
+    conda list "${package}" 2>/dev/null | awk -v package="${package}" '$1 == package { found = 1 } END { exit !found }'
+}
+
+conda_spec_satisfied() {
+    local spec="$1"
+    local package="${spec%%:*}"
+    local modules=""
+
+    if [[ "${spec}" == *":"* ]]; then
+        modules="${spec#*:}"
+    fi
+
+    if conda_package_installed "${package}"; then
+        return 0
+    fi
+
+    if [[ -n "${modules}" ]]; then
+        IFS=',' read -r -a module_names <<< "${modules}"
+        if python_any_module_available "${module_names[@]}"; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+install_missing_conda_packages() {
+    local specs=("$@")
+    local missing=()
+    local spec
+    local package
+
+    for spec in "${specs[@]}"; do
+        package="${spec%%:*}"
+        if conda_spec_satisfied "${spec}"; then
+            log "Conda package/library '${package}' is already available; skipping."
+        else
+            missing+=("${package}")
+        fi
+    done
+
+    if [[ "${#missing[@]}" -eq 0 ]]; then
+        log "All conda-forge runtime packages are already available."
+        return
+    fi
+
+    log "Installing missing conda-forge runtime packages: ${missing[*]}"
+    conda install -c conda-forge -y "${missing[@]}"
+}
+
+pip_spec_satisfied() {
+    local spec="$1"
+    local modules="${spec#*:}"
+
+    IFS=',' read -r -a module_names <<< "${modules}"
+    python_any_module_available "${module_names[@]}"
+}
+
+install_missing_pip_specs() {
+    local specs=("$@")
+    local missing=()
+    local spec
+    local package
+
+    for spec in "${specs[@]}"; do
+        package="${spec%%:*}"
+        if pip_spec_satisfied "${spec}"; then
+            log "Python library for '${package}' is already available; skipping."
+        else
+            missing+=("${package}")
+        fi
+    done
+
+    if [[ "${#missing[@]}" -eq 0 ]]; then
+        log "All requested pip-only packages are already available."
+        return
+    fi
+
+    log "Installing missing pip-only packages: ${missing[*]}"
+    python -m pip install "${missing[@]}"
+}
+
+lerobot_editable_with_extras_available() {
+    python - "${REPO_ROOT}" <<'PY' >/dev/null 2>&1
+import importlib.util
+import pathlib
+import sys
+
+repo_root = pathlib.Path(sys.argv[1]).resolve()
+spec = importlib.util.find_spec("lerobot")
+if spec is None or spec.submodule_search_locations is None:
+    raise SystemExit(1)
+
+locations = [pathlib.Path(path).resolve() for path in spec.submodule_search_locations]
+if not any(str(path).startswith(str(repo_root)) for path in locations):
+    raise SystemExit(1)
+
+for module in ("datasets", "rerun", "PySide6"):
+    if importlib.util.find_spec(module) is None:
+        raise SystemExit(1)
+PY
 }
 
 while [[ $# -gt 0 ]]; do
@@ -175,57 +300,64 @@ conda activate "${ENV_NAME}" || die "Could not activate conda env '${ENV_NAME}'.
 log "Using Python: $(command -v python)"
 python --version
 
-log "Installing conda-forge runtime packages."
-conda install -c conda-forge -y \
-    libstdcxx-ng \
-    pinocchio \
-    hpp-fcl \
-    qpsolvers \
-    daqp \
-    viser \
-    yourdfpy \
-    xcb-util-cursor
+install_missing_conda_packages \
+    "libstdcxx-ng:" \
+    "pinocchio:pinocchio" \
+    "hpp-fcl:hppfcl,coal" \
+    "qpsolvers:qpsolvers" \
+    "daqp:daqp" \
+    "viser:viser" \
+    "yourdfpy:yourdfpy" \
+    "xcb-util-cursor:"
 
-log "Upgrading pip."
-python -m pip install --upgrade pip
-
-if [[ "${SKIP_EDITABLE}" -eq 0 ]]; then
-    log "Installing LeRobot editable package with core_scripts and gui extras."
-    python -m pip install -e "${REPO_ROOT}[core_scripts,gui]"
+if python -m pip --version >/dev/null 2>&1; then
+    log "pip is already available; skipping pip bootstrap."
+else
+    log "Bootstrapping pip."
+    python -m ensurepip --upgrade
 fi
 
-log "Installing pip-only runtime packages."
-python -m pip install lcm
+if [[ "${SKIP_EDITABLE}" -eq 0 ]]; then
+    if lerobot_editable_with_extras_available; then
+        log "LeRobot editable package with core_scripts/gui imports is already available; skipping."
+    else
+        log "Installing LeRobot editable package with core_scripts and gui extras."
+        python -m pip install -e "${REPO_ROOT}[core_scripts,gui]"
+    fi
+fi
+
+install_missing_pip_specs "lcm:lcm"
 
 if [[ "${WITH_CONVERSION_DEPS}" -eq 1 ]]; then
-    log "Installing optional data conversion packages."
-    python -m pip install \
-        tensorflow \
-        tensorflow-datasets \
-        h5py \
-        "ray[default]" \
-        datatrove \
-        "datatrove[ray]" \
-        apache-beam
+    install_missing_pip_specs \
+        "tensorflow:tensorflow" \
+        "tensorflow-datasets:tensorflow_datasets" \
+        "h5py:h5py" \
+        "ray[default]:ray" \
+        "datatrove[ray]:datatrove" \
+        "apache-beam:apache_beam"
 else
     log "Skipping optional data conversion packages. Use --with-conversion-deps when needed."
 fi
 
 if [[ "${SKIP_PICO_SDK}" -eq 0 ]]; then
-    DEP_DIR="${REPO_ROOT}/dependencies"
-    SDK_DIR="${DEP_DIR}/XRoboToolkit-PC-Service-Pybind"
-    mkdir -p "${DEP_DIR}"
-
-    if [[ -d "${SDK_DIR}/.git" ]]; then
-        log "Updating existing XRoboToolkit SDK checkout."
-        git -C "${SDK_DIR}" pull --ff-only || log "Warning: git pull failed; continuing with existing checkout."
+    if python_module_available "xrobotoolkit_sdk"; then
+        log "XRoboToolkit SDK Python module is already available; skipping SDK clone/install."
     else
-        log "Cloning XRoboToolkit SDK checkout."
-        git clone https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind.git "${SDK_DIR}"
-    fi
+        DEP_DIR="${REPO_ROOT}/dependencies"
+        SDK_DIR="${DEP_DIR}/XRoboToolkit-PC-Service-Pybind"
+        mkdir -p "${DEP_DIR}"
 
-    log "Installing XRoboToolkit SDK."
-    bash "${SDK_DIR}/setup_ubuntu.sh"
+        if [[ -d "${SDK_DIR}/.git" ]]; then
+            log "XRoboToolkit SDK checkout already exists; reusing it."
+        else
+            log "Cloning XRoboToolkit SDK checkout."
+            git clone https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind.git "${SDK_DIR}"
+        fi
+
+        log "Installing XRoboToolkit SDK."
+        bash "${SDK_DIR}/setup_ubuntu.sh"
+    fi
 fi
 
 if [[ "${SKIP_VERIFY}" -eq 0 ]]; then

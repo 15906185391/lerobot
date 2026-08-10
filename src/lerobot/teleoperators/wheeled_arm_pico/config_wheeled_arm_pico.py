@@ -92,6 +92,15 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     right_grip_name: str = "right_grip"
     left_gripper_input_name: str = "left_trigger"
     right_gripper_input_name: str = "right_trigger"
+    # 采集控制按钮。启用后可在 lerobot-record 中替代键盘：
+    # A=开始/结束当前阶段，B=丢弃并重录当前 episode，X=停止采集。
+    # 设为空字符串可禁用某个按钮。
+    recording_control: bool = True
+    recording_advance_button: str = "A"
+    recording_rerecord_button: str = "B"
+    recording_stop_button: str = "X"
+    # 复位 movej 执行期间按住该按钮会立即停止继续发布复位轨迹。
+    emergency_stop_button: str = "X"
     # trigger=0/1 分别映射到 open/closed；实物夹爪单位不同时改这两个值。
     gripper_open_pos: float = 0.0
     gripper_closed_pos: float = 1.0

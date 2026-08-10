@@ -56,6 +56,17 @@
   - `left_grip` / `right_grip`: 激活左右机械臂跟随。
   - `left_trigger` / `right_trigger`: 控制左右夹爪。
   - `Y`: 重置 PICO 相对位姿基准。
+- 数据采集控制按钮默认开启：
+  - `A`: 开始等待中的 episode，或提前结束当前采集/reset 阶段。
+  - `B`: 丢弃当前 episode 并重录。
+  - `X`: 停止整个采集流程。
+- 如果希望启动命令后先遥操作到准备姿态，再由 PICO 开始写入 episode，可加：
+  - `--wait_for_episode_start=true`
+- 采集控制按钮可配置：
+  - `--teleop.recording_advance_button=A`
+  - `--teleop.recording_rerecord_button=B`
+  - `--teleop.recording_stop_button=X`
+  - `--teleop.recording_control=false`
 - 夹爪范围可配置：
   - `--teleop.gripper_open_pos=0.0`
   - `--teleop.gripper_closed_pos=1.0`
@@ -479,6 +490,7 @@ lerobot-record \
   --robot.type=wheeled_arm \
   --teleop.type=wheeled_arm_pico \
   --teleop.visualize=true \
+  --wait_for_episode_start=true \
   --display_data=true \
   --display_mode=rerun \
   --dataset.repo_id=kuanli/wheeled_arm_pico_test \
@@ -604,3 +616,237 @@ grippers=[...]
 - 如果夹爪方向反了，交换 `gripper_open_pos` 和 `gripper_closed_pos`，或调整实物 SDK 的夹爪单位。
 - 如果相机没有图像，确认 ROS2 topic 默认是 `/camera/color/image_raw`，并检查 encoding 是否为 `rgb8`、`bgr8`、`rgba8`、`bgra8` 或 `mono8`。
 - 如果需要深度图，先修复 `cv_bridge` 与 NumPy 的兼容问题。
+
+## 2026-08-10 近期变更记录
+
+### 1. `setup_wheeled_arm_pico_conda.bash` 安装脚本
+
+- 默认 Python 版本从 `3.12` 改为 `3.10`，`--help` 文案和示例同步更新。
+- 安装逻辑改为尽量幂等：
+  - Ubuntu Qt/xcb 系统包仍按缺失项安装。
+  - conda-forge 运行依赖会先检查 conda 包或可导入模块，已存在则跳过。
+  - pip-only 包会先检查 Python 模块，已存在则跳过。
+  - `pip` 不再每次强制 upgrade，只在当前环境没有 pip 时执行 `ensurepip`。
+  - LeRobot editable 安装会先确认当前 repo 的 `lerobot`、`datasets`、`rerun`、`PySide6` 是否可用。
+  - XRoboToolkit SDK 模块 `xrobotoolkit_sdk` 已可导入时，跳过 clone/install。
+  - SDK checkout 已存在时复用本地目录，不再每次自动 `git pull`。
+- 已验证：
+  - `bash -n scripts/setup_wheeled_arm_pico_conda.bash`
+  - `bash scripts/setup_wheeled_arm_pico_conda.bash --help`
+
+### 2. `hardware_interface/robot_model.py` 只保留 movej
+
+- `robot_model.py` 已精简为只服务 movej 关节控制，保留：
+  - `LCMHandler`
+  - `Collision_Detection`
+  - `MOVEJ`
+  - `movej_plan_target_position_list`
+  - `trajectory_segment_index`
+  - `robot_movej_to_target_position()`
+- 已移除 moveL、moveC、力控、运动学/动力学模型、CSV 轨迹读取与重采样等无关逻辑。
+- 新增轻量 `dynamics_related_functions/collision_detection.py`，提供 MOVEJ 所需接口：
+  - `collision_detection_level`
+  - `collision_detection_index`
+  - `start_collision_detection()`
+  - `stop_collision_detection()`
+- 当前轻量碰撞检测默认不做实际碰撞检测，和示例脚本中 `collision_detection_level = 0` 的用法一致。
+- `trajectory_plan/moveJ.py` 已兼容两种导入方式：
+  - 直接在 `hardware_interface` 下运行脚本。
+  - 作为 `lerobot.robots.wheeled_arm.hardware_interface` 包内模块导入。
+- 已验证：
+  - `PYTHONPATH=src/lerobot/robots/wheeled_arm/hardware_interface python -c "import robot_model"`
+  - `python -m py_compile robot_model.py movej_to_target_position.py trajectory_plan/moveJ.py`
+
+### 3. PICO 数据采集初始关节状态与 movej 复位
+
+需求：
+
+- 使用 PICO 遥操作采集时，开始遥操作要从 LCM 获取当前机器人关节状态，作为 PICO IK/遥操作初始关节位置。
+- episode 间复位使用 movej。
+- 复位目标关节角度为：
+  - 右臂：`[-20, 70, 75, 100.0, 25, 0, 0]` 度
+  - 左臂：`[20, 70, -75, 100.0, -25, 0, 0]` 度
+- 程序中需要转为弧度。
+
+处理：
+
+- `lerobot_record.py` 新增 `_sync_teleop_feedback_from_robot(robot, teleop)`：
+  - robot 为 `wheeled_arm` 且 `has_valid_feedback=True` 时，读取 `robot.get_observation()`。
+  - 调用 `teleop.send_feedback(obs)` 将当前 LCM 关节状态同步给 PICO teleop。
+  - 同步后调用 `teleop.reset_baseline()`，避免 PICO 相对位姿沿用旧基线导致跳变。
+- `record()` 中在 `robot.connect()` 后立即同步一次 PICO 初始关节状态。
+- episode 间 reset 阶段前，如果 robot 暴露 `reset_to_rest_pose()`，则先调用该方法进行 movej 复位，再同步一次 PICO 初始状态。
+- `WheeledArm.reset_to_rest_pose()` 复用当前 robot 的 `_handler`，不新建第二个 LCM 连接。
+- `WheeledArm.reset_to_rest_pose()` 行为：
+  - 从 `self._handler.joint_current_pos` 读取 23 维当前状态。
+  - 只替换 `[0:7]` 左臂和 `[7:14]` 右臂目标。
+  - 左臂目标：`np.deg2rad([20.0, 70.0, -75.0, 100.0, -25.0, 0.0, 0.0])`
+  - 右臂目标：`np.deg2rad([-20.0, 70.0, 75.0, 100.0, 25.0, 0.0, 0.0])`
+  - movej 复位时只打开左右臂 moving flag，关闭夹爪、头、腰、腿 moving flag。
+  - movej 完成后将本地 `joint_current_pos` 缓存更新为目标值，方便后续立刻同步给 PICO teleop。
+- 新增测试：
+  - `tests/robots/test_wheeled_arm.py::test_reset_to_rest_pose_uses_movej_with_arm_targets_in_radians`
+  - 校验左右臂目标角度已转弧度。
+  - 校验 23 维 package 中非左右臂部分保持原值。
+  - 校验复位时 only left/right arm moving flags 为 True。
+- 已通过：
+  - `python -m py_compile src/lerobot/robots/wheeled_arm/wheeled_arm.py src/lerobot/scripts/lerobot_record.py src/lerobot/robots/wheeled_arm/hardware_interface/trajectory_plan/moveJ.py tests/robots/test_wheeled_arm.py`
+
+pytest 状态：
+
+- 系统默认 Python 环境中 pytest 被缺少 `draccus` 阻塞。
+- `gmr` conda 环境中 `draccus` 存在，但 `pytest` 未安装。
+
+### 4. PySide6 GUI 使用说明、菜单栏、侧边栏和视觉升级
+
+文件：
+
+- `src/lerobot/scripts/wheeled_arm_gui.py`
+
+新增帮助功能：
+
+- 顶部右侧新增 `使用说明` 按钮。
+- 菜单栏新增 `帮助 -> 打开使用说明`。
+- 快捷键：`F1` 打开使用说明。
+- `HelpDialog` 使用 `QDialog + QTabWidget + QTextBrowser` 实现。
+- 帮助页签包括：
+  - 采集
+  - PICO 遥操作
+  - 数据集
+  - 常用命令
+  - 故障排查
+- 帮助窗口支持 `复制说明`，会把纯文本版说明复制到剪贴板。
+- 修复帮助内容背景发黑问题：
+  - `QTextBrowser#HelpText` 强制白底深色字。
+  - `viewport()` 强制白底深色字。
+  - HTML `body` 默认样式强制白底深色字。
+  - offscreen 验证中 palette base color 为 `#ffffff`。
+
+菜单栏：
+
+- 新增菜单：`文件`、`视图`、`运行`、`帮助`。
+- 新增快捷键：
+  - `Ctrl+Shift+C`：复制当前命令
+  - `Ctrl+L`：清空运行日志
+  - `Ctrl+Q`：退出
+  - `Ctrl+R`：运行当前页命令
+  - `Ctrl+.`：停止当前页任务
+  - `F1`：打开使用说明
+
+侧边栏：
+
+- 新增左侧导航栏：`采集`、`查看`、`编辑`、`转换`、`常用`。
+- 侧边栏按钮与主 `QTabWidget` 双向同步。
+- 侧边栏底部保留 `F1 帮助` 快捷按钮。
+
+视觉升级：
+
+- 主窗口最小尺寸从 `1180x760` 调整为 `1280x800`。
+- 主背景改为浅色渐变。
+- 侧边栏和右侧状态/预览/日志面板使用半透明白色面板，模拟毛玻璃质感。
+- 侧边栏和右侧面板增加 `QGraphicsDropShadowEffect` 柔和阴影。
+- `QGroupBox`、`QTabWidget`、`QMenuBar`、侧边栏按钮、帮助按钮均增加更现代的圆角/半透明/hover/选中态样式。
+
+### 5. `gmr` conda 环境验证记录
+
+当前用户说明 Python 环境为 conda 的 `gmr` 环境。直接调用：
+
+```bash
+/home/kuanli/miniconda3/envs/gmr/bin/python
+```
+
+验证结果：
+
+```text
+Python 3.10.20
+PySide6 6.10.3
+draccus: ok
+pytest: missing
+PySide6: ok
+```
+
+说明：
+
+- 在只读沙箱中 `conda run -n gmr ...` 会失败，因为 conda 需要创建临时脚本，但当前沙箱没有可用临时目录。
+- 直接调用 `/home/kuanli/miniconda3/envs/gmr/bin/python` 可以正常验证。
+- 导入 GUI 时，torch/dill 也需要可用临时目录；offscreen GUI 深度验证在提升权限后通过。
+
+已通过：
+
+```text
+compile ok
+```
+
+offscreen GUI 验证已通过：
+
+```text
+dialog title: Wheeled Arm PICO 使用说明
+dialog size: 860 640
+help pages: 5
+first page object: HelpText
+first page stylesheet contains white: True
+window title: LeRobot Wheeled Arm 控制台
+tabs: ['采集', '查看数据集', '编辑数据集', '格式转换', '常用命令']
+sidebar buttons: ['采集', '查看', '编辑', '转换', '常用']
+menus: ['文件', '视图', '运行', '帮助']
+help button: 使用说明
+help base color: #ffffff
+viewport has white: True
+document css has white: True
+```
+
+还通过：
+
+```bash
+git diff --check -- src/lerobot/scripts/wheeled_arm_gui.py
+```
+
+### 6. 当前未完成事项
+
+- `gmr` 环境尚未安装 `pytest`，因此未运行完整 pytest。
+- 尚未在实物机器人上验证 movej 复位下发。
+- 尚未在真实桌面会话中打开 GUI 做截图/人工视觉验收；当前只完成 offscreen 构造和样式检查。
+
+### 7. 复位过程中的 PICO 急停逻辑
+
+背景：
+
+- 普通 PICO 遥操作时，左右 grip/trigger 需要按下才会驱动机器人，相对安全。
+- 但 episode 间复位是 `record()` 阻塞调用 `WheeledArm.reset_to_rest_pose()`，如果 movej 复位期间不继续轮询 PICO，操作者无法用 PICO 及时停止异常动作。
+
+处理：
+
+- `WheeledArmPicoConfig` 新增：
+  - `emergency_stop_button: str = "X"`
+- `WheeledArmPico` 新增：
+  - `emergency_stop_requested()`
+  - 该方法是 level-triggered：只要配置的 PICO 按钮处于按下状态就返回 `True`。
+  - 默认按钮为 `X`，与整次采集停止按钮一致。
+- `lerobot_record.py` 新增：
+  - `_teleop_emergency_stop_requested(teleop)`
+  - reset 阶段调用 `reset_to_rest_pose(stop_requested=lambda: _teleop_emergency_stop_requested(teleop))`。
+- `MOVEJ` 新增可选 `stop_requested` 回调：
+  - movej 插补循环开始和每次发布后都会检查急停。
+  - 检测到急停后停止碰撞检测线程，关闭所有 moving flags，并返回 `False`。
+- `WheeledArm.reset_to_rest_pose()` 现在返回 `bool`：
+  - `True`：复位完成。
+  - `False`：复位被 PICO 急停中断。
+- `record()` 在复位返回 `False` 时：
+  - 设置 `events["stop_recording"] = True`。
+  - 设置 `events["exit_early"] = True`。
+  - 输出 `Emergency stop requested during robot reset`。
+  - 跳出后续 reset loop，结束本次采集流程。
+
+注意：
+
+- 这是软件层急停：停止继续发布 movej 复位轨迹，并关闭 LCM moving flags。
+- 它不能替代硬件急停按钮、断电保护或底层控制器安全机制。
+- 实物调试时仍应保留硬件急停，并先在低速/空载/安全空间内验证。
+
+验证：
+
+- gmr 环境下直接运行新增测试函数已通过：
+  - `test_reset_to_rest_pose_uses_movej_with_arm_targets_in_radians`
+  - `test_reset_to_rest_pose_stops_when_movej_is_interrupted`
+  - `test_pico_emergency_stop_button_is_level_triggered`
+- `git diff --check` 通过。
