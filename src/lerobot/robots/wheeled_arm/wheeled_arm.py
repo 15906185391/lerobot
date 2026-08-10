@@ -148,6 +148,47 @@ class WheeledArm(Robot):
             and self._handler.right_arm_state_updated.is_set()
         )
 
+    def wait_for_valid_feedback(
+        self, timeout_s: float | None = None, min_time_s: float | None = None
+    ) -> bool:
+        """Wait until fresh left/right arm LCM feedback is available."""
+        if self._handler is None:
+            return False
+        timeout_s = self.config.feedback_wait_timeout_s if timeout_s is None else timeout_s
+        deadline = time.monotonic() + timeout_s
+        while True:
+            if self._has_valid_feedback(min_time_s=min_time_s):
+                return True
+            if timeout_s <= 0 or time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+
+    def require_valid_feedback(self, context: str, min_time_s: float | None = None) -> None:
+        if self.wait_for_valid_feedback(min_time_s=min_time_s):
+            return
+        raise RuntimeError(
+            f"wheeled_arm did not receive fresh left/right arm LCM feedback before {context}. "
+            "为避免实物机器人从零位或旧状态跳变，已停止继续执行。"
+            "请检查 MANIP_LEFT_ARM_STATE / MANIP_RIGHT_ARM_STATE、LCM URL、组播路由和控制器状态发布。"
+        )
+
+    def _has_valid_feedback(self, min_time_s: float | None = None) -> bool:
+        assert self._handler is not None
+        if hasattr(self._handler, "has_arm_state_feedback"):
+            try:
+                return bool(
+                    self._handler.has_arm_state_feedback(
+                        self.config.state_feedback_timeout_s, min_time_s=min_time_s
+                    )
+                )
+            except TypeError:
+                if min_time_s is not None:
+                    return False
+                return bool(self._handler.has_arm_state_feedback(self.config.state_feedback_timeout_s))
+        if min_time_s is not None:
+            return False
+        return self.has_valid_feedback
+
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
         self._handler = _make_lcm_handler(self.config.lcm_url)
@@ -155,9 +196,15 @@ class WheeledArm(Robot):
             cam.connect()
 
         self.configure()
-        if self.config.connect_timeout_s > 0:
-            time.sleep(self.config.connect_timeout_s)
-        if not self.has_valid_feedback:
+        wait_timeout_s = max(self.config.connect_timeout_s, self.config.feedback_wait_timeout_s)
+        if not self.wait_for_valid_feedback(wait_timeout_s):
+            if self.config.require_fresh_feedback:
+                raise RuntimeError(
+                    "%s did not receive fresh left/right arm LCM state feedback while connecting. "
+                    "为避免实物遥操作初始状态跳变，连接已中止。"
+                    "请检查 LCM URL、组播路由和控制器状态发布程序。"
+                    % self
+                )
             logger.warning(
                 "%s has not received fresh left/right arm state feedback. "
                 "机器人没有读到新鲜的左右臂 LCM 状态；请检查 LCM URL、组播路由和控制器状态发布程序。"
@@ -177,7 +224,11 @@ class WheeledArm(Robot):
         self._set_moving_flags(set())
 
     @check_if_not_connected
-    def reset_to_rest_pose(self, stop_requested: Callable[[], bool] | None = None) -> bool:
+    def reset_to_rest_pose(
+        self,
+        stop_requested: Callable[[], bool] | None = None,
+        progress_callback: Callable[[RobotObservation], None] | None = None,
+    ) -> bool:
         """Move both arms to the PICO data-collection reset pose using MOVEJ."""
         assert self._handler is not None
 
@@ -185,6 +236,10 @@ class WheeledArm(Robot):
             Collision_Detection,
         )
         from .hardware_interface.trajectory_plan.moveJ import MOVEJ
+
+        reset_start_t = time.monotonic()
+        if self.config.require_fresh_feedback:
+            self.require_valid_feedback("reset_to_rest_pose")
 
         with self._handler.joint_current_pos_lock:
             current_joint_position = np.asarray(
@@ -200,6 +255,7 @@ class WheeledArm(Robot):
             self._handler,
             Collision_Detection(self._handler),
             stop_requested=stop_requested,
+            progress_callback=self._make_reset_progress_callback(progress_callback),
         )
         completed = bool(movej.moveJ2target(current_joint_position, target_joint_position))
         if not completed:
@@ -207,9 +263,27 @@ class WheeledArm(Robot):
             logger.warning("wheeled_arm movej reset interrupted by emergency stop request.")
             return False
 
-        with self._handler.joint_current_pos_lock:
-            self._handler.joint_current_pos[: len(target_joint_position)] = target_joint_position
+        if self.config.require_fresh_feedback:
+            self.require_valid_feedback("post-reset LCM feedback", min_time_s=reset_start_t)
         return True
+
+    def joint_observation_from_package(self, joint_positions: np.ndarray) -> RobotObservation:
+        joint_positions = np.asarray(joint_positions, dtype=np.float32)
+        return {
+            f"{joint_name}.pos": float(joint_positions[idx])
+            for idx, joint_name in enumerate(self.config.joint_names)
+        }
+
+    def _make_reset_progress_callback(
+        self, progress_callback: Callable[[RobotObservation], None] | None
+    ) -> Callable[[np.ndarray], None] | None:
+        if progress_callback is None:
+            return None
+
+        def callback(joint_positions: np.ndarray) -> None:
+            progress_callback(self.joint_observation_from_package(joint_positions))
+
+        return callback
 
     def _set_movej_reset_flags(self) -> None:
         assert self._handler is not None

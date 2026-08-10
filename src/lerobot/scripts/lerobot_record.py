@@ -250,20 +250,107 @@ def _teleop_emergency_stop_requested(teleop: Teleoperator | list[Teleoperator] |
     return False
 
 
-def _sync_teleop_feedback_from_robot(robot: Robot, teleop: Teleoperator | list[Teleoperator] | None) -> None:
+def _refresh_teleop_visualization_from_feedback(
+    teleop: Teleoperator | list[Teleoperator] | None,
+    feedback: dict,
+    *,
+    display_data: bool = False,
+    display_mode: str = "rerun",
+    frame_index: int | None = None,
+    timestamp: float | None = None,
+    collision_status: str = "sync",
+    force: bool = False,
+) -> None:
     if not isinstance(teleop, Teleoperator):
         return
-    if robot.name != "wheeled_arm" or not getattr(robot, "has_valid_feedback", True):
+
+    refresh_visualization = getattr(teleop, "refresh_visualization_from_feedback", None)
+    if callable(refresh_visualization):
+        refresh_visualization(feedback, collision_status=collision_status)
+    else:
+        send_feedback = getattr(teleop, "send_feedback", None)
+        if callable(send_feedback):
+            send_feedback(feedback)
+
+    if display_data and display_mode == "rerun":
+        log_robot_visualization = getattr(teleop, "log_rerun_robot_visualization", None)
+        if callable(log_robot_visualization):
+            log_robot_visualization(frame_index=frame_index, timestamp=timestamp, force=force)
+
+
+def _sync_teleop_feedback_from_robot(
+    robot: Robot,
+    teleop: Teleoperator | list[Teleoperator] | None,
+    *,
+    display_data: bool = False,
+    display_mode: str = "rerun",
+    frame_index: int | None = None,
+    timestamp: float | None = None,
+    collision_status: str = "sync",
+) -> None:
+    if not isinstance(teleop, Teleoperator):
+        return
+    if robot.name != "wheeled_arm":
+        return
+    require_feedback = bool(getattr(getattr(robot, "config", None), "require_fresh_feedback", False))
+    if require_feedback:
+        require_valid_feedback = getattr(robot, "require_valid_feedback", None)
+        if callable(require_valid_feedback):
+            require_valid_feedback("initial teleop feedback sync")
+    elif not getattr(robot, "has_valid_feedback", True):
         return
 
-    send_feedback = getattr(teleop, "send_feedback", None)
-    if not callable(send_feedback):
-        return
-
-    send_feedback(robot.get_observation())
+    feedback = robot.get_observation()
+    _refresh_teleop_visualization_from_feedback(
+        teleop,
+        feedback,
+        display_data=display_data,
+        display_mode=display_mode,
+        frame_index=frame_index,
+        timestamp=timestamp,
+        collision_status=collision_status,
+        force=True,
+    )
     reset_baseline = getattr(teleop, "reset_baseline", None)
     if callable(reset_baseline):
         reset_baseline()
+
+
+def _make_reset_visualization_callback(
+    teleop: Teleoperator | list[Teleoperator] | None,
+    *,
+    display_data: bool,
+    display_mode: str,
+    dataset: LeRobotDataset,
+    fps: int,
+):
+    if not isinstance(teleop, Teleoperator):
+        return None
+    if not (display_data or getattr(teleop, "_visualizer", None) is not None):
+        return None
+
+    last_update_t = 0.0
+    update_period_s = 0.1
+
+    def callback(feedback: dict) -> None:
+        nonlocal last_update_t
+        now = time.perf_counter()
+        if now - last_update_t < update_period_s:
+            return
+        last_update_t = now
+        frame_index = _next_dataset_frame_index(dataset)
+        _refresh_teleop_visualization_from_feedback(
+            teleop,
+            feedback,
+            display_data=display_data,
+            display_mode=display_mode,
+            frame_index=frame_index,
+            timestamp=frame_index / fps if frame_index is not None else None,
+            collision_status="reset",
+            force=True,
+        )
+
+    return callback
 
 
 """ --------------- record_loop() data flow --------------------------
@@ -559,7 +646,16 @@ def record(
         if teleop is not None:
             teleop.connect()
         robot.connect()
-        _sync_teleop_feedback_from_robot(robot, teleop)
+        frame_index = _next_dataset_frame_index(dataset)
+        _sync_teleop_feedback_from_robot(
+            robot,
+            teleop,
+            display_data=cfg.display_data,
+            display_mode=cfg.display_mode,
+            frame_index=frame_index,
+            timestamp=frame_index / cfg.dataset.fps if frame_index is not None else None,
+            collision_status="sync",
+        )
 
         listener, events = init_keyboard_listener()
 
@@ -623,14 +719,32 @@ def record(
                     reset_to_rest_pose = getattr(robot, "reset_to_rest_pose", None)
                     if callable(reset_to_rest_pose):
                         reset_completed = reset_to_rest_pose(
-                            stop_requested=lambda: _teleop_emergency_stop_requested(teleop)
+                            stop_requested=lambda: _teleop_emergency_stop_requested(teleop),
+                            progress_callback=_make_reset_visualization_callback(
+                                teleop,
+                                display_data=cfg.display_data,
+                                display_mode=cfg.display_mode,
+                                dataset=dataset,
+                                fps=cfg.dataset.fps,
+                            ),
                         )
                         if not reset_completed:
                             events["stop_recording"] = True
                             events["exit_early"] = True
                             log_say("Emergency stop requested during robot reset", cfg.play_sounds)
                             break
-                        _sync_teleop_feedback_from_robot(robot, teleop)
+                        frame_index = _next_dataset_frame_index(dataset)
+                        _sync_teleop_feedback_from_robot(
+                            robot,
+                            teleop,
+                            display_data=cfg.display_data,
+                            display_mode=cfg.display_mode,
+                            frame_index=frame_index,
+                            timestamp=frame_index / cfg.dataset.fps
+                            if frame_index is not None
+                            else None,
+                            collision_status="reset",
+                        )
 
                     record_loop(
                         robot=robot,

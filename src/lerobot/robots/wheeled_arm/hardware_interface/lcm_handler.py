@@ -119,12 +119,14 @@ class LCMHandler:
         except Exception as exc:
             logger.debug("Failed to decode right arm state: %s", exc)
 
-    def has_arm_state_feedback(self, max_age_s=None):
+    def has_arm_state_feedback(self, max_age_s=None, min_time_s=None):
         with self.joint_current_pos_lock:
             left_time = self.left_arm_state_time_s
             right_time = self.right_arm_state_time_s
 
         if left_time is None or right_time is None:
+            return False
+        if min_time_s is not None and (left_time < min_time_s or right_time < min_time_s):
             return False
         if max_age_s is None:
             return True

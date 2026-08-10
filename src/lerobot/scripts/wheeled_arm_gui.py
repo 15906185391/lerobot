@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -104,7 +106,7 @@ _prepare_linux_qt_platform()
 
 try:
     from PySide6.QtCore import QObject, QRect, QSettings, QSize, Qt, QTimer, Signal, Slot
-    from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
+    from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPalette, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
         QButtonGroup,
@@ -321,6 +323,15 @@ def _format_command(command: list[str]) -> str:
     return shlex.join(command)
 
 
+def _find_free_tcp_port() -> int:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+    except OSError:
+        return random.randint(20000, 60999)
+
+
 def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -450,7 +461,19 @@ class RuntimeAlert:
     message: str
 
 
+@dataclass(frozen=True)
+class RuntimeFailure:
+    source: str
+    title: str
+    summary: str
+    details: str
+
+
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+PYTHON_TRACEBACK_START = "Traceback (most recent call last):"
+PYTHON_EXCEPTION_RE = re.compile(
+    r"^(?:[A-Za-z_][\w.]*Error|[A-Za-z_][\w.]*Exception|KeyboardInterrupt|SystemExit):\s*.+"
+)
 RUNTIME_ALERT_RULES: tuple[tuple[str, tuple[str, ...], RuntimeAlert], ...] = (
     (
         "any",
@@ -498,7 +521,12 @@ RUNTIME_ALERT_RULES: tuple[tuple[str, tuple[str, ...], RuntimeAlert], ...] = (
     ),
     (
         "any",
-        ("has not received fresh left/right arm state feedback", "没有读取到机器人", "机器人没有读到数据"),
+        (
+            "has not received fresh left/right arm state feedback",
+            "did not receive fresh left/right arm LCM state feedback",
+            "没有读取到机器人",
+            "机器人没有读到数据",
+        ),
         RuntimeAlert(
             "robot-no-feedback",
             "机器人状态反馈缺失",
@@ -583,6 +611,36 @@ def _detect_runtime_alert(line: str) -> RuntimeAlert | None:
         if match_mode == "any" and any(token in clean_line for token in tokens):
             return alert
     return None
+
+
+def _is_python_exception_summary(line: str) -> bool:
+    return bool(PYTHON_EXCEPTION_RE.match(_strip_ansi(line).strip()))
+
+
+def _friendly_failure_message(summary: str) -> str:
+    alert = _detect_runtime_alert(summary)
+    if alert is not None:
+        return alert.message
+
+    clean_summary = _strip_ansi(summary).strip()
+    if not clean_summary:
+        return "命令异常退出，但没有捕获到明确的错误摘要。请查看下方日志详情。"
+    if "ModuleNotFoundError" in clean_summary or "ImportError" in clean_summary:
+        return "当前 Python 环境缺少模块或可选依赖。请确认 conda 环境已激活，并重新执行安装脚本。"
+    if "Permission denied" in clean_summary or "权限不够" in clean_summary:
+        return "程序访问设备、文件或图形驱动时权限不足。请检查设备权限、运行用户和系统库权限。"
+    if "Address already in use" in clean_summary:
+        return "端口已被占用。请关闭旧的可视化/服务进程，或换一个端口后重试。"
+    return "请查看详细日志中的 traceback，按最后一行错误类型和上方命令参数定位原因。"
+
+
+def _trim_failure_details(lines: list[str], max_lines: int = 80) -> str:
+    if len(lines) <= max_lines:
+        return "\n".join(lines)
+    head_count = 12
+    tail_count = max_lines - head_count - 1
+    trimmed = [*lines[:head_count], "... 省略中间日志 ...", *lines[-tail_count:]]
+    return "\n".join(trimmed)
 
 
 class ProcessRunner(QObject):
@@ -715,6 +773,117 @@ class DatasetImageLabel(QLabel):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+
+
+class StatusOrb(QWidget):
+    """Small animated status indicator for the right-side runner panel."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._active = False
+        self._alert = False
+        self._phase = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(42)
+        self._timer.timeout.connect(self._tick)
+        self.setFixedSize(QSize(28, 28))
+        self.setObjectName("StatusOrb")
+
+    def set_state(self, *, active: bool, alert: bool = False) -> None:
+        self._active = active
+        self._alert = alert
+        if active or alert:
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
+            self._phase = 0
+        self.update()
+
+    def _tick(self) -> None:
+        self._phase = (self._phase + 1) % 120
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        if self._alert:
+            core = QColor("#f59e0b")
+            halo = QColor("#fbbf24")
+        elif self._active:
+            core = QColor("#2563eb")
+            halo = QColor("#38bdf8")
+        else:
+            core = QColor("#7d8da3")
+            halo = QColor("#c5d1df")
+
+        pulse = 0.0
+        if self._active or self._alert:
+            pulse = 0.5 + 0.5 * np.sin(self._phase / 120.0 * 2.0 * np.pi)
+
+        center = self.rect().center()
+        halo_alpha = 45 + int(90 * pulse) if self._active or self._alert else 34
+        halo.setAlpha(halo_alpha)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(halo)
+        halo_radius = 9 + int(5 * pulse)
+        painter.drawEllipse(center, halo_radius, halo_radius)
+
+        painter.setBrush(core)
+        painter.drawEllipse(center, 6, 6)
+
+
+class ActivityStrip(QFrame):
+    """Thin animated accent strip showing whether any subprocess is active."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._active = False
+        self._alert = False
+        self._phase = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(70)
+        self._timer.timeout.connect(self._tick)
+        self.setFixedHeight(5)
+        self.setObjectName("ActivityStrip")
+
+    def set_state(self, *, active: bool, alert: bool = False) -> None:
+        self._active = active
+        self._alert = alert
+        if active or alert:
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
+            self._phase = 0
+        self.update()
+
+    def _tick(self) -> None:
+        self._phase = (self._phase + 1) % 160
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        base = QColor("#d5e0ec")
+        painter.setBrush(base)
+        painter.drawRoundedRect(rect, 2, 2)
+
+        if not (self._active or self._alert):
+            return
+
+        color = QColor("#f59e0b") if self._alert else QColor("#2563eb")
+        color.setAlpha(210)
+        width = max(44, rect.width() // 4)
+        x = int((self._phase / 160.0) * (rect.width() + width)) - width
+        painter.setBrush(color)
+        painter.drawRoundedRect(QRect(x, rect.y(), width, rect.height()), 2, 2)
 
 
 class FrameRangeSlider(QFrame):
@@ -1287,8 +1456,16 @@ class PathPicker(QWidget):
 class HelpDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("HelpDialog")
         self.setWindowTitle("Wheeled Arm PICO 使用说明")
-        self.setMinimumSize(QSize(860, 640))
+        self.setMinimumSize(QSize(920, 700))
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor("#f7f9fc"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#172033"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#172033"))
+        self.setPalette(palette)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -1296,15 +1473,16 @@ class HelpDialog(QDialog):
 
         title = QLabel("Wheeled Arm PICO 使用说明")
         title.setObjectName("DialogTitle")
-        subtitle = QLabel("采集、遥操作、复位、查看和数据处理的现场操作速查。")
+        subtitle = QLabel("按现场流程整理：采集前检查、PICO 遥操作、episode 控制、复位急停、查看和数据处理。")
         subtitle.setObjectName("MutedLabel")
         subtitle.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
         tabs = QTabWidget()
+        tabs.setObjectName("HelpTabs")
         tabs.addTab(self._page(_HELP_RECORDING_HTML), "采集")
-        tabs.addTab(self._page(_HELP_TELEOP_HTML), "PICO 遥操作")
+        tabs.addTab(self._page(_HELP_TELEOP_HTML), "遥操作流程")
         tabs.addTab(self._page(_HELP_DATASET_HTML), "数据集")
         tabs.addTab(self._page(_HELP_COMMANDS_HTML), "常用命令")
         tabs.addTab(self._page(_HELP_TROUBLESHOOTING_HTML), "故障排查")
@@ -1325,16 +1503,49 @@ class HelpDialog(QDialog):
         page = QTextBrowser()
         page.setReadOnly(True)
         page.setObjectName("HelpText")
+        page.setAutoFillBackground(True)
+        palette = page.palette()
+        palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#172033"))
+        palette.setColor(QPalette.ColorRole.Window, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#172033"))
+        page.setPalette(palette)
+        page.viewport().setAutoFillBackground(True)
+        page.viewport().setPalette(palette)
         page.setStyleSheet(
-            "QTextBrowser#HelpText, QTextBrowser#HelpText viewport {"
+            "QTextBrowser#HelpText, QTextBrowser#HelpText viewport, QTextBrowser#HelpText QWidget {"
             "background-color: #ffffff; color: #172033;"
             "}"
         )
         page.viewport().setStyleSheet("background-color: #ffffff; color: #172033;")
         page.document().setDefaultStyleSheet(
-            "body { background-color: #ffffff; color: #172033; } "
-            "h2 { color: #101827; } "
-            "pre, code { background-color: #eef3f8; color: #172033; }"
+            "body { background-color: #ffffff; color: #172033; font-size: 14px; line-height: 1.55; } "
+            "h1 { color: #101827; font-size: 24px; margin: 0 0 8px 0; } "
+            "h2 { color: #101827; font-size: 18px; margin: 20px 0 8px 0; } "
+            "h3 { color: #1f3b57; font-size: 15px; margin: 12px 0 6px 0; } "
+            "p { margin: 6px 0 10px 0; } "
+            "ol, ul { margin: 6px 0 12px 22px; padding: 0; } "
+            "li { margin: 6px 0; } "
+            "b { color: #101827; } "
+            "code { background-color: #eef3f8; color: #172033; padding: 2px 5px; border-radius: 4px; } "
+            "pre { background-color: #f3f6fa; color: #172033; border: 1px solid #d7e0eb; "
+            "border-radius: 8px; padding: 10px 12px; margin: 8px 0 12px 0; } "
+            "table { border-collapse: collapse; margin: 8px 0 14px 0; width: 100%; } "
+            "th { background-color: #edf4fb; color: #102036; font-weight: 700; } "
+            "td, th { border: 1px solid #d7e0eb; padding: 8px 10px; vertical-align: top; } "
+            ".lead { color: #405169; font-size: 15px; margin-bottom: 12px; } "
+            ".note { background-color: #f5f8fc; border: 1px solid #d7e0eb; border-radius: 8px; "
+            "padding: 10px 12px; margin: 10px 0 14px 0; } "
+            ".safe { background-color: #eefbf4; border: 1px solid #b8e4c8; border-radius: 8px; "
+            "padding: 10px 12px; margin: 10px 0 14px 0; } "
+            ".warn { background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; "
+            "padding: 10px 12px; margin: 10px 0 14px 0; } "
+            ".step { background-color: #ffffff; border: 1px solid #d9e3ee; border-radius: 8px; "
+            "padding: 10px 12px; margin: 8px 0; } "
+            ".step-title { color: #102036; font-weight: 700; } "
+            ".muted { color: #647084; } "
+            ".kbd { background-color: #172033; color: #ffffff; border-radius: 4px; padding: 2px 6px; "
+            "font-weight: 700; }"
         )
         page.setHtml(f"<body>{html}</body>")
         return page
@@ -1343,99 +1554,262 @@ class HelpDialog(QDialog):
         QApplication.clipboard().setText(HELP_PLAIN_TEXT)
 
 
+class RuntimeExceptionDialog(QDialog):
+    def __init__(self, failure: RuntimeFailure, exit_text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.failure = failure
+        self.setObjectName("RuntimeExceptionDialog")
+        self.setWindowTitle(f"{failure.source}异常")
+        self.setMinimumSize(QSize(760, 500))
+        self.setAutoFillBackground(True)
+
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor("#f7f9fc"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#172033"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#172033"))
+        self.setPalette(palette)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        title = QLabel(f"{failure.source}出现异常")
+        title.setObjectName("DialogTitle")
+        layout.addWidget(title)
+
+        summary = QLabel(f"{failure.title}\n{failure.summary}\n\n进程状态：{exit_text}")
+        summary.setObjectName("RuntimeFailureSummary")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        detail_label = QLabel("详细日志")
+        detail_label.setObjectName("SidebarTitle")
+        layout.addWidget(detail_label)
+
+        self.details = QPlainTextEdit()
+        self.details.setObjectName("ExceptionDetails")
+        self.details.setReadOnly(True)
+        self.details.setPlainText(failure.details.strip() or failure.summary)
+        self.details.setMinimumHeight(260)
+        self.details.setFont(QFont("monospace", 10))
+        layout.addWidget(self.details, 1)
+
+        button_row = QHBoxLayout()
+        copy_btn = QPushButton("复制详情")
+        close_btn = QPushButton("知道了")
+        close_btn.setObjectName("PrimaryButton")
+        copy_btn.clicked.connect(self._copy_details)
+        close_btn.clicked.connect(self.accept)
+        button_row.addStretch(1)
+        button_row.addWidget(copy_btn)
+        button_row.addWidget(close_btn)
+        layout.addLayout(button_row)
+
+    def _copy_details(self) -> None:
+        QApplication.clipboard().setText(self.details.toPlainText())
+
+
 _HELP_RECORDING_HTML = """
-<h2>数据采集流程</h2>
-<ol>
-  <li>确认机器人控制器、PICO 服务、相机和 LCM 网络已经启动。</li>
-  <li>在“采集”页填写 Repo ID、任务、集数、单集秒数、FPS 和 LCM URL。</li>
-  <li>保持“等待 PICO 开始每集”开启时，程序会先遥操作但不保存，按 PICO A 开始保存当前集。</li>
-  <li>采集过程中右侧“命令预览”会展示实际执行命令，“运行日志”会持续输出进程日志。</li>
-  <li>每集结束后，程序会调用 wheeled_arm 的 movej 复位，再进入重置等待阶段。</li>
-  <li>复位 movej 过程中如发现异常，按住 PICO X 会停止继续发布复位轨迹并结束采集。</li>
-  <li>采集完成后可在“查看数据集”页点击“使用最近采集”并打开数据集。</li>
-</ol>
-<p><b>默认数据目录：</b>GUI 使用 LeRobot 的 HF_LEROBOT_HOME。自定义 root 时，查看和编辑也要填写同一个 root。</p>
+<h1>数据采集，一次完整流程</h1>
+<p class="lead">这一页适合第一次上手机器人的用户。按顺序做，不需要记命令行；右侧命令预览只是给现场排查使用。</p>
+
+<div class="safe">
+  <b>实物安全前提：</b>程序默认要求新鲜左右臂 LCM 状态。没有读到
+  <code>MANIP_LEFT_ARM_STATE</code> 和 <code>MANIP_RIGHT_ARM_STATE</code> 时会停止启动，避免机器人从零位或旧状态跳变。
+</div>
+
+<h2>采集前</h2>
+<table>
+  <tr><th>步骤</th><th>要做什么</th><th>确认结果</th></tr>
+  <tr><td>1. 检查现场</td><td>确认急停、供电、机器人工作空间、相机节点、PICO 服务和 LCM 网络。</td><td>人员和障碍物离开工作空间。</td></tr>
+  <tr><td>2. 填写数据集</td><td>填写 Repo ID、任务描述、集数、单集秒数、FPS 和 LCM URL。</td><td>任务描述与实际演示动作一致。</td></tr>
+  <tr><td>3. 打开可视化</td><td>保持 Rerun 数据窗口、Rerun 机器人 3D 和 viser URDF 窗口开启。</td><td>一个看数据流，一个看机器人模型。</td></tr>
+</table>
+
+<h2>采集中</h2>
+<table>
+  <tr><th>步骤</th><th>要做什么</th><th>确认结果</th></tr>
+  <tr><td>4. 开始采集</td><td>点击“开始采集”，观察右侧运行日志。</td><td>robot、teleop、camera 和 PICO 连接成功。</td></tr>
+  <tr><td>5. 摆起始姿态</td><td>等待阶段可遥操作但不保存。移动到任务起点后按 <span class="kbd">A</span>。</td><td>episode 开始写入。</td></tr>
+  <tr><td>6. 完成演示</td><td>按住 grip 控制机械臂，trigger 控制夹爪。</td><td>时间到自动结束，也可按 <span class="kbd">A</span> 提前结束。</td></tr>
+</table>
+
+<h2>一集结束后</h2>
+<table>
+  <tr><th>步骤</th><th>要做什么</th><th>确认结果</th></tr>
+  <tr><td>7. 自动复位</td><td>机器人通过 movej 回到默认采集姿态。</td><td>Rerun 和 viser 同步显示复位过程。</td></tr>
+  <tr><td>8. 重录或停止</td><td>动作失败按 <span class="kbd">B</span>；结束整次采集按 <span class="kbd">X</span>。</td><td>失败集不会误保存，或采集流程正常停止。</td></tr>
+  <tr><td>9. 查看结果</td><td>到“查看数据集”页点击“使用最近采集”，再点击“打开数据集”。</td><td>确认 episode、图像、状态和动作曲线正常。</td></tr>
+</table>
+
+<div class="note">
+  <b>数据目录：</b>默认使用 LeRobot 的 <code>HF_LEROBOT_HOME</code>。如果采集时填写了自定义 root，查看和编辑时也要填写同一个 root。
+</div>
 """
 
 _HELP_TELEOP_HTML = """
-<h2>PICO 遥操作</h2>
-<ul>
-  <li>开始遥操作时，record 会从 LCM 读取当前机器人左右臂关节状态，并同步到 PICO IK 初始位姿。</li>
-  <li>左右 grip 超过阈值后，对应手臂才跟随控制器移动；松开后保持当前机器人末端位置。</li>
-  <li>trigger 映射到左右夹爪开合；开合范围可通过高级参数覆盖。</li>
-  <li>Y 默认重置 PICO 相对位姿基线，不直接移动机器人。</li>
-  <li>A 进入下一阶段或开始当前 episode；B 丢弃并重录当前 episode；X 停止整次采集。</li>
-  <li>机器人自动复位期间，X 也是急停按钮；按下后 movej 插补会中断并关闭 moving flags。</li>
-</ul>
+<h1>PICO 遥操作流程</h1>
+<p class="lead">遥操作时请把注意力放在机器人和 Rerun/viser 状态上。按住 grip 才会移动对应机械臂，松开后保持当前位置。</p>
+
+<div class="safe">
+  <b>启动同步：</b>开始遥操作前，程序会从 LCM 读取当前左右臂关节状态，同步到 PICO IK，并重置 PICO 相对位姿基线。
+</div>
+
+<h2>操作者动作顺序</h2>
+<table>
+  <tr><th>阶段</th><th>怎么做</th><th>看哪里</th></tr>
+  <tr><td>准备</td><td>佩戴 PICO，双手自然放在安全位置，先不要按 grip。</td><td>确认机器人周围没有人员和障碍物。</td></tr>
+  <tr><td>启动</td><td>点击 GUI 的“开始采集”。</td><td>看运行日志是否完成 robot、PICO、相机连接。</td></tr>
+  <tr><td>摆起始姿态</td><td>在等待阶段遥操作机器人到任务起点。</td><td>此时不会写入 episode。</td></tr>
+  <tr><td>开始录制</td><td>按 <span class="kbd">A</span> 开始当前 episode。</td><td>Rerun 显示 observation、action、图像和机器人 3D。</td></tr>
+  <tr><td>演示动作</td><td>按住 grip 移动机械臂，trigger 控制夹爪。</td><td>动作不满意可按 <span class="kbd">B</span> 重录。</td></tr>
+  <tr><td>结束</td><td>时间到自动结束，或按 <span class="kbd">A</span> 提前进入下一阶段。</td><td>每集结束后会自动 movej 复位。</td></tr>
+</table>
+
+<h2>PICO 按键速查</h2>
+<table>
+  <tr><th>输入</th><th>作用</th><th>建议</th></tr>
+  <tr><td><span class="kbd">Left grip</span></td><td>激活左臂跟随左手柄</td><td>移动前先小幅试探。</td></tr>
+  <tr><td><span class="kbd">Right grip</span></td><td>激活右臂跟随右手柄</td><td>松开后右臂保持当前位置。</td></tr>
+  <tr><td><span class="kbd">Trigger</span></td><td>控制对应夹爪开合</td><td>夹爪范围可在高级参数调整。</td></tr>
+  <tr><td><span class="kbd">A</span></td><td>开始 episode 或提前进入下一阶段</td><td>等待阶段最常用。</td></tr>
+  <tr><td><span class="kbd">B</span></td><td>丢弃当前 episode 并重录</td><td>动作失败时使用。</td></tr>
+  <tr><td><span class="kbd">X</span></td><td>停止整次采集；reset 时请求中断 movej</td><td>异常时优先使用硬件急停。</td></tr>
+  <tr><td><span class="kbd">Y</span></td><td>重置 PICO 相对位姿基线</td><td>先松开 grip，再按 Y。</td></tr>
+</table>
+
 <h2>复位姿态</h2>
-<p>episode 间复位使用 movej。目标角度会从度转换为弧度：</p>
+<p>episode 间复位使用 movej，起点来自 LCM 当前反馈，目标角度会从度转换为弧度：</p>
 <pre>左臂: [20, 70, -75, 100, -25, 0, 0]
 右臂: [-20, 70, 75, 100, 25, 0, 0]</pre>
+
+<div class="warn">
+  <b>注意：</b><span class="kbd">X</span> 是软件层停止请求，不能替代硬件急停、断电保护或底层控制器安全机制。
+</div>
 """
 
 _HELP_DATASET_HTML = """
-<h2>查看与编辑数据集</h2>
-<ul>
-  <li>“查看数据集”用于启动 Rerun 或 Foxglove 查看指定 episode。</li>
-  <li>“编辑数据集”支持查看信息、删除 episode、拆分、合并、删除 feature、修改任务文本和重算统计。</li>
-  <li>编辑前先确认输入 Repo ID/root；会生成新数据集的操作需要填写输出 Repo ID/root。</li>
-  <li>内置预览可播放 episode，并把当前 episode 填入“删除 Episode”。</li>
-  <li>转换页面向 OpenX、AgiBot、RoboMIND、LIBERO、RLDS 和 LeRobot 版本转换。</li>
-</ul>
-<p>执行删除、覆盖、重编码等操作前，GUI 会弹出确认框；重要数据建议先备份。</p>
+<h1>数据集查看与编辑</h1>
+<p class="lead">采集完成后先查看，再编辑。确认 episode 正常保存、图像和动作曲线合理，再进入训练或格式转换。</p>
+
+<h2>推荐顺序</h2>
+<div class="step"><span class="step-title">1. 使用最近采集</span><br>
+在“查看数据集”页点击“使用最近采集”，GUI 会跳过空数据集目录，自动填入最近一个已保存 episode 的数据集。</div>
+<div class="step"><span class="step-title">2. 打开数据集</span><br>
+选择 episode 后打开 Rerun/Foxglove，检查图像、observation、action 和 recording metadata。</div>
+<div class="step"><span class="step-title">3. 再做编辑</span><br>
+需要删除失败 episode、修改任务文本、重算统计或重编码视频时，进入“编辑数据集”页。</div>
+
+<h2>编辑操作</h2>
+<table>
+  <tr><th>操作</th><th>用途</th><th>提醒</th></tr>
+  <tr><td>查看信息</td><td>读取数据集 meta 信息。</td><td>适合排查 episode 数量和 frame 数。</td></tr>
+  <tr><td>删除 Episode</td><td>移除失败演示。</td><td>未填写新 Repo ID/root 时会修改原数据集。</td></tr>
+  <tr><td>拆分/合并</td><td>整理训练、验证或多个数据集。</td><td>建议写入新数据集。</td></tr>
+  <tr><td>修改任务文本</td><td>统一或修正任务描述。</td><td>训练前建议确认 task 一致。</td></tr>
+  <tr><td>重算统计</td><td>更新 stats。</td><td>视频或动作改动后再执行。</td></tr>
+</table>
+
+<div class="warn">
+  <b>重要：</b>执行删除、覆盖、重编码等操作前，GUI 会弹出确认框。重要数据建议先备份或输出到新 Repo ID/root。
+</div>
 """
 
 _HELP_COMMANDS_HTML = """
-<h2>常用命令</h2>
-<ul>
-  <li>“系统信息”检查 Python、LeRobot、PyTorch、CUDA、FFmpeg 等环境。</li>
-  <li>“查找相机”和“查找串口”用于采集前确认硬件。</li>
-  <li>“遥操作”可不保存数据，只测试 PICO、IK、LCM 和可视化链路。</li>
-  <li>“回放 Episode”会把数据集动作重新下发给 wheeled_arm。</li>
-  <li>“训练策略”“评估策略”“策略 Rollout”用于数据采集后的训练和部署验证。</li>
-</ul>
-<p>所有页签都会生成命令预览；不确定时先复制命令到终端运行，便于定位环境问题。</p>
+<h1>常用命令怎么选</h1>
+<p class="lead">这一页把命令行工具变成按钮。每次运行前都可以先看右侧“命令预览”，确认参数没问题。</p>
+
+<table>
+  <tr><th>目标</th><th>选择</th><th>什么时候用</th></tr>
+  <tr><td>检查环境</td><td>系统信息</td><td>确认 Python、LeRobot、PyTorch、CUDA、FFmpeg。</td></tr>
+  <tr><td>检查硬件</td><td>查找相机 / 查找串口 / 设置 CAN</td><td>采集前排查连接和权限。</td></tr>
+  <tr><td>只试遥操作</td><td>遥操作</td><td>不保存数据，只验证 PICO、IK、LCM 和可视化链路。</td></tr>
+  <tr><td>检查数据动作</td><td>回放 Episode</td><td>把数据集动作重新下发给 wheeled_arm。</td></tr>
+  <tr><td>训练和部署</td><td>训练策略 / 评估策略 / 策略 Rollout</td><td>数据质量确认后再使用。</td></tr>
+  <tr><td>数据后处理</td><td>数据标注 / 图像增强预览 / 统计补充</td><td>训练前增强或补齐数据。</td></tr>
+</table>
+
+<div class="note">
+  <b>现场排查技巧：</b>如果 GUI 日志不够清楚，复制右侧命令到终端运行，可以看到完整 traceback 和环境变量影响。
+</div>
 """
 
 _HELP_TROUBLESHOOTING_HTML = """
-<h2>故障排查</h2>
-<ul>
-  <li><b>GUI 无法启动：</b>运行 setup 脚本安装 PySide6 和 Qt/xcb 系统库。</li>
-  <li><b>缺少 lcm：</b>在当前 conda 环境执行 <code>python -m pip install lcm</code>。</li>
-  <li><b>没有机器人反馈：</b>确认 LCM URL、组播路由、控制器状态话题和左右臂状态是否正常。</li>
-  <li><b>PICO 不动：</b>确认 XRoboToolkit SDK 已安装，PICO 服务运行，控制器名称与配置一致。</li>
-  <li><b>IK 报碰撞或无解：</b>可临时在高级参数加入 <code>--teleop.use_self_collision=false</code> 排查。</li>
-  <li><b>相机无图：</b>先用“常用命令 > 查找相机”确认 topic、分辨率和 FPS。</li>
-  <li><b>数据集找不到：</b>确认 Repo ID 是否带用户名，以及 root 是否和采集时一致。</li>
-</ul>
+<h1>故障排查</h1>
+<p class="lead">优先看 GUI 右侧“运行提醒”和“运行日志”。下面是现场最常见的问题和第一步处理。</p>
+
+<table>
+  <tr><th>现象</th><th>优先检查</th><th>处理建议</th></tr>
+  <tr><td>GUI 无法启动</td><td>Qt/xcb 系统库</td><td>运行 setup 脚本安装 PySide6 和 Qt/xcb 依赖。</td></tr>
+  <tr><td>缺少 lcm</td><td>当前 conda 环境</td><td>执行 <code>python -m pip install lcm</code>。</td></tr>
+  <tr><td>没有机器人反馈</td><td>LCM URL、组播路由、左右臂状态话题</td><td>确认 <code>MANIP_LEFT_ARM_STATE</code> 和 <code>MANIP_RIGHT_ARM_STATE</code> 正常发布。</td></tr>
+  <tr><td>PICO 不动</td><td>PICO 服务、XRoboToolkit SDK、控制器名称</td><td>先用 mock PICO 或独立 teleop 脚本验证链路。</td></tr>
+  <tr><td>IK 碰撞或无解</td><td>URDF、初始姿态、自碰撞阈值</td><td>排查时可临时加入 <code>--teleop.use_self_collision=false</code>。</td></tr>
+  <tr><td>相机无图</td><td>topic、分辨率、FPS</td><td>先运行“常用命令 > 查找相机”。</td></tr>
+  <tr><td>数据集找不到</td><td>Repo ID 和 root</td><td>确认 Repo ID 带用户名；自定义 root 要和采集时一致。</td></tr>
+</table>
+
+<div class="safe">
+  <b>实物测试建议：</b>第一次上电测试时降低速度、保持空载和安全距离；确认硬件急停有效后再采集正式数据。
+</div>
 """
 
 HELP_PLAIN_TEXT = """Wheeled Arm PICO 使用说明
 
-数据采集:
-1. 确认机器人控制器、PICO 服务、相机和 LCM 网络已经启动。
-2. 在“采集”页填写 Repo ID、任务、集数、单集秒数、FPS 和 LCM URL。
-3. “等待 PICO 开始每集”开启时，按 PICO A 开始保存当前集。
-4. 每集结束后会用 movej 复位，再进入重置等待阶段。
-5. 复位过程中如发现异常，按住 PICO X 会中断 movej 复位并停止采集。
+一、数据采集
+安全前提:
+- 程序默认要求新鲜左右臂 LCM 状态。
+- 没有读到 MANIP_LEFT_ARM_STATE 和 MANIP_RIGHT_ARM_STATE 时会停止启动，避免机器人从零位或旧状态跳变。
 
-PICO 按键:
-A 进入下一阶段或开始当前 episode。
-B 丢弃并重录当前 episode。
-X 停止整次采集；复位 movej 期间也作为急停按钮。
-Y 重置 PICO 相对位姿基线，不直接移动机器人。
+推荐流程:
+1. 检查急停、供电、机器人工作空间、相机节点、PICO 服务和 LCM 网络。
+2. 在“采集”页填写 Repo ID、任务描述、集数、单集秒数、FPS 和 LCM URL。
+3. 初学者建议打开 Rerun 数据窗口、Rerun 机器人 3D 和 viser URDF 窗口。
+4. 点击“开始采集”，先看运行日志是否完成 robot、PICO、相机连接。
+5. 默认“等待 PICO 开始每集”开启。先把机器人移动到任务起点，再按 A 开始保存 episode。
+6. 按住左右 grip 控制对应机械臂，trigger 控制夹爪。
+7. 一集结束后自动 movej 复位；需要重录按 B，需要停止整次采集按 X。
+8. 采集完成后到“查看数据集”页点击“使用最近采集”，再打开数据集。
+
+二、遥操作流程
+1. 佩戴 PICO，双手自然放在安全位置，先不要按 grip。
+2. 启动采集后等待日志出现机器人、相机和 PICO 连接信息。
+3. 程序从 LCM 读取当前左右臂关节状态，同步到 PICO IK，并重置相对位姿基线。
+4. 等待阶段可以遥操作但不会写入 episode。
+5. 按 A 开始保存当前 episode。
+6. 按住左 grip/右 grip 后对应机械臂跟随手柄，松开后保持不动。
+7. 左 trigger/右 trigger 控制左右夹爪。
+8. 手柄相对位置不顺手时，松开 grip 后按 Y 重置 PICO 相对位姿基线。
+9. 动作失败或质量不好时按 B 重录当前 episode。
+10. 按 X 停止全部采集；reset 时也会请求中断 movej。
+
+三、PICO 按键速查
+Left grip: 激活左臂跟随。
+Right grip: 激活右臂跟随。
+Trigger: 控制对应夹爪开合。
+A: 开始 episode 或提前进入下一阶段。
+B: 丢弃当前 episode 并重录。
+X: 停止整次采集；reset 时请求中断 movej。
+Y: 重置 PICO 相对位姿基线，不直接移动机器人。
 
 复位姿态:
 左臂: [20, 70, -75, 100, -25, 0, 0] 度
 右臂: [-20, 70, 75, 100, 25, 0, 0] 度
 程序会转换为弧度并通过 movej 下发。
 
-故障排查:
+四、数据集
+1. 先查看最近采集，确认 episode、图像、observation、action 和 metadata 正常。
+2. 再编辑失败 episode、任务文本、统计或视频。
+3. 删除、覆盖、重编码前建议备份，或输出到新 Repo ID/root。
+
+五、故障排查
 - GUI 无法启动: 运行 setup 脚本安装 PySide6 和 Qt/xcb 系统库。
 - 缺少 lcm: python -m pip install lcm
 - 没有机器人反馈: 检查 LCM URL、组播路由和左右臂状态话题。
 - PICO 不动: 检查 XRoboToolkit SDK、PICO 服务和控制器名称。
 - IK 碰撞/无解: 可临时加 --teleop.use_self_collision=false 排查。
+- 相机无图: 先运行“常用命令 > 查找相机”。
 """
 
 
@@ -1453,6 +1827,11 @@ class WheeledArmGui(QMainWindow):
         self._last_record_no_stamp = False
         self._last_record_resume = False
         self._runtime_alerts: dict[str, RuntimeAlert] = {}
+        self._runtime_failures: dict[str, RuntimeFailure] = {}
+        self._traceback_buffers: dict[str, list[str]] = {}
+        self._recent_log_lines: list[tuple[str, str]] = []
+        self._shown_failure_dialogs: set[str] = set()
+        self._stop_requested_sources: set[str] = set()
 
         self.setWindowTitle("LeRobot Wheeled Arm 控制台")
         self.setWindowIcon(_lerobot_logo_icon())
@@ -1551,6 +1930,7 @@ class WheeledArmGui(QMainWindow):
         self.statusBar().showMessage("就绪")
 
         self._build_menu_bar()
+        self._refresh_visual_state()
 
     @Slot()
     def show_help(self) -> None:
@@ -2825,6 +3205,13 @@ class WheeledArmGui(QMainWindow):
         status_layout = QVBoxLayout(status_box)
         self.status_label = QLabel("未运行")
         self.status_label.setObjectName("StatusPill")
+        self.status_orb = StatusOrb()
+        status_header = QHBoxLayout()
+        status_header.setContentsMargins(0, 0, 0, 0)
+        status_header.setSpacing(8)
+        status_header.addWidget(self.status_orb, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_header.addWidget(self.status_label, 1)
+        self.activity_strip = ActivityStrip()
         self.dataset_hint = QLabel(f"默认数据目录：{HF_LEROBOT_HOME}")
         self.dataset_hint.setWordWrap(True)
         self.dataset_hint.setObjectName("MutedLabel")
@@ -2832,7 +3219,8 @@ class WheeledArmGui(QMainWindow):
         self.runtime_alert_label.setObjectName("RuntimeAlert")
         self.runtime_alert_label.setWordWrap(True)
         self.runtime_alert_label.hide()
-        status_layout.addWidget(self.status_label)
+        status_layout.addLayout(status_header)
+        status_layout.addWidget(self.activity_strip)
         status_layout.addWidget(self.dataset_hint)
         status_layout.addWidget(self.runtime_alert_label)
         layout.addWidget(status_box)
@@ -3157,27 +3545,27 @@ class WheeledArmGui(QMainWindow):
     def _connect_runners(self) -> None:
         self.record_runner.started.connect(lambda command: self._on_started("采集", command))
         self.record_runner.output.connect(lambda line: self.handle_runner_output("采集", line))
-        self.record_runner.failed.connect(lambda message: self.handle_runner_output("采集", message))
+        self.record_runner.failed.connect(lambda message: self.handle_runner_failure("采集", message))
         self.record_runner.finished.connect(self._on_record_finished)
 
         self.viewer_runner.started.connect(lambda command: self._on_started("查看", command))
         self.viewer_runner.output.connect(lambda line: self.handle_runner_output("查看", line))
-        self.viewer_runner.failed.connect(lambda message: self.handle_runner_output("查看", message))
+        self.viewer_runner.failed.connect(lambda message: self.handle_runner_failure("查看", message))
         self.viewer_runner.finished.connect(self._on_viewer_finished)
 
         self.edit_runner.started.connect(lambda command: self._on_started("编辑", command))
         self.edit_runner.output.connect(lambda line: self.handle_runner_output("编辑", line))
-        self.edit_runner.failed.connect(lambda message: self.handle_runner_output("编辑", message))
+        self.edit_runner.failed.connect(lambda message: self.handle_runner_failure("编辑", message))
         self.edit_runner.finished.connect(self._on_edit_finished)
 
         self.conversion_runner.started.connect(lambda command: self._on_started("转换", command))
         self.conversion_runner.output.connect(lambda line: self.handle_runner_output("转换", line))
-        self.conversion_runner.failed.connect(lambda message: self.handle_runner_output("转换", message))
+        self.conversion_runner.failed.connect(lambda message: self.handle_runner_failure("转换", message))
         self.conversion_runner.finished.connect(self._on_conversion_finished)
 
         self.common_runner.started.connect(lambda command: self._on_started("常用", command))
         self.common_runner.output.connect(lambda line: self.handle_runner_output("常用", line))
-        self.common_runner.failed.connect(lambda message: self.handle_runner_output("常用", message))
+        self.common_runner.failed.connect(lambda message: self.handle_runner_failure("常用", message))
         self.common_runner.finished.connect(self._on_common_finished)
 
     def _load_settings(self) -> None:
@@ -3288,6 +3676,8 @@ class WheeledArmGui(QMainWindow):
             command.append(f"--display_ip={self.display_ip.text().strip()}")
         if self.display_port.value() > 0:
             command.append(f"--display_port={self.display_port.value()}")
+        elif self.display_data.isChecked() and self.display_mode.currentText() == "rerun":
+            command.append(f"--display_port={_find_free_tcp_port()}")
         if self.lcm_url.text().strip():
             command.append(f"--robot.lcm_url={self.lcm_url.text().strip()}")
         if self.camera_override.isChecked():
@@ -3589,6 +3979,11 @@ class WheeledArmGui(QMainWindow):
             )
             if self.common_teleop_time_s.value() > 0:
                 command.append(f"--teleop_time_s={self.common_teleop_time_s.value()}")
+            if (
+                self.common_teleop_display_data.isChecked()
+                and self.common_teleop_display_mode.currentText() == "rerun"
+            ):
+                command.append(f"--display_port={_find_free_tcp_port()}")
             if self.common_teleop_lcm_url.text().strip():
                 command.append(f"--robot.lcm_url={self.common_teleop_lcm_url.text().strip()}")
         elif command_type == "replay":
@@ -3695,6 +4090,11 @@ class WheeledArmGui(QMainWindow):
                         f"--dataset.single_task={self.common_rollout_task.text().strip()}",
                     ]
                 )
+            if (
+                self.common_rollout_display_data.isChecked()
+                and self.common_rollout_display_mode.currentText() == "rerun"
+            ):
+                command.append(f"--display_port={_find_free_tcp_port()}")
         elif command_type == "annotate":
             if self.common_annotate_repo_id.text().strip():
                 command.append(f"--repo_id={self.common_annotate_repo_id.text().strip()}")
@@ -4128,6 +4528,7 @@ class WheeledArmGui(QMainWindow):
 
     @Slot()
     def stop_recording(self) -> None:
+        self._stop_requested_sources.add("采集")
         self.record_runner.interrupt()
         self.statusBar().showMessage("已请求停止采集，正在等待清理设备和保存数据。")
         QTimer.singleShot(8000, self._offer_record_kill_if_running)
@@ -4145,6 +4546,7 @@ class WheeledArmGui(QMainWindow):
 
     @Slot()
     def stop_viewer(self) -> None:
+        self._stop_requested_sources.add("查看")
         self.viewer_runner.interrupt()
         QTimer.singleShot(3000, self._offer_viewer_kill_if_running)
 
@@ -4161,6 +4563,7 @@ class WheeledArmGui(QMainWindow):
 
     @Slot()
     def stop_edit(self) -> None:
+        self._stop_requested_sources.add("编辑")
         self.edit_runner.interrupt()
         QTimer.singleShot(3000, self._offer_edit_kill_if_running)
 
@@ -4178,6 +4581,7 @@ class WheeledArmGui(QMainWindow):
 
     @Slot()
     def stop_conversion(self) -> None:
+        self._stop_requested_sources.add("转换")
         self.conversion_runner.interrupt()
         QTimer.singleShot(3000, self._offer_conversion_kill_if_running)
 
@@ -4209,6 +4613,7 @@ class WheeledArmGui(QMainWindow):
 
     @Slot()
     def stop_common_command(self) -> None:
+        self._stop_requested_sources.add("常用")
         self.common_runner.interrupt()
         QTimer.singleShot(3000, self._offer_common_kill_if_running)
 
@@ -4268,8 +4673,11 @@ class WheeledArmGui(QMainWindow):
 
     def _on_started(self, name: str, command: str) -> None:
         self.clear_runtime_alert()
+        self._stop_requested_sources.discard(name)
+        self._shown_failure_dialogs.discard(name)
         self.append_log(name, f"$ {command}")
         self.statusBar().showMessage(f"{name} 已启动")
+        self._refresh_visual_state()
 
     @Slot(int)
     def _on_record_finished(self, code: int) -> None:
@@ -4293,6 +4701,9 @@ class WheeledArmGui(QMainWindow):
         self.status_label.setText(self._current_status_text())
         self.statusBar().showMessage(f"采集{_readable_exit(code)}")
         self.append_log("采集", f"进程{_readable_exit(code)}")
+        self._maybe_show_failure_dialog("采集", code)
+        self._stop_requested_sources.discard("采集")
+        self._refresh_visual_state()
 
     @Slot(int)
     def _on_viewer_finished(self, code: int) -> None:
@@ -4301,6 +4712,9 @@ class WheeledArmGui(QMainWindow):
         self.status_label.setText(self._current_status_text())
         self.statusBar().showMessage(f"查看{_readable_exit(code)}")
         self.append_log("查看", f"进程{_readable_exit(code)}")
+        self._maybe_show_failure_dialog("查看", code)
+        self._stop_requested_sources.discard("查看")
+        self._refresh_visual_state()
 
     @Slot(int)
     def _on_edit_finished(self, code: int) -> None:
@@ -4309,6 +4723,9 @@ class WheeledArmGui(QMainWindow):
         self.status_label.setText(self._current_status_text())
         self.statusBar().showMessage(f"编辑{_readable_exit(code)}")
         self.append_log("编辑", f"进程{_readable_exit(code)}")
+        self._maybe_show_failure_dialog("编辑", code)
+        self._stop_requested_sources.discard("编辑")
+        self._refresh_visual_state()
 
     @Slot(int)
     def _on_conversion_finished(self, code: int) -> None:
@@ -4317,6 +4734,9 @@ class WheeledArmGui(QMainWindow):
         self.status_label.setText(self._current_status_text())
         self.statusBar().showMessage(f"转换{_readable_exit(code)}")
         self.append_log("转换", f"进程{_readable_exit(code)}")
+        self._maybe_show_failure_dialog("转换", code)
+        self._stop_requested_sources.discard("转换")
+        self._refresh_visual_state()
 
     @Slot(int)
     def _on_common_finished(self, code: int) -> None:
@@ -4326,6 +4746,9 @@ class WheeledArmGui(QMainWindow):
         self.status_label.setText(self._current_status_text())
         self.statusBar().showMessage(f"常用命令{_readable_exit(code)}")
         self.append_log("常用", f"进程{_readable_exit(code)}")
+        self._maybe_show_failure_dialog("常用", code)
+        self._stop_requested_sources.discard("常用")
+        self._refresh_visual_state()
 
     def _current_status_text(self) -> str:
         if self.record_runner.is_running:
@@ -4340,7 +4763,31 @@ class WheeledArmGui(QMainWindow):
             return "常用命令运行中"
         return "未运行"
 
+    def _has_running_process(self) -> bool:
+        return (
+            self.record_runner.is_running
+            or self.viewer_runner.is_running
+            or self.edit_runner.is_running
+            or self.conversion_runner.is_running
+            or self.common_runner.is_running
+        )
+
+    def _refresh_visual_state(self) -> None:
+        if not hasattr(self, "status_orb"):
+            return
+        active = self._has_running_process()
+        alert = bool(self._runtime_alerts or self._runtime_failures)
+        status_state = "alert" if alert else "active" if active else "idle"
+        self.status_label.setProperty("state", status_state)
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
+        self.status_orb.set_state(active=active, alert=alert)
+        self.activity_strip.set_state(active=active, alert=alert)
+
     def append_log(self, source: str, line: str) -> None:
+        self._recent_log_lines.append((source, _strip_ansi(line)))
+        if len(self._recent_log_lines) > 600:
+            self._recent_log_lines = self._recent_log_lines[-600:]
         self.log_view.append(f"[{source}] {line}")
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
@@ -4351,33 +4798,152 @@ class WheeledArmGui(QMainWindow):
 
     def clear_runtime_alert(self) -> None:
         self._runtime_alerts.clear()
+        self._runtime_failures.clear()
+        self._traceback_buffers.clear()
+        self._shown_failure_dialogs.clear()
         if hasattr(self, "runtime_alert_label"):
             self.runtime_alert_label.clear()
             self.runtime_alert_label.hide()
+        self._refresh_visual_state()
 
     def handle_runner_output(self, source: str, line: str) -> None:
         self.append_log(source, line)
+        self._track_runtime_exception(source, line)
         alert = _detect_runtime_alert(line)
-        if alert is None or alert.key in self._runtime_alerts:
+        if alert is None:
             return
 
+        self._add_runtime_alert(source, alert)
+
+    def handle_runner_failure(self, source: str, message: str) -> None:
+        self.append_log(source, message)
+        if "已在运行" in message:
+            self.statusBar().showMessage(message, 5000)
+            return
+        self._register_runtime_failure(
+            source,
+            title=f"{source}启动失败",
+            summary=message,
+            details=self._recent_log_tail(source),
+        )
+        self._maybe_show_failure_dialog(source, 1)
+
+    def _add_runtime_alert(self, source: str, alert: RuntimeAlert) -> None:
+        if alert.key in self._runtime_alerts:
+            return
         self._runtime_alerts[alert.key] = alert
         self._refresh_runtime_alert_label()
         self.statusBar().showMessage(f"{alert.title}（当前 {len(self._runtime_alerts)} 项提醒）", 8000)
         self.append_log(source, f"运行提醒：{alert.title} - {alert.message}")
 
+    def _track_runtime_exception(self, source: str, line: str) -> None:
+        clean_line = _strip_ansi(line).rstrip()
+        if not clean_line:
+            return
+
+        if clean_line.startswith(PYTHON_TRACEBACK_START):
+            self._traceback_buffers[source] = [clean_line]
+            return
+
+        buffer = self._traceback_buffers.get(source)
+        if buffer is not None:
+            buffer.append(clean_line)
+            if _is_python_exception_summary(clean_line):
+                self._register_runtime_failure(
+                    source,
+                    title="Python 异常",
+                    summary=clean_line,
+                    details=_trim_failure_details(buffer),
+                )
+                self._traceback_buffers.pop(source, None)
+            elif len(buffer) >= 100:
+                self._register_runtime_failure(
+                    source,
+                    title="Python 异常",
+                    summary=next((item for item in reversed(buffer) if item.strip()), "Traceback 未完整结束"),
+                    details=_trim_failure_details(buffer),
+                )
+                self._traceback_buffers.pop(source, None)
+            return
+
+        abnormal_tokens = (
+            "terminate called without an active exception",
+            "Aborted",
+            "core dumped",
+            "已中止",
+            "Segmentation fault",
+        )
+        if _is_python_exception_summary(clean_line) or any(token in clean_line for token in abnormal_tokens):
+            self._register_runtime_failure(
+                source,
+                title="运行异常",
+                summary=clean_line,
+                details=self._recent_log_tail(source),
+            )
+
+    def _register_runtime_failure(self, source: str, title: str, summary: str, details: str) -> None:
+        alert = _detect_runtime_alert(summary) or _detect_runtime_alert(details)
+        if alert is not None:
+            title = alert.title
+            summary = f"{summary}\n\n处理建议：{alert.message}"
+            self._add_runtime_alert(source, alert)
+        else:
+            summary = f"{summary}\n\n处理建议：{_friendly_failure_message(summary)}"
+
+        self._runtime_failures[source] = RuntimeFailure(
+            source=source,
+            title=title,
+            summary=summary,
+            details=details,
+        )
+        self._refresh_runtime_alert_label()
+        self.statusBar().showMessage(f"{source}出现异常：{title}", 10000)
+
+    def _recent_log_tail(self, source: str, max_lines: int = 80) -> str:
+        lines = [f"[{log_source}] {line}" for log_source, line in self._recent_log_lines if log_source == source]
+        return _trim_failure_details(lines[-max_lines:])
+
+    def _maybe_show_failure_dialog(self, source: str, code: int) -> None:
+        failure = self._runtime_failures.get(source)
+        if failure is None and code == 0:
+            return
+        if failure is None and source in self._stop_requested_sources and code in {-2, -15, 130, 143}:
+            return
+        if source in self._shown_failure_dialogs:
+            return
+
+        if failure is None:
+            failure = RuntimeFailure(
+                source=source,
+                title="命令异常退出",
+                summary=f"{source}进程{_readable_exit(code)}。请查看详细日志定位原因。",
+                details=self._recent_log_tail(source),
+            )
+            self._runtime_failures[source] = failure
+            self._refresh_runtime_alert_label()
+
+        self._shown_failure_dialogs.add(source)
+        dialog = RuntimeExceptionDialog(failure, _readable_exit(code), self)
+        dialog.exec()
+
     def _refresh_runtime_alert_label(self) -> None:
-        if not self._runtime_alerts:
+        if not self._runtime_alerts and not self._runtime_failures:
             self.runtime_alert_label.clear()
             self.runtime_alert_label.hide()
             return
 
-        lines = [f"运行提醒（{len(self._runtime_alerts)}项）"]
+        total = len(self._runtime_alerts) + len(self._runtime_failures)
+        lines = [f"运行提醒（{total}项）"]
+        for failure in self._runtime_failures.values():
+            first_line = failure.summary.splitlines()[0] if failure.summary else failure.title
+            lines.append(f"- {failure.source}异常：{failure.title}")
+            lines.append(f"  {first_line}")
         for index, alert in enumerate(self._runtime_alerts.values(), start=1):
             lines.append(f"{index}. {alert.title}")
             lines.append(f"   {alert.message}")
         self.runtime_alert_label.setText("\n".join(lines))
         self.runtime_alert_label.show()
+        self._refresh_visual_state()
 
     @Slot()
     def copy_active_command(self) -> None:
@@ -4406,6 +4972,33 @@ QMainWindow, #AppRoot {
         stop: 0.46 #f4f7fb,
         stop: 1 #e8edf6
     );
+}
+#HelpDialog {
+    background: #f7f9fc;
+    color: #172033;
+}
+#HelpDialog QWidget {
+    background: transparent;
+    color: #172033;
+}
+#HelpDialog QPushButton {
+    background: #ffffff;
+}
+#HelpTabs {
+    background: #f7f9fc;
+}
+#HelpTabs::pane {
+    background: #ffffff;
+    border: 1px solid #cbd7e4;
+    border-radius: 10px;
+}
+#HelpTabs QTabBar::tab {
+    background: #eaf0f6;
+    color: #516075;
+}
+#HelpTabs QTabBar::tab:selected {
+    background: #ffffff;
+    color: #102036;
 }
 QToolTip {
     background: #ffffff;
@@ -4439,7 +5032,8 @@ QTextBrowser#HelpText {
     background-color: #ffffff;
     color: #172033;
 }
-QTextBrowser#HelpText QWidget {
+QTextBrowser#HelpText QWidget,
+QTextBrowser#HelpText viewport {
     background-color: #ffffff;
     color: #172033;
 }
@@ -4682,12 +5276,22 @@ QMenuBar::item:selected {
     background: #dceff4;
 }
 #StatusPill {
-    background: #e9f8f1;
-    color: #08704f;
-    border: 1px solid #b6ead1;
+    background: #eef3f8;
+    color: #405169;
+    border: 1px solid #c9d6e4;
     border-radius: 8px;
     padding: 9px 12px;
     font-weight: 700;
+}
+#StatusPill[state="active"] {
+    background: #e8f0ff;
+    color: #1d4ed8;
+    border-color: #b8cdfb;
+}
+#StatusPill[state="alert"] {
+    background: #fff4d6;
+    color: #8a4b08;
+    border-color: #f2c56b;
 }
 #RuntimeAlert {
     background: rgba(255, 244, 214, 225);
@@ -4696,6 +5300,33 @@ QMenuBar::item:selected {
     border-radius: 8px;
     padding: 9px 11px;
     font-weight: 650;
+}
+#RuntimeExceptionDialog, QMessageBox {
+    background: #f7f9fc;
+    color: #172033;
+}
+#RuntimeFailureSummary {
+    background: #fff7ed;
+    color: #7a3414;
+    border: 1px solid #fed7aa;
+    border-radius: 8px;
+    padding: 11px 12px;
+    font-weight: 650;
+}
+#ExceptionDetails {
+    background: #101827;
+    color: #dbeafe;
+    border: 1px solid #26364f;
+    border-radius: 8px;
+    padding: 10px;
+}
+QMessageBox QLabel {
+    color: #172033;
+}
+QMessageBox QTextEdit {
+    background: #ffffff;
+    color: #172033;
+    border: 1px solid #cbd7e4;
 }
 QCheckBox {
     spacing: 8px;

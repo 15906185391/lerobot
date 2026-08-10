@@ -670,20 +670,26 @@ grippers=[...]
 
 处理：
 
+- `WheeledArmConfig` 默认 `require_fresh_feedback=True`，实物安全模式下必须读到新鲜左右臂 LCM 状态才允许继续。
+- `WheeledArmConfig.feedback_wait_timeout_s=5.0` 控制安全门等待 LCM feedback 的最大时间。
+- `WheeledArm.connect()` 会等待新鲜 `MANIP_LEFT_ARM_STATE` / `MANIP_RIGHT_ARM_STATE`；默认未收到则直接报错中止连接，而不是继续使用零位。
 - `lerobot_record.py` 新增 `_sync_teleop_feedback_from_robot(robot, teleop)`：
-  - robot 为 `wheeled_arm` 且 `has_valid_feedback=True` 时，读取 `robot.get_observation()`。
+  - robot 为 `wheeled_arm` 时，默认先调用 `robot.require_valid_feedback("initial teleop feedback sync")`。
+  - 通过后读取 `robot.get_observation()`；左右臂关节来自 LCM listener 写入的 `joint_current_pos`。
   - 调用 `teleop.send_feedback(obs)` 将当前 LCM 关节状态同步给 PICO teleop。
   - 同步后调用 `teleop.reset_baseline()`，避免 PICO 相对位姿沿用旧基线导致跳变。
 - `record()` 中在 `robot.connect()` 后立即同步一次 PICO 初始关节状态。
 - episode 间 reset 阶段前，如果 robot 暴露 `reset_to_rest_pose()`，则先调用该方法进行 movej 复位，再同步一次 PICO 初始状态。
 - `WheeledArm.reset_to_rest_pose()` 复用当前 robot 的 `_handler`，不新建第二个 LCM 连接。
 - `WheeledArm.reset_to_rest_pose()` 行为：
-  - 从 `self._handler.joint_current_pos` 读取 23 维当前状态。
+  - reset 前先要求新鲜左右臂 LCM feedback。
+  - 从 `self._handler.joint_current_pos` 读取 23 维当前状态；该缓存只由 LCM 状态 listener 更新，不再由 movej 插补本地写入。
   - 只替换 `[0:7]` 左臂和 `[7:14]` 右臂目标。
   - 左臂目标：`np.deg2rad([20.0, 70.0, -75.0, 100.0, -25.0, 0.0, 0.0])`
   - 右臂目标：`np.deg2rad([-20.0, 70.0, 75.0, 100.0, 25.0, 0.0, 0.0])`
   - movej 复位时只打开左右臂 moving flag，关闭夹爪、头、腰、腿 moving flag。
-  - movej 完成后将本地 `joint_current_pos` 缓存更新为目标值，方便后续立刻同步给 PICO teleop。
+  - movej 完成后再次等待 reset 开始之后的新鲜 LCM feedback，再允许后续同步给 PICO teleop。
+  - movej 插补会通过 `progress_callback` 刷新 viser/Rerun 可视化，但不会写入 `joint_current_pos` 状态缓存。
 - 新增测试：
   - `tests/robots/test_wheeled_arm.py::test_reset_to_rest_pose_uses_movej_with_arm_targets_in_radians`
   - 校验左右臂目标角度已转弧度。
@@ -850,3 +856,66 @@ git diff --check -- src/lerobot/scripts/wheeled_arm_gui.py
   - `test_reset_to_rest_pose_stops_when_movej_is_interrupted`
   - `test_pico_emergency_stop_button_is_level_triggered`
 - `git diff --check` 通过。
+
+### 8. 停止采集后的 Rerun 清理与 reset 可视化同步
+
+问题：
+
+- GUI 点击停止采集后，如果 Rerun 窗口仍占用默认端口，再次开始采集可能失败，用户需要手动关闭 Rerun。
+- episode 结束后执行 movej reset 时，机器人实际会复位，但 Rerun/viser 里的机器人模型可能停留在 reset 前一帧。
+
+原因：
+
+- Rerun SDK `rr.spawn()` 默认 `detach_process=True`，viewer 会脱离 `lerobot-record` 进程组；GUI 停止采集只中断 record 进程，旧 Rerun viewer 可能继续占用端口。
+- movej reset 在 `record_loop()` 外部阻塞执行，原来只下发 LCM 轨迹，不调用 teleop 的可视化刷新，也不向 Rerun 记录机器人 3D 状态。
+
+处理：
+
+- `src/lerobot/utils/rerun_visualization.py`
+  - 本地 `rr.spawn()` 现在默认 `detach_process=False`，使 GUI 停止采集时 Rerun viewer 跟随采集进程组清理。
+  - `--display_port` 对本地 Rerun spawn 也生效。
+  - 记录本次本地 Rerun viewer PID，`shutdown_rerun()` 时会先断开 SDK，再主动 SIGTERM/SIGKILL 关闭该 viewer。
+  - 可通过环境变量 `LEROBOT_RERUN_DETACH_PROCESS=true` 恢复旧的 detached 行为。
+  - `shutdown_rerun()` 会先 `rr.disconnect()`，再 `rr.rerun_shutdown()`。
+- `src/lerobot/scripts/wheeled_arm_gui.py`
+  - GUI 本地 Rerun 不手动填端口时，会自动挑一个空闲高位端口传入 `--display_port`，避免旧窗口占用 9876 阻塞新采集。
+- `src/lerobot/robots/wheeled_arm/hardware_interface/trajectory_plan/moveJ.py`
+  - movej 插补发布后会更新本地 `joint_current_pos` 缓存。
+  - 新增 `progress_callback`，用于 reset 过程中同步可视化。
+- `src/lerobot/robots/wheeled_arm/wheeled_arm.py`
+  - `reset_to_rest_pose()` 新增 `progress_callback` 参数。
+  - 新增 `joint_observation_from_package()`，可只用关节 package 构造 16 维关节/夹爪 observation，不读取相机。
+- `src/lerobot/teleoperators/wheeled_arm_pico/wheeled_arm_pico.py`
+  - 新增 `refresh_visualization_from_feedback()`，可在 IK 主循环外强制刷新 viser 和 Rerun robot 状态。
+  - `log_rerun_robot_visualization(..., force=True)` 可绕过刷新频率限制，立即写一帧。
+- `src/lerobot/scripts/lerobot_record.py`
+  - 初始同步、movej reset 过程中、movej reset 完成后，都会将机器人反馈同步到 teleop 可视化。
+  - reset 过程中约 10Hz 刷新 Rerun/viser，reset 完成后强制写最后一帧复位姿态。
+
+验证：
+
+- `python -m py_compile` 已通过相关文件。
+- `git diff --check` 已通过相关文件。
+- `xr` 环境没有安装 `pytest`，因此未跑 pytest runner；已直接调用关键测试函数验证 reset/PICO 控制逻辑。
+
+补充：
+
+- 2026-08-10 已在 conda `xr` 环境安装：
+  - `pytest==8.4.2`
+  - `lark==1.3.1`
+  - `packaging==25.0`
+- 选择 pytest 8.x 是为了兼容 ROS Humble 的 `launch_testing` pytest 插件；pytest 9 会触发旧 hook 签名不兼容。
+- 在当前沙箱里直接运行 pytest 会被 `DISPLAY=:0` / pynput 权限限制影响；使用
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` 已通过：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/kuanli/miniconda3/envs/xr/bin/python -m pytest \
+  tests/robots/test_wheeled_arm.py \
+  tests/teleoperators/test_wheeled_arm_pico.py -q
+```
+
+结果：
+
+```text
+17 passed
+```

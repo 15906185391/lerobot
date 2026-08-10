@@ -21,6 +21,10 @@ importing from here directly. Requires the ``viz`` extra (``pip install 'lerobot
 
 import numbers
 import os
+import random
+import signal
+import socket
+import time
 
 import numpy as np
 
@@ -29,6 +33,8 @@ from lerobot.lerobot_types import RobotAction, RobotObservation
 
 from .constants import ACTION, ACTION_PREFIX, OBS_PREFIX, OBS_STR
 from .import_utils import require_package
+
+_RERUN_VIEWER_PID: int | None = None
 
 
 def _is_scalar(x):
@@ -52,16 +58,34 @@ def init_rerun(
     require_package("rerun-sdk", extra="viz", import_name="rerun")
     import rerun as rr
 
+    global _RERUN_VIEWER_PID
+    _RERUN_VIEWER_PID = None
     log_rerun_data.blueprint = None  # Reset blueprint cache for new session
 
     batch_size = os.getenv("RERUN_FLUSH_NUM_BYTES", "8000")
     os.environ["RERUN_FLUSH_NUM_BYTES"] = batch_size
     rr.init(session_name)
     memory_limit = os.getenv("LEROBOT_RERUN_MEMORY_LIMIT", "10%")
-    if ip and port:
-        rr.connect_grpc(url=f"rerun+http://{ip}:{port}/proxy")
+    rerun_port = port or int(os.getenv("LEROBOT_RERUN_PORT", "9876"))
+    if ip:
+        rr.connect_grpc(url=f"rerun+http://{ip}:{rerun_port}/proxy")
     else:
-        rr.spawn(memory_limit=memory_limit)
+        if _env_bool("LEROBOT_RERUN_AUTO_PORT", False) and port is None:
+            rerun_port = _find_free_tcp_port()
+        # Keep the viewer in the caller's process group by default, so Ctrl-C/GUI stop also
+        # cleans up the spawned Rerun process and frees the port for the next recording.
+        detach_process = _env_bool("LEROBOT_RERUN_DETACH_PROCESS", False)
+        spawn_viewer = _get_rerun_spawn_viewer()
+        if spawn_viewer is None:
+            rr.spawn(port=rerun_port, memory_limit=memory_limit)
+            return
+
+        _RERUN_VIEWER_PID = spawn_viewer(
+            port=rerun_port,
+            memory_limit=memory_limit,
+            detach_process=detach_process,
+        )
+        rr.connect_grpc(f"rerun+http://127.0.0.1:{rerun_port}/proxy")
 
 
 def shutdown_rerun() -> None:
@@ -70,7 +94,67 @@ def shutdown_rerun() -> None:
     require_package("rerun-sdk", extra="viz", import_name="rerun")
     import rerun as rr
 
+    disconnect = getattr(rr, "disconnect", None)
+    if callable(disconnect):
+        disconnect()
     rr.rerun_shutdown()
+    _terminate_spawned_rerun_viewer()
+
+
+def _get_rerun_spawn_viewer():
+    try:
+        from rerun import _spawn
+    except Exception:
+        return None
+    return getattr(_spawn, "_spawn_viewer", None)
+
+
+def _terminate_spawned_rerun_viewer(timeout_s: float = 2.0) -> None:
+    global _RERUN_VIEWER_PID
+    pid = _RERUN_VIEWER_PID
+    _RERUN_VIEWER_PID = None
+    if pid is None:
+        return
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        return
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            waited_pid, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if waited_pid == pid:
+            return
+        time.sleep(0.05)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        return
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _find_free_tcp_port() -> int:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+    except OSError:
+        return random.randint(20000, 60999)
 
 
 def _build_blueprint(

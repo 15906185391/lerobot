@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import threading
+import time
 from unittest.mock import patch
 
 import numpy as np
@@ -32,6 +33,7 @@ class FakeLCMHandler:
         self.last_package = None
         self.stopped = False
         self.has_feedback = True
+        self.arm_state_time_s = time.monotonic()
 
         for flag in (
             "left_arm_moving",
@@ -47,8 +49,17 @@ class FakeLCMHandler:
     def upper_body_data_publisher(self, package):
         self.last_package = np.asarray(package).copy()
 
-    def has_arm_state_feedback(self, max_age_s=None):
-        return self.has_feedback
+    def has_arm_state_feedback(self, max_age_s=None, min_time_s=None):
+        if not self.has_feedback:
+            return False
+        if min_time_s is not None and self.arm_state_time_s < min_time_s:
+            return False
+        return True
+
+    def simulate_arm_state_feedback(self, joint_position):
+        with self.joint_current_pos_lock:
+            self.joint_current_pos[: len(joint_position)] = joint_position
+            self.arm_state_time_s = time.monotonic()
 
     def stop(self):
         self.stopped = True
@@ -154,15 +165,23 @@ def test_reset_to_rest_pose_uses_movej_with_arm_targets_in_radians():
     calls = []
 
     class FakeMOVEJ:
-        def __init__(self, lcm_handler, collision_detection, stop_requested=None):
+        def __init__(
+            self,
+            lcm_handler,
+            collision_detection,
+            stop_requested=None,
+            progress_callback=None,
+        ):
             self.lcm_handler = lcm_handler
             self.collision_detection = collision_detection
             self.stop_requested = stop_requested
+            self.progress_callback = progress_callback
 
         def moveJ2target(self, current_position, target_position):
             calls.append(
                 (np.asarray(current_position).copy(), np.asarray(target_position).copy())
             )
+            self.lcm_handler.simulate_arm_state_feedback(target_position)
             return True
 
     with patch("lerobot.robots.wheeled_arm.hardware_interface.trajectory_plan.moveJ.MOVEJ", FakeMOVEJ):
@@ -194,8 +213,15 @@ def test_reset_to_rest_pose_stops_when_movej_is_interrupted():
     robot, handler = _make_robot()
 
     class InterruptedMOVEJ:
-        def __init__(self, lcm_handler, collision_detection, stop_requested=None):
+        def __init__(
+            self,
+            lcm_handler,
+            collision_detection,
+            stop_requested=None,
+            progress_callback=None,
+        ):
             self.stop_requested = stop_requested
+            self.progress_callback = progress_callback
 
         def moveJ2target(self, current_position, target_position):
             assert self.stop_requested is not None

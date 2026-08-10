@@ -21,12 +21,14 @@ class MOVEJ():
         LCMHandler,
         Collision_Detection,
         stop_requested: Callable[[], bool] | None = None,
+        progress_callback: Callable[[np.ndarray], None] | None = None,
     ):
 
         # lcm
         self.lcm_handler = LCMHandler
         self.Collision_Detection = Collision_Detection
         self.stop_requested = stop_requested
+        self.progress_callback = progress_callback
         self.interrupted = False
 
 
@@ -124,6 +126,7 @@ class MOVEJ():
                 sys.exit()    # 退出程序循环，机械臂停止运动
 
             self.lcm_handler.upper_body_data_publisher(self.interpolation_result)
+            self._notify_progress(self.interpolation_result)
 
             if self._stop_requested():
                 print("收到 PICO 急停请求，停止 movej 复位插补！！！！")
@@ -162,3 +165,11 @@ class MOVEJ():
         ):
             if hasattr(self.lcm_handler, flag_name):
                 setattr(self.lcm_handler, flag_name, False)
+
+    def _notify_progress(self, joint_position):
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(np.asarray(joint_position, dtype=np.float32).copy())
+        except Exception as exc:
+            print(f"movej 复位可视化进度回调失败，继续插补：{exc}")

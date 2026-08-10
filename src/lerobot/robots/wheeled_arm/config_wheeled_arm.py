@@ -80,6 +80,13 @@ class WheeledArmConfig(RobotConfig):
     # Set to None to accept the latest received feedback regardless of age.
     state_feedback_timeout_s: float | None = 1.0
 
+    # Safety gate for physical operation: require fresh left/right arm LCM feedback before
+    # starting teleoperation and before computing reset movej start positions.
+    require_fresh_feedback: bool = True
+
+    # Maximum time to wait for fresh left/right arm state feedback at safety gates.
+    feedback_wait_timeout_s: float = 5.0
+
     def __post_init__(self) -> None:
         super().__post_init__()
 
@@ -100,3 +107,6 @@ class WheeledArmConfig(RobotConfig):
                 f"`controlled_parts` contains unknown parts {sorted(unknown_parts)}. "
                 f"Known parts are {list(WHEELED_ARM_PARTS)}."
             )
+
+        if self.feedback_wait_timeout_s < 0:
+            raise ValueError("`feedback_wait_timeout_s` must be non-negative.")

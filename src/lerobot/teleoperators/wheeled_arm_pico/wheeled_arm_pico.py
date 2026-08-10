@@ -328,6 +328,32 @@ class WheeledArmPico(Teleoperator):
         self._configuration.update(q)
 
     @check_if_not_connected
+    def refresh_visualization_from_feedback(
+        self,
+        feedback: dict,
+        *,
+        collision_status: str = "sync",
+        min_barrier: float | None = None,
+    ) -> None:
+        """Force the visualizers to match robot feedback outside the normal IK loop."""
+        self.send_feedback(feedback)
+
+        assert self._configuration is not None
+
+        left_pose = self._configuration.get_transform_frame_to_world(LEFT_TCP).copy()
+        right_pose = self._configuration.get_transform_frame_to_world(RIGHT_TCP).copy()
+        self._update_visualization(
+            left_pose,
+            right_pose,
+            xr_ok=False,
+            left_active=False,
+            right_active=False,
+            collision_status=collision_status,
+            min_barrier=min_barrier,
+            force=True,
+        )
+
+    @check_if_not_connected
     def get_action(self) -> RobotAction:
         assert self._configuration is not None
         assert self._tasks is not None
@@ -386,6 +412,7 @@ class WheeledArmPico(Teleoperator):
                 right_active,
                 collision_status,
                 min_barrier,
+                force=True,
             )
             return self._last_action.copy()
 
@@ -501,6 +528,7 @@ class WheeledArmPico(Teleoperator):
         right_active: bool,
         collision_status: str,
         min_barrier: float | None,
+        force: bool = False,
     ) -> None:
         self._last_visualization_state = {
             "left_target_pose": left_target_pose.copy(),
@@ -521,10 +549,14 @@ class WheeledArmPico(Teleoperator):
             right_active=right_active,
             collision_status=collision_status,
             min_barrier=min_barrier,
+            force=force,
         )
 
     def log_rerun_robot_visualization(
-        self, frame_index: int | None = None, timestamp: float | None = None
+        self,
+        frame_index: int | None = None,
+        timestamp: float | None = None,
+        force: bool = False,
     ) -> None:
         if (
             not self.config.rerun_visualize_robot
@@ -532,7 +564,7 @@ class WheeledArmPico(Teleoperator):
             or self._last_visualization_state is None
         ):
             return
-        if self.config.rerun_robot_update_hz > 0:
+        if not force and self.config.rerun_robot_update_hz > 0:
             now = time.monotonic()
             if now - self._rerun_robot_last_update_t < 1.0 / self.config.rerun_robot_update_hz:
                 return
