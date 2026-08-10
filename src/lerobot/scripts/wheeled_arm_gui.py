@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -173,6 +174,7 @@ def _find_project_root() -> Path:
 
 
 PROJECT_ROOT = _find_project_root()
+LEROBOT_LOGO_PATH = PROJECT_ROOT / "media/readme/lerobot-logo-thumbnail.png"
 EDIT_OPERATION_LABELS = {
     "查看信息": "info",
     "删除 Episode": "delete_episodes",
@@ -184,6 +186,26 @@ EDIT_OPERATION_LABELS = {
     "重算统计": "recompute_stats",
     "重编码视频": "reencode_videos",
 }
+
+
+def _load_lerobot_logo_pixmap(max_size: QSize | None = None) -> QPixmap:
+    if not LEROBOT_LOGO_PATH.exists():
+        return QPixmap()
+
+    pixmap = QPixmap(str(LEROBOT_LOGO_PATH))
+    if pixmap.isNull() or max_size is None:
+        return pixmap
+    return pixmap.scaled(
+        max_size,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
+def _lerobot_logo_icon() -> QIcon:
+    if not LEROBOT_LOGO_PATH.exists():
+        return QIcon()
+    return QIcon(str(LEROBOT_LOGO_PATH))
 EDIT_OPERATION_ORDER = list(EDIT_OPERATION_LABELS)
 ANY4LEROBOT_BACKEND = PROJECT_ROOT / "GUI_reference/Any4LeRobotGUI/backend"
 CONVERSION_LABELS = {
@@ -419,6 +441,148 @@ def find_latest_local_dataset(repo_id: str, root: str | None, no_stamp: bool, re
 class ProcessHandle:
     process: subprocess.Popen
     command: list[str]
+
+
+@dataclass(frozen=True)
+class RuntimeAlert:
+    key: str
+    title: str
+    message: str
+
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+RUNTIME_ALERT_RULES: tuple[tuple[str, tuple[str, ...], RuntimeAlert], ...] = (
+    (
+        "any",
+        (
+            "has not received any images yet",
+            "No image received from",
+            "No image available",
+            "No cameras",
+            "No camera",
+            "没有相机输入",
+            "没有深度相机输入",
+        ),
+        RuntimeAlert(
+            "camera-no-image",
+            "没有相机图像输入",
+            "未从相机 topic 读到图像。请确认相机节点已启动、topic 名称正确，并先在“常用命令 > 查找相机”中验证图像流。",
+        ),
+    ),
+    (
+        "all",
+        ("latest image is too old",),
+        RuntimeAlert(
+            "camera-stale-image",
+            "相机图像超时",
+            "相机有历史图像但没有持续更新。请检查相机帧率、ROS2 网络、USB/驱动状态和 GUI 中配置的 FPS。",
+        ),
+    ),
+    (
+        "all",
+        ("ROS2Camera", "is not connected"),
+        RuntimeAlert(
+            "camera-connect",
+            "相机连接异常",
+            "相机连接或读取失败。请确认 ROS2 环境已 source、相机 topic 可见，必要时重新启动相机节点。",
+        ),
+    ),
+    (
+        "any",
+        ("Failed to connect to ROS 2 camera",),
+        RuntimeAlert(
+            "camera-connect",
+            "相机连接异常",
+            "相机连接或读取失败。请确认 ROS2 环境已 source、相机 topic 可见，必要时重新启动相机节点。",
+        ),
+    ),
+    (
+        "any",
+        ("has not received fresh left/right arm state feedback", "没有读取到机器人", "机器人没有读到数据"),
+        RuntimeAlert(
+            "robot-no-feedback",
+            "机器人状态反馈缺失",
+            "没有读到新鲜的左右臂 LCM 状态。请检查机器人控制器、LCM URL、组播路由和状态发布程序。",
+        ),
+    ),
+    (
+        "any",
+        ("Could not create wheeled_arm LCM connection", "Couldn't create LCM", "No route to host"),
+        RuntimeAlert(
+            "lcm-connect",
+            "LCM 连接失败",
+            "无法建立 LCM 通信。请检查 LCM URL、网卡组播路由，或执行组播路由配置后重试。",
+        ),
+    ),
+    (
+        "any",
+        ("Waiting for valid PICO XR data", "Could not read PICO", "PICO XR data"),
+        RuntimeAlert(
+            "pico-no-data",
+            "PICO 输入未就绪",
+            "PICO 控制器数据暂不可用。请确认 PICO 服务、手柄连接和按键/姿态数据流正常。",
+        ),
+    ),
+    (
+        "any",
+        ("wheeled_arm_pico requires `xrobotoolkit_sdk`", "requires `xrobotoolkit_sdk`"),
+        RuntimeAlert(
+            "pico-sdk",
+            "PICO SDK 依赖缺失",
+            "当前环境缺少 PICO SDK 或 teleop 客户端依赖。请确认使用 conda gmr 环境并重新执行安装脚本。",
+        ),
+    ),
+    (
+        "any",
+        ("Address already in use", "端口已被占用"),
+        RuntimeAlert(
+            "port-in-use",
+            "可视化端口被占用",
+            "Rerun/viser 端口可能已被其他进程占用。请关闭旧进程，或在 GUI 中改用其他显示端口。",
+        ),
+    ),
+    (
+        "any",
+        ("Could not detect the port", "No difference was found", "More than one port was found"),
+        RuntimeAlert(
+            "serial-port",
+            "串口检测失败",
+            "没有唯一识别到电机串口。请按提示重新插拔 USB，确认权限和设备连接后再运行查找串口。",
+        ),
+    ),
+    (
+        "any",
+        ("Interface not found", "No responding motors found", "No motors found", "No successful responses"),
+        RuntimeAlert(
+            "can-motor",
+            "CAN/电机无响应",
+            "CAN 接口或电机没有响应。请检查 CAN interface、供电、波特率/FD 设置和电机 ID。",
+        ),
+    ),
+    (
+        "any",
+        ("ModuleNotFoundError", "ImportError", "No module named"),
+        RuntimeAlert(
+            "missing-dependency",
+            "运行环境缺少依赖",
+            "当前 Python 环境缺少模块或可选依赖。请确认使用 conda gmr 环境，并重新执行对应安装脚本。",
+        ),
+    ),
+)
+
+
+def _strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE_RE.sub("", text)
+
+
+def _detect_runtime_alert(line: str) -> RuntimeAlert | None:
+    clean_line = _strip_ansi(line)
+    for match_mode, tokens, alert in RUNTIME_ALERT_RULES:
+        if match_mode == "all" and all(token in clean_line for token in tokens):
+            return alert
+        if match_mode == "any" and any(token in clean_line for token in tokens):
+            return alert
+    return None
 
 
 class ProcessRunner(QObject):
@@ -1288,8 +1452,10 @@ class WheeledArmGui(QMainWindow):
         self._last_record_root = ""
         self._last_record_no_stamp = False
         self._last_record_resume = False
+        self._runtime_alerts: dict[str, RuntimeAlert] = {}
 
         self.setWindowTitle("LeRobot Wheeled Arm 控制台")
+        self.setWindowIcon(_lerobot_logo_icon())
         self.setMinimumSize(QSize(1280, 800))
         self._build_ui()
         self._connect_runners()
@@ -1401,6 +1567,17 @@ class WheeledArmGui(QMainWindow):
         layout.setContentsMargins(14, 16, 14, 16)
         layout.setSpacing(8)
 
+        logo_label = QLabel()
+        logo_label.setObjectName("LeRobotLogo")
+        logo_label.setFixedSize(QSize(150, 54))
+        logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_pixmap = _load_lerobot_logo_pixmap(QSize(128, 38))
+        if logo_pixmap.isNull():
+            logo_label.setText("LeRobot")
+        else:
+            logo_label.setPixmap(logo_pixmap)
+        layout.addWidget(logo_label, 0, Qt.AlignmentFlag.AlignCenter)
+
         label = QLabel("工作区")
         label.setObjectName("SidebarTitle")
         layout.addWidget(label)
@@ -1475,7 +1652,7 @@ class WheeledArmGui(QMainWindow):
 
         clear_log_action = QAction("清空运行日志", self)
         clear_log_action.setShortcut("Ctrl+L")
-        clear_log_action.triggered.connect(self.log_view.clear)
+        clear_log_action.triggered.connect(self.clear_runtime_log)
         self.addAction(clear_log_action)
         file_menu.addAction(clear_log_action)
 
@@ -2651,8 +2828,13 @@ class WheeledArmGui(QMainWindow):
         self.dataset_hint = QLabel(f"默认数据目录：{HF_LEROBOT_HOME}")
         self.dataset_hint.setWordWrap(True)
         self.dataset_hint.setObjectName("MutedLabel")
+        self.runtime_alert_label = QLabel()
+        self.runtime_alert_label.setObjectName("RuntimeAlert")
+        self.runtime_alert_label.setWordWrap(True)
+        self.runtime_alert_label.hide()
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.dataset_hint)
+        status_layout.addWidget(self.runtime_alert_label)
         layout.addWidget(status_box)
 
         preview_box = QGroupBox("命令预览")
@@ -2683,6 +2865,7 @@ class WheeledArmGui(QMainWindow):
         self.preview_tabs.addTab(self.edit_command_preview, "编辑")
         self.preview_tabs.addTab(self.conversion_command_preview, "转换")
         self.preview_tabs.addTab(self.common_command_preview, "常用")
+        self.preview_tabs.setMinimumHeight(240)
         preview_layout.addWidget(self.preview_tabs)
         layout.addWidget(preview_box, 1)
 
@@ -2693,11 +2876,12 @@ class WheeledArmGui(QMainWindow):
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFont("monospace", 10))
         self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.log_view.setMinimumHeight(280)
         log_layout.addWidget(self.log_view)
 
         log_buttons = QHBoxLayout()
         clear_btn = QPushButton("清空日志")
-        clear_btn.clicked.connect(self.log_view.clear)
+        clear_btn.clicked.connect(self.clear_runtime_log)
         copy_log_btn = QPushButton("复制日志")
         copy_log_btn.clicked.connect(lambda: self.copy_command(self.log_view.toPlainText()))
         log_buttons.addWidget(clear_btn)
@@ -2706,7 +2890,7 @@ class WheeledArmGui(QMainWindow):
         log_layout.addLayout(log_buttons)
         layout.addWidget(log_box, 2)
 
-        return panel
+        return self._scrollable(panel)
 
     def _spin(self, minimum: int, maximum: int, value: int) -> QSpinBox:
         spin = QSpinBox()
@@ -2972,28 +3156,28 @@ class WheeledArmGui(QMainWindow):
 
     def _connect_runners(self) -> None:
         self.record_runner.started.connect(lambda command: self._on_started("采集", command))
-        self.record_runner.output.connect(lambda line: self.append_log("采集", line))
-        self.record_runner.failed.connect(lambda message: self.append_log("采集", message))
+        self.record_runner.output.connect(lambda line: self.handle_runner_output("采集", line))
+        self.record_runner.failed.connect(lambda message: self.handle_runner_output("采集", message))
         self.record_runner.finished.connect(self._on_record_finished)
 
         self.viewer_runner.started.connect(lambda command: self._on_started("查看", command))
-        self.viewer_runner.output.connect(lambda line: self.append_log("查看", line))
-        self.viewer_runner.failed.connect(lambda message: self.append_log("查看", message))
+        self.viewer_runner.output.connect(lambda line: self.handle_runner_output("查看", line))
+        self.viewer_runner.failed.connect(lambda message: self.handle_runner_output("查看", message))
         self.viewer_runner.finished.connect(self._on_viewer_finished)
 
         self.edit_runner.started.connect(lambda command: self._on_started("编辑", command))
-        self.edit_runner.output.connect(lambda line: self.append_log("编辑", line))
-        self.edit_runner.failed.connect(lambda message: self.append_log("编辑", message))
+        self.edit_runner.output.connect(lambda line: self.handle_runner_output("编辑", line))
+        self.edit_runner.failed.connect(lambda message: self.handle_runner_output("编辑", message))
         self.edit_runner.finished.connect(self._on_edit_finished)
 
         self.conversion_runner.started.connect(lambda command: self._on_started("转换", command))
-        self.conversion_runner.output.connect(lambda line: self.append_log("转换", line))
-        self.conversion_runner.failed.connect(lambda message: self.append_log("转换", message))
+        self.conversion_runner.output.connect(lambda line: self.handle_runner_output("转换", line))
+        self.conversion_runner.failed.connect(lambda message: self.handle_runner_output("转换", message))
         self.conversion_runner.finished.connect(self._on_conversion_finished)
 
         self.common_runner.started.connect(lambda command: self._on_started("常用", command))
-        self.common_runner.output.connect(lambda line: self.append_log("常用", line))
-        self.common_runner.failed.connect(lambda message: self.append_log("常用", message))
+        self.common_runner.output.connect(lambda line: self.handle_runner_output("常用", line))
+        self.common_runner.failed.connect(lambda message: self.handle_runner_output("常用", message))
         self.common_runner.finished.connect(self._on_common_finished)
 
     def _load_settings(self) -> None:
@@ -4083,6 +4267,7 @@ class WheeledArmGui(QMainWindow):
         self.common_runner.kill()
 
     def _on_started(self, name: str, command: str) -> None:
+        self.clear_runtime_alert()
         self.append_log(name, f"$ {command}")
         self.statusBar().showMessage(f"{name} 已启动")
 
@@ -4160,6 +4345,41 @@ class WheeledArmGui(QMainWindow):
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
     @Slot()
+    def clear_runtime_log(self) -> None:
+        self.log_view.clear()
+        self.clear_runtime_alert()
+
+    def clear_runtime_alert(self) -> None:
+        self._runtime_alerts.clear()
+        if hasattr(self, "runtime_alert_label"):
+            self.runtime_alert_label.clear()
+            self.runtime_alert_label.hide()
+
+    def handle_runner_output(self, source: str, line: str) -> None:
+        self.append_log(source, line)
+        alert = _detect_runtime_alert(line)
+        if alert is None or alert.key in self._runtime_alerts:
+            return
+
+        self._runtime_alerts[alert.key] = alert
+        self._refresh_runtime_alert_label()
+        self.statusBar().showMessage(f"{alert.title}（当前 {len(self._runtime_alerts)} 项提醒）", 8000)
+        self.append_log(source, f"运行提醒：{alert.title} - {alert.message}")
+
+    def _refresh_runtime_alert_label(self) -> None:
+        if not self._runtime_alerts:
+            self.runtime_alert_label.clear()
+            self.runtime_alert_label.hide()
+            return
+
+        lines = [f"运行提醒（{len(self._runtime_alerts)}项）"]
+        for index, alert in enumerate(self._runtime_alerts.values(), start=1):
+            lines.append(f"{index}. {alert.title}")
+            lines.append(f"   {alert.message}")
+        self.runtime_alert_label.setText("\n".join(lines))
+        self.runtime_alert_label.show()
+
+    @Slot()
     def copy_active_command(self) -> None:
         active = self.preview_tabs.currentWidget()
         if isinstance(active, QPlainTextEdit):
@@ -4227,6 +4447,15 @@ QTextBrowser#HelpText QWidget {
     background: rgba(255, 255, 255, 184);
     border: 1px solid rgba(255, 255, 255, 210);
     border-radius: 14px;
+}
+#LeRobotLogo {
+    background: rgba(255, 255, 255, 130);
+    border: 1px solid rgba(168, 199, 210, 150);
+    border-radius: 12px;
+    color: #2f5f72;
+    font-size: 18px;
+    font-weight: 800;
+    padding: 6px;
 }
 #SidebarTitle {
     color: #647084;
@@ -4460,6 +4689,14 @@ QMenuBar::item:selected {
     padding: 9px 12px;
     font-weight: 700;
 }
+#RuntimeAlert {
+    background: rgba(255, 244, 214, 225);
+    color: #7a4b00;
+    border: 1px solid rgba(234, 179, 8, 190);
+    border-radius: 8px;
+    padding: 9px 11px;
+    font-weight: 650;
+}
 QCheckBox {
     spacing: 8px;
 }
@@ -4546,7 +4783,7 @@ def main() -> None:
     _prepare_linux_qt_platform()
     app = QApplication(sys.argv)
     app.setApplicationName("LeRobot Wheeled Arm GUI")
-    app.setWindowIcon(QIcon())
+    app.setWindowIcon(_lerobot_logo_icon())
     window = WheeledArmGui()
     window.show()
     raise SystemExit(app.exec())

@@ -160,7 +160,8 @@ class WheeledArm(Robot):
         if not self.has_valid_feedback:
             logger.warning(
                 "%s has not received fresh left/right arm state feedback. "
-                "Closed-loop teleoperator feedback will be skipped until LCM state arrives.",
+                "机器人没有读到新鲜的左右臂 LCM 状态；请检查 LCM URL、组播路由和控制器状态发布程序。"
+                " Closed-loop teleoperator feedback will be skipped until LCM state arrives.",
                 self,
             )
 
@@ -250,13 +251,27 @@ class WheeledArm(Robot):
         for cam_key, cam in self.cameras.items():
             if getattr(cam, "use_rgb", True):
                 start = time.perf_counter()
-                obs_dict[cam_key] = cam.read_latest()
+                try:
+                    obs_dict[cam_key] = cam.read_latest()
+                except (RuntimeError, TimeoutError) as exc:
+                    topic = getattr(cam, "topic_name", None) or getattr(cam, "camera_index", None) or cam_key
+                    raise RuntimeError(
+                        f"没有相机输入：读取相机 '{cam_key}' 失败（{topic}）。"
+                        "请确认相机节点已启动、topic/设备索引正确，并先用 GUI 的“常用命令 > 查找相机”验证图像流。"
+                    ) from exc
                 dt_ms = (time.perf_counter() - start) * 1e3
                 logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 
             if getattr(cam, "use_depth", False):
                 start = time.perf_counter()
-                obs_dict[f"{cam_key}_depth"] = cam.read_latest_depth()
+                try:
+                    obs_dict[f"{cam_key}_depth"] = cam.read_latest_depth()
+                except (RuntimeError, TimeoutError) as exc:
+                    topic = getattr(cam, "depth_topic_name", None) or getattr(cam, "topic_name", None) or cam_key
+                    raise RuntimeError(
+                        f"没有深度相机输入：读取相机 '{cam_key}' 深度图失败（{topic}）。"
+                        "请确认深度 topic 已发布、相机驱动正常，并先用 GUI 的“常用命令 > 查找相机”验证图像流。"
+                    ) from exc
                 dt_ms = (time.perf_counter() - start) * 1e3
                 logger.debug(f"{self} read {cam_key} depth: {dt_ms:.1f}ms")
 
