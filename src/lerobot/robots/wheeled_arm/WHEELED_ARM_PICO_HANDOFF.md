@@ -265,6 +265,10 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
   - `--teleop.ik_safety_break=false`
   - `--teleop.enforce_limits=true`
   - `--teleop.solver_kwargs='{\"verbose\": false}'`
+- IK 输出后关节平滑/软限幅:
+  - `--teleop.arm_action_smoothing_alpha=0.6`
+  - `--teleop.max_joint_velocity_rad_s=1.5`
+  - `--teleop.max_joint_acceleration_rad_s2=8.0`
 - Self-collision barrier:
   - `--teleop.use_self_collision=true`
   - `--teleop.d_min=0.03`
@@ -296,6 +300,9 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 --teleop.orientation_cost=0.2 \
 --teleop.frame_lm_damping=1e-3 \
 --teleop.ik_damping=1e-6 \
+--teleop.arm_action_smoothing_alpha=0.6 \
+--teleop.max_joint_velocity_rad_s=1.0 \
+--teleop.max_joint_acceleration_rad_s2=6.0 \
 --teleop.posture_cost=1e-3 \
 --teleop.posture_gain=0.5 \
 --teleop.use_self_collision=true \
@@ -314,6 +321,9 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 - `position_cost=3.0` / `orientation_cost=0.2`：位置为主，弱化姿态约束，减少腕部为了追姿态快速摆动。
 - `frame_lm_damping=1e-3`：给 FrameTask 加 LM damping，靠近奇异位形或目标快速变化时更稳。
 - `ik_damping=1e-6`：比默认 `1e-12` 更保守，改善数值稳定性。
+- `arm_action_smoothing_alpha=0.6`：对 IK 输出后的关节目标做 EMA 平滑；1.0 表示不平滑，越小越稳但越慢。
+- `max_joint_velocity_rad_s=1.0`：限制每个控制周期的最大关节目标变化，30Hz 下约等于每帧 0.033 rad。
+- `max_joint_acceleration_rad_s2=6.0`：限制每帧目标增量变化，减少速度突变导致的抖动。
 - `posture_cost=1e-3` / `posture_gain=0.5`：让冗余关节更愿意贴近参考姿态，减少肘部自由漂移。
 - `use_self_collision=true` / `enforce_limits=true`：首次实物测试建议保留自碰撞和关节限位。
 - `self_collision_gain=5.0` / `self_collision_safe_displacement_gain=2.0`：比默认更温和，避免接近 barrier 时动作突然弹开。
@@ -331,10 +341,13 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 1. 降低 `--teleop.scale`。
 2. 降低 `--teleop.task_gain`。
 3. 保持或切回 `--teleop.position_only=true`。
-4. 提高 `--teleop.frame_lm_damping`，例如 `1e-3 -> 3e-3 -> 1e-2`。
-5. 提高 `--teleop.ik_damping`，例如 `1e-6 -> 1e-5`。
-6. 降低 `--teleop.orientation_cost`。
-7. 略微提高 `--teleop.posture_cost`，例如 `1e-3 -> 3e-3`。
+4. 降低 `--teleop.max_joint_velocity_rad_s`，例如 `1.5 -> 1.0 -> 0.6`。
+5. 降低 `--teleop.max_joint_acceleration_rad_s2`，例如 `8.0 -> 6.0 -> 4.0`。
+6. 降低 `--teleop.arm_action_smoothing_alpha`，例如 `0.6 -> 0.45 -> 0.3`。
+7. 提高 `--teleop.frame_lm_damping`，例如 `1e-3 -> 3e-3 -> 1e-2`。
+8. 提高 `--teleop.ik_damping`，例如 `1e-6 -> 1e-5`。
+9. 降低 `--teleop.orientation_cost`。
+10. 略微提高 `--teleop.posture_cost`，例如 `1e-3 -> 3e-3`。
 
 不建议首次实物测试关闭 `enforce_limits` 或 `use_self_collision`。这两个选项更适合短时排查问题，
 不适合作为首测默认配置。
@@ -375,10 +388,12 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 1. 降低 `scale`。
 2. 降低 `task_gain`。
 3. 确认或切回 `position_only=true`。
-4. 提高 `frame_lm_damping`。
-5. 提高 `ik_damping`。
-6. 降低 `orientation_cost`。
-7. 小幅提高 `posture_cost`。
+4. 降低 `max_joint_velocity_rad_s` 和 `max_joint_acceleration_rad_s2`。
+5. 降低 `arm_action_smoothing_alpha`。
+6. 提高 `frame_lm_damping`。
+7. 提高 `ik_damping`。
+8. 降低 `orientation_cost`。
+9. 小幅提高 `posture_cost`。
 
 现场建议额外准备：
 
@@ -395,6 +410,9 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 --teleop.task_gain=0.25 \
 --teleop.frame_lm_damping=1e-3 \
 --teleop.ik_damping=1e-6 \
+--teleop.arm_action_smoothing_alpha=0.6 \
+--teleop.max_joint_velocity_rad_s=1.0 \
+--teleop.max_joint_acceleration_rad_s2=6.0 \
 --teleop.posture_cost=1e-3 \
 --teleop.use_self_collision=true \
 --teleop.enforce_limits=true

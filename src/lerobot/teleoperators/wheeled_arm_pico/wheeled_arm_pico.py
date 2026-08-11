@@ -49,6 +49,7 @@ from .ik_utils import (
     make_locked_joints_task_class,
     package_dirs_for_urdf,
     select_solver,
+    smooth_joint_positions,
     xr_pose_to_world_se3,
 )
 
@@ -87,6 +88,8 @@ class WheeledArmPico(Teleoperator):
         self._rerun_robot_last_update_t = 0.0
         self._rerun_robot_failed = False
         self._last_visualization_state = None
+        self._filtered_arm_q = None
+        self._previous_arm_step = None
         self._left_mapper = RelativeTeleopTarget()
         self._right_mapper = RelativeTeleopTarget()
         self._last_reset_button = False
@@ -213,6 +216,7 @@ class WheeledArmPico(Teleoperator):
 
         self._solver = select_solver(self._deps.qpsolvers, self.config.solver)
         self._xr_client = MockXrClient() if self.config.mock_xr else self._make_xr_client()
+        self._reset_action_filter_from_q(self._configuration.q)
         self._last_action = self._make_action(self._configuration.q)
         if self.config.visualize:
             self._visualizer = WheeledArmPicoVisualizer(
@@ -326,6 +330,7 @@ class WheeledArmPico(Teleoperator):
         q[self._arm_q_indices] = arm_q
         q[self._locked_q_indices] = self._q_ref[self._locked_q_indices]
         self._configuration.update(q)
+        self._filtered_arm_q = arm_q.copy()
 
     @check_if_not_connected
     def refresh_visualization_from_feedback(
@@ -447,6 +452,7 @@ class WheeledArmPico(Teleoperator):
             if min_barrier <= 0.0:
                 collision_status = "collision"
                 logger.warning("PICO IK target rejected by self-collision barrier: %.4f", min_barrier)
+                self._reset_action_filter_from_q(self._configuration.q)
                 self._last_action = self._make_action(self._configuration.q)
                 self._update_visualization(
                     left_target_pose,
@@ -485,6 +491,7 @@ class WheeledArmPico(Teleoperator):
         q_locked = self._configuration.q.copy()
         q_locked[self._locked_q_indices] = self._q_ref[self._locked_q_indices]
         self._configuration.update(q_locked)
+        self._apply_action_smoothing_to_configuration()
 
         self._last_action = self._make_action(self._configuration.q)
         self._update_visualization(
@@ -502,6 +509,40 @@ class WheeledArmPico(Teleoperator):
         action = arm_action_from_q(q, self._arm_q_indices, self.arm_joint_names)
         action.update(self._gripper_positions)
         return action
+
+    def _reset_action_filter_from_q(self, q: np.ndarray) -> None:
+        assert self._arm_q_indices is not None
+        self._filtered_arm_q = np.asarray(q[self._arm_q_indices], dtype=float).copy()
+        self._previous_arm_step = np.zeros_like(self._filtered_arm_q)
+
+    def _apply_action_smoothing_to_configuration(self) -> None:
+        assert self._configuration is not None
+        assert self._arm_q_indices is not None
+        assert self._locked_q_indices is not None
+        assert self._q_ref is not None
+
+        target_arm_q = np.asarray(self._configuration.q[self._arm_q_indices], dtype=float)
+        current_arm_q = (
+            target_arm_q
+            if self._filtered_arm_q is None
+            else np.asarray(self._filtered_arm_q, dtype=float)
+        )
+        filtered_arm_q, arm_step = smooth_joint_positions(
+            target_arm_q,
+            current_arm_q,
+            self._previous_arm_step,
+            self._dt,
+            alpha=self.config.arm_action_smoothing_alpha,
+            max_velocity_rad_s=self.config.max_joint_velocity_rad_s,
+            max_acceleration_rad_s2=self.config.max_joint_acceleration_rad_s2,
+        )
+        self._filtered_arm_q = filtered_arm_q
+        self._previous_arm_step = arm_step
+
+        q_filtered = self._configuration.q.copy()
+        q_filtered[self._arm_q_indices] = filtered_arm_q
+        q_filtered[self._locked_q_indices] = self._q_ref[self._locked_q_indices]
+        self._configuration.update(q_filtered)
 
     def _update_gripper_positions(
         self, left_value: float | None, right_value: float | None

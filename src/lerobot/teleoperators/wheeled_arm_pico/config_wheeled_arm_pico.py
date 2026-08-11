@@ -68,6 +68,12 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     ik_safety_break: bool = False
     # True 时启用模型自带 configuration/velocity limits；调试时可临时关闭。
     enforce_limits: bool = True
+    # IK 输出后的关节目标 EMA 平滑系数，1.0 表示不平滑，越小越稳但跟随越慢。
+    arm_action_smoothing_alpha: float = 0.6
+    # IK 输出后的关节速度软限幅，单位 rad/s。None 表示不额外限幅。
+    max_joint_velocity_rad_s: float | None = 1.5
+    # IK 输出后的关节加速度软限幅，单位 rad/s^2。None 表示不额外限幅。
+    max_joint_acceleration_rad_s2: float | None = 8.0
 
     # 是否启用自碰撞 barrier。关闭后可绕过 hpp-fcl/coal 碰撞后端。
     use_self_collision: bool = True
@@ -145,6 +151,13 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
         if self.solve_frequency_hz == 0.0:
             raise ValueError("`solve_frequency_hz` must be positive.")
         _validate_non_negative("ik_damping", self.ik_damping)
+        _validate_gain("arm_action_smoothing_alpha", self.arm_action_smoothing_alpha)
+        if self.max_joint_velocity_rad_s is not None:
+            _validate_non_negative("max_joint_velocity_rad_s", self.max_joint_velocity_rad_s)
+        if self.max_joint_acceleration_rad_s2 is not None:
+            _validate_non_negative(
+                "max_joint_acceleration_rad_s2", self.max_joint_acceleration_rad_s2
+            )
         _validate_non_negative("d_min", self.d_min)
         if self.initial_ignore_distance is not None:
             _validate_non_negative("initial_ignore_distance", self.initial_ignore_distance)

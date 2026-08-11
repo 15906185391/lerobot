@@ -562,3 +562,52 @@ def arm_q_from_feedback(feedback: dict[str, Any], joint_names: list[str]) -> np.
             return None
         values.append(float(feedback[key]))
     return np.asarray(values, dtype=float)
+
+
+def smooth_joint_positions(
+    target_q: np.ndarray,
+    current_q: np.ndarray,
+    previous_step: np.ndarray | None,
+    dt: float,
+    *,
+    alpha: float,
+    max_velocity_rad_s: float | None = None,
+    max_acceleration_rad_s2: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Smooth joint targets with EMA plus optional velocity and acceleration limits."""
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"`alpha` must be in [0, 1], got {alpha}.")
+    if dt <= 0.0:
+        raise ValueError(f"`dt` must be positive, got {dt}.")
+
+    target_q = np.asarray(target_q, dtype=float)
+    current_q = np.asarray(current_q, dtype=float)
+    if target_q.shape != current_q.shape:
+        raise ValueError(f"`target_q` and `current_q` shapes differ: {target_q.shape} vs {current_q.shape}.")
+    if max_velocity_rad_s is not None and max_velocity_rad_s < 0.0:
+        raise ValueError(f"`max_velocity_rad_s` must be non-negative, got {max_velocity_rad_s}.")
+    if max_acceleration_rad_s2 is not None and max_acceleration_rad_s2 < 0.0:
+        raise ValueError(
+            f"`max_acceleration_rad_s2` must be non-negative, got {max_acceleration_rad_s2}."
+        )
+
+    step = target_q - current_q
+    if max_velocity_rad_s is not None:
+        max_step = float(max_velocity_rad_s) * dt
+        step = np.clip(step, -max_step, max_step)
+
+    if max_acceleration_rad_s2 is not None:
+        previous_step = (
+            np.zeros_like(step)
+            if previous_step is None
+            else np.asarray(previous_step, dtype=float)
+        )
+        if previous_step.shape != step.shape:
+            raise ValueError(
+                f"`previous_step` and target step shapes differ: {previous_step.shape} vs {step.shape}."
+            )
+        max_step_delta = float(max_acceleration_rad_s2) * dt * dt
+        step = previous_step + np.clip(step - previous_step, -max_step_delta, max_step_delta)
+
+    step = alpha * step
+    return current_q + step, step

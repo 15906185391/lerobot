@@ -2185,6 +2185,12 @@ class WheeledArmGui(QMainWindow):
         self.mock_cameras.setToolTip("仅完全离线测试时开启；有真实相机时保持关闭。")
         self.mock_xr = QCheckBox("模拟 PICO 输入")
         self.lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
+        self.ik_smoothing_alpha = self._double_spin(0.05, 1.0, 0.6, 2)
+        self.ik_smoothing_alpha.setToolTip("1.0 表示不做 EMA 平滑；越小越稳，但手柄跟随越慢。")
+        self.ik_max_joint_velocity = self._double_spin(0.05, 20.0, 1.5, 2)
+        self.ik_max_joint_velocity.setToolTip("IK 输出后的每关节目标速度软限幅，单位 rad/s。")
+        self.ik_max_joint_acceleration = self._double_spin(0.1, 200.0, 8.0, 1)
+        self.ik_max_joint_acceleration.setToolTip("IK 输出后的每关节目标加速度软限幅，单位 rad/s^2。")
         self.camera_override = QCheckBox("覆盖 front 相机参数")
         self.camera_topic = QLineEdit("/camera/color/image_raw")
         self.camera_width = self._spin(1, 8192, 640)
@@ -2205,6 +2211,9 @@ class WheeledArmGui(QMainWindow):
         robot_form.addRow("", self.mock_cameras)
         robot_form.addRow("", self.mock_xr)
         robot_form.addRow("LCM URL", self.lcm_url)
+        robot_form.addRow("关节平滑系数", self.ik_smoothing_alpha)
+        robot_form.addRow("最大关节速度", self.ik_max_joint_velocity)
+        robot_form.addRow("最大关节加速度", self.ik_max_joint_acceleration)
         robot_form.addRow("", self.camera_override)
         robot_form.addRow("相机 topic", self.camera_topic)
         robot_form.addRow("相机宽", self.camera_width)
@@ -2915,6 +2924,18 @@ class WheeledArmGui(QMainWindow):
         self.common_teleop_mock_cameras.setToolTip("仅完全离线测试时开启；有真实相机时保持关闭。")
         self.common_teleop_mock_xr = QCheckBox("模拟 PICO 输入")
         self.common_teleop_lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
+        self.common_teleop_ik_smoothing_alpha = self._double_spin(0.05, 1.0, 0.6, 2)
+        self.common_teleop_ik_smoothing_alpha.setToolTip(
+            "1.0 表示不做 EMA 平滑；越小越稳，但手柄跟随越慢。"
+        )
+        self.common_teleop_ik_max_joint_velocity = self._double_spin(0.05, 20.0, 1.5, 2)
+        self.common_teleop_ik_max_joint_velocity.setToolTip(
+            "IK 输出后的每关节目标速度软限幅，单位 rad/s。"
+        )
+        self.common_teleop_ik_max_joint_acceleration = self._double_spin(0.1, 200.0, 8.0, 1)
+        self.common_teleop_ik_max_joint_acceleration.setToolTip(
+            "IK 输出后的每关节目标加速度软限幅，单位 rad/s^2。"
+        )
         form.addRow("FPS", self.common_teleop_fps)
         form.addRow("运行秒数", self.common_teleop_time_s)
         form.addRow("", self.common_teleop_display_data)
@@ -2925,6 +2946,9 @@ class WheeledArmGui(QMainWindow):
         form.addRow("", self.common_teleop_mock_cameras)
         form.addRow("", self.common_teleop_mock_xr)
         form.addRow("LCM URL", self.common_teleop_lcm_url)
+        form.addRow("关节平滑系数", self.common_teleop_ik_smoothing_alpha)
+        form.addRow("最大关节速度", self.common_teleop_ik_max_joint_velocity)
+        form.addRow("最大关节加速度", self.common_teleop_ik_max_joint_acceleration)
         return box
 
     def _make_replay_common_panel(self) -> QWidget:
@@ -3488,6 +3512,9 @@ class WheeledArmGui(QMainWindow):
             self.mock_cameras,
             self.mock_xr,
             self.lcm_url,
+            self.ik_smoothing_alpha,
+            self.ik_max_joint_velocity,
+            self.ik_max_joint_acceleration,
             self.camera_override,
             self.camera_topic,
             self.camera_width,
@@ -3606,6 +3633,9 @@ class WheeledArmGui(QMainWindow):
             self.common_teleop_mock_cameras,
             self.common_teleop_mock_xr,
             self.common_teleop_lcm_url,
+            self.common_teleop_ik_smoothing_alpha,
+            self.common_teleop_ik_max_joint_velocity,
+            self.common_teleop_ik_max_joint_acceleration,
             self.common_replay_repo_id,
             self.common_replay_episode,
             self.common_replay_fps,
@@ -3746,6 +3776,19 @@ class WheeledArmGui(QMainWindow):
         self.mock_cameras.setChecked(
             _settings_bool(self.settings.value("record/mock_cameras", self.mock_cameras.isChecked()), False)
         )
+        self.ik_smoothing_alpha.setValue(
+            float(self.settings.value("record/ik_smoothing_alpha", self.ik_smoothing_alpha.value()))
+        )
+        self.ik_max_joint_velocity.setValue(
+            float(self.settings.value("record/ik_max_joint_velocity", self.ik_max_joint_velocity.value()))
+        )
+        self.ik_max_joint_acceleration.setValue(
+            float(
+                self.settings.value(
+                    "record/ik_max_joint_acceleration", self.ik_max_joint_acceleration.value()
+                )
+            )
+        )
         self.viewer_repo_id.setText(self.settings.value("viewer/repo_id", ""))
         self.viewer_root.setText(self.settings.value("viewer/root", ""))
         self.edit_repo_id.setText(self.settings.value("edit/repo_id", ""))
@@ -3788,6 +3831,30 @@ class WheeledArmGui(QMainWindow):
                 False,
             )
         )
+        self.common_teleop_ik_smoothing_alpha.setValue(
+            float(
+                self.settings.value(
+                    "common/teleop_ik_smoothing_alpha",
+                    self.common_teleop_ik_smoothing_alpha.value(),
+                )
+            )
+        )
+        self.common_teleop_ik_max_joint_velocity.setValue(
+            float(
+                self.settings.value(
+                    "common/teleop_ik_max_joint_velocity",
+                    self.common_teleop_ik_max_joint_velocity.value(),
+                )
+            )
+        )
+        self.common_teleop_ik_max_joint_acceleration.setValue(
+            float(
+                self.settings.value(
+                    "common/teleop_ik_max_joint_acceleration",
+                    self.common_teleop_ik_max_joint_acceleration.value(),
+                )
+            )
+        )
         self.joint_jog_lcm_url.setText(
             self.settings.value("joint_jog/lcm_url", self.joint_jog_lcm_url.text())
         )
@@ -3824,6 +3891,11 @@ class WheeledArmGui(QMainWindow):
         )
         self.settings.setValue("record/mock_robot", self.mock_robot.isChecked())
         self.settings.setValue("record/mock_cameras", self.mock_cameras.isChecked())
+        self.settings.setValue("record/ik_smoothing_alpha", self.ik_smoothing_alpha.value())
+        self.settings.setValue("record/ik_max_joint_velocity", self.ik_max_joint_velocity.value())
+        self.settings.setValue(
+            "record/ik_max_joint_acceleration", self.ik_max_joint_acceleration.value()
+        )
         self.settings.setValue("viewer/repo_id", self.viewer_repo_id.text())
         self.settings.setValue("viewer/root", self.viewer_root.text())
         self.settings.setValue("edit/repo_id", self.edit_repo_id.text())
@@ -3846,6 +3918,18 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("common/advanced_args", self.common_advanced_args.toPlainText())
         self.settings.setValue("common/teleop_mock_robot", self.common_teleop_mock_robot.isChecked())
         self.settings.setValue("common/teleop_mock_cameras", self.common_teleop_mock_cameras.isChecked())
+        self.settings.setValue(
+            "common/teleop_ik_smoothing_alpha",
+            self.common_teleop_ik_smoothing_alpha.value(),
+        )
+        self.settings.setValue(
+            "common/teleop_ik_max_joint_velocity",
+            self.common_teleop_ik_max_joint_velocity.value(),
+        )
+        self.settings.setValue(
+            "common/teleop_ik_max_joint_acceleration",
+            self.common_teleop_ik_max_joint_acceleration.value(),
+        )
         self.settings.setValue("joint_jog/lcm_url", self.joint_jog_lcm_url.text())
         self.settings.setValue("joint_jog/urdf_path", self.joint_jog_urdf_path.text())
         self.settings.setValue("joint_jog/visualization_host", self.joint_jog_visualization_host.text())
@@ -3879,6 +3963,9 @@ class WheeledArmGui(QMainWindow):
                 f"--teleop.mock_xr={_bool_arg(self.mock_xr.isChecked())}",
                 f"--robot.mock={_bool_arg(self.mock_robot.isChecked())}",
                 f"--robot.mock_cameras={_bool_arg(self.mock_cameras.isChecked())}",
+                f"--teleop.arm_action_smoothing_alpha={self.ik_smoothing_alpha.value()}",
+                f"--teleop.max_joint_velocity_rad_s={self.ik_max_joint_velocity.value()}",
+                f"--teleop.max_joint_acceleration_rad_s2={self.ik_max_joint_acceleration.value()}",
             ]
         )
 
@@ -4193,6 +4280,18 @@ class WheeledArmGui(QMainWindow):
                     f"--teleop.mock_xr={_bool_arg(self.common_teleop_mock_xr.isChecked())}",
                     f"--robot.mock={_bool_arg(self.common_teleop_mock_robot.isChecked())}",
                     f"--robot.mock_cameras={_bool_arg(self.common_teleop_mock_cameras.isChecked())}",
+                    (
+                        "--teleop.arm_action_smoothing_alpha="
+                        f"{self.common_teleop_ik_smoothing_alpha.value()}"
+                    ),
+                    (
+                        "--teleop.max_joint_velocity_rad_s="
+                        f"{self.common_teleop_ik_max_joint_velocity.value()}"
+                    ),
+                    (
+                        "--teleop.max_joint_acceleration_rad_s2="
+                        f"{self.common_teleop_ik_max_joint_acceleration.value()}"
+                    ),
                 ]
             )
             if self.common_teleop_time_s.value() > 0:
