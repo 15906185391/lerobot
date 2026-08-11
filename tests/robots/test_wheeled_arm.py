@@ -65,6 +65,28 @@ class FakeLCMHandler:
         self.stopped = True
 
 
+class FakeCamera:
+    def __init__(self):
+        self.height = 480
+        self.width = 640
+        self.use_rgb = True
+        self.use_depth = False
+        self.is_connected = False
+        self.connect_calls = 0
+        self.disconnect_calls = 0
+
+    def connect(self):
+        self.is_connected = True
+        self.connect_calls += 1
+
+    def disconnect(self):
+        self.is_connected = False
+        self.disconnect_calls += 1
+
+    def read_latest(self):
+        return np.full((self.height, self.width, 3), 127, dtype=np.uint8)
+
+
 def _make_robot(**overrides):
     handler = FakeLCMHandler()
     with patch("lerobot.robots.wheeled_arm.wheeled_arm._make_lcm_handler", return_value=handler):
@@ -249,6 +271,53 @@ def test_disconnect_stops_handler():
 
     assert handler.stopped is True
     assert robot.is_connected is False
+
+
+def test_mock_wheeled_arm_uses_software_joints_without_lcm_and_keeps_real_cameras():
+    camera = FakeCamera()
+
+    with patch("lerobot.robots.wheeled_arm.wheeled_arm._make_lcm_handler") as make_handler:
+        robot = WheeledArm(WheeledArmConfig(cameras={}, mock=True, connect_timeout_s=0))
+        robot.cameras = {"front": camera}
+        robot.connect()
+
+    make_handler.assert_not_called()
+    assert robot.is_connected is True
+    assert robot.has_valid_feedback is True
+    assert camera.connect_calls == 1
+
+    returned = robot.send_action({"right_gripper.pos": 0.6, "left_arm_0.pos": 0.2})
+    assert returned == {"right_gripper.pos": 0.6, "left_arm_0.pos": 0.2}
+
+    obs = robot.get_observation()
+    np.testing.assert_allclose(obs["right_gripper.pos"], 0.6)
+    np.testing.assert_allclose(obs["left_arm_0.pos"], 0.2)
+    assert obs["front"].shape == (480, 640, 3)
+    assert obs["front"].dtype == np.uint8
+
+    robot.disconnect()
+    assert camera.disconnect_calls == 1
+    assert robot.is_connected is False
+
+
+def test_mock_wheeled_arm_can_generate_synthetic_camera_images():
+    camera = FakeCamera()
+
+    with patch("lerobot.robots.wheeled_arm.wheeled_arm._make_lcm_handler") as make_handler:
+        robot = WheeledArm(
+            WheeledArmConfig(cameras={}, mock=True, mock_cameras=True, connect_timeout_s=0)
+        )
+        robot.cameras = {"front": camera}
+        robot.connect()
+
+    make_handler.assert_not_called()
+    assert camera.connect_calls == 0
+    obs = robot.get_observation()
+    assert obs["front"].shape == (480, 640, 3)
+    assert obs["front"].dtype == np.uint8
+
+    robot.disconnect()
+    assert camera.disconnect_calls == 0
 
 
 def test_unknown_action_key_raises():

@@ -87,6 +87,15 @@ class WheeledArmConfig(RobotConfig):
     # Maximum time to wait for fresh left/right arm state feedback at safety gates.
     feedback_wait_timeout_s: float = 5.0
 
+    # Software-only robot body mode. When enabled, wheeled_arm does not create an LCM
+    # handler and joint observations come from the last commanded action. Cameras are
+    # still real by default so recording can be tested with a connected camera but no robot.
+    mock: bool = False
+
+    # Generate synthetic camera images in mock mode. Leave this false when a real camera is
+    # connected and only the robot body/LCM feedback should be simulated.
+    mock_cameras: bool = False
+
     def __post_init__(self) -> None:
         super().__post_init__()
 

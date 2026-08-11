@@ -100,6 +100,9 @@ class WheeledArm(Robot):
         self.config = config
         self.cameras = make_cameras_from_configs(config.cameras)
         self._handler: LCMHandler | None = None
+        self._mock_connected = False
+        self._mock_joint_pos: np.ndarray | None = None
+        self._mock_frame_index = 0
 
         self._joint_index_by_action_key = {
             f"{joint_name}.pos": idx for idx, joint_name in enumerate(self.config.joint_names)
@@ -129,6 +132,11 @@ class WheeledArm(Robot):
 
     @property
     def is_connected(self) -> bool:
+        if self.config.mock:
+            cameras_connected = self.config.mock_cameras or all(
+                cam.is_connected for cam in self.cameras.values()
+            )
+            return self._mock_connected and cameras_connected
         return self._handler is not None and all(cam.is_connected for cam in self.cameras.values())
 
     @property
@@ -137,6 +145,8 @@ class WheeledArm(Robot):
 
     @property
     def has_valid_feedback(self) -> bool:
+        if self.config.mock:
+            return self.is_connected
         if self._handler is None:
             return False
         if hasattr(self._handler, "has_arm_state_feedback"):
@@ -152,6 +162,8 @@ class WheeledArm(Robot):
         self, timeout_s: float | None = None, min_time_s: float | None = None
     ) -> bool:
         """Wait until fresh left/right arm LCM feedback is available."""
+        if self.config.mock:
+            return self.has_valid_feedback
         if self._handler is None:
             return False
         timeout_s = self.config.feedback_wait_timeout_s if timeout_s is None else timeout_s
@@ -191,6 +203,21 @@ class WheeledArm(Robot):
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
+        if self.config.mock:
+            self._mock_joint_pos = self._default_mock_joint_pos()
+            self._mock_frame_index = 0
+            if not self.config.mock_cameras:
+                for cam in self.cameras.values():
+                    cam.connect()
+            self._mock_connected = True
+            logger.warning(
+                "%s connected in mock robot-body mode. LCM is not used and joint feedback "
+                "will follow commanded actions. Cameras are %s.",
+                self,
+                "synthetic" if self.config.mock_cameras else "real",
+            )
+            return
+
         self._handler = _make_lcm_handler(self.config.lcm_url)
         for cam in self.cameras.values():
             cam.connect()
@@ -230,6 +257,9 @@ class WheeledArm(Robot):
         progress_callback: Callable[[RobotObservation], None] | None = None,
     ) -> bool:
         """Move both arms to the PICO data-collection reset pose using MOVEJ."""
+        if self.config.mock:
+            return self._reset_mock_rest_pose(progress_callback=progress_callback)
+
         assert self._handler is not None
 
         from .hardware_interface.dynamics_related_functions.collision_detection import (
@@ -309,6 +339,9 @@ class WheeledArm(Robot):
 
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
+        if self.config.mock:
+            return self._get_mock_observation()
+
         assert self._handler is not None
 
         start = time.perf_counter()
@@ -322,37 +355,13 @@ class WheeledArm(Robot):
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
-        for cam_key, cam in self.cameras.items():
-            if getattr(cam, "use_rgb", True):
-                start = time.perf_counter()
-                try:
-                    obs_dict[cam_key] = cam.read_latest()
-                except (RuntimeError, TimeoutError) as exc:
-                    topic = getattr(cam, "topic_name", None) or getattr(cam, "camera_index", None) or cam_key
-                    raise RuntimeError(
-                        f"没有相机输入：读取相机 '{cam_key}' 失败（{topic}）。"
-                        "请确认相机节点已启动、topic/设备索引正确，并先用 GUI 的“常用命令 > 查找相机”验证图像流。"
-                    ) from exc
-                dt_ms = (time.perf_counter() - start) * 1e3
-                logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
-
-            if getattr(cam, "use_depth", False):
-                start = time.perf_counter()
-                try:
-                    obs_dict[f"{cam_key}_depth"] = cam.read_latest_depth()
-                except (RuntimeError, TimeoutError) as exc:
-                    topic = getattr(cam, "depth_topic_name", None) or getattr(cam, "topic_name", None) or cam_key
-                    raise RuntimeError(
-                        f"没有深度相机输入：读取相机 '{cam_key}' 深度图失败（{topic}）。"
-                        "请确认深度 topic 已发布、相机驱动正常，并先用 GUI 的“常用命令 > 查找相机”验证图像流。"
-                    ) from exc
-                dt_ms = (time.perf_counter() - start) * 1e3
-                logger.debug(f"{self} read {cam_key} depth: {dt_ms:.1f}ms")
-
-        return obs_dict
+        return self._read_camera_observations(obs_dict)
 
     @check_if_not_connected
     def send_action(self, action: RobotAction) -> RobotAction:
+        if self.config.mock:
+            return self._send_mock_action(action)
+
         assert self._handler is not None
 
         unknown_keys = set(action) - set(self.action_features)
@@ -395,6 +404,16 @@ class WheeledArm(Robot):
 
     @check_if_not_connected
     def disconnect(self) -> None:
+        if self.config.mock:
+            if not self.config.mock_cameras:
+                for cam in self.cameras.values():
+                    if cam.is_connected:
+                        cam.disconnect()
+            self._mock_connected = False
+            self._mock_joint_pos = None
+            logger.info(f"{self} disconnected.")
+            return
+
         assert self._handler is not None
 
         if hasattr(self._handler, "stop"):
@@ -405,3 +424,100 @@ class WheeledArm(Robot):
             cam.disconnect()
 
         logger.info(f"{self} disconnected.")
+
+    def _default_mock_joint_pos(self) -> np.ndarray:
+        joint_pos = np.zeros(len(self.config.joint_names), dtype=np.float32)
+        joint_pos[_PART_SLICES["left_arm"]] = _RESET_LEFT_ARM_RAD
+        joint_pos[_PART_SLICES["right_arm"]] = _RESET_RIGHT_ARM_RAD
+        return joint_pos
+
+    def _reset_mock_rest_pose(
+        self, progress_callback: Callable[[RobotObservation], None] | None = None
+    ) -> bool:
+        self._mock_joint_pos = self._default_mock_joint_pos()
+        if progress_callback is not None:
+            progress_callback(self.joint_observation_from_package(self._mock_joint_pos))
+        return True
+
+    def _get_mock_observation(self) -> RobotObservation:
+        assert self._mock_joint_pos is not None
+        obs_dict = self.joint_observation_from_package(self._mock_joint_pos)
+        if self.config.mock_cameras:
+            for cam_key, cam in self.cameras.items():
+                if getattr(cam, "use_rgb", True):
+                    obs_dict[cam_key] = self._mock_rgb_image(
+                        cam_key, int(cam.height), int(cam.width)
+                    )
+                if getattr(cam, "use_depth", False):
+                    obs_dict[f"{cam_key}_depth"] = self._mock_depth_image(
+                        int(cam.height), int(cam.width)
+                    )
+            self._mock_frame_index += 1
+            return obs_dict
+        return self._read_camera_observations(obs_dict)
+
+    def _send_mock_action(self, action: RobotAction) -> RobotAction:
+        assert self._mock_joint_pos is not None
+
+        unknown_keys = set(action) - set(self.action_features)
+        if unknown_keys:
+            raise ValueError(f"Unknown wheeled_arm action keys: {sorted(unknown_keys)}")
+
+        goal_pos = {key: float(value) for key, value in action.items() if key.endswith(".pos")}
+
+        if self.config.max_relative_target is not None:
+            goal_present_pos = {
+                key: (target, float(self._mock_joint_pos[self._joint_index_by_action_key[key]]))
+                for key, target in goal_pos.items()
+            }
+            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+
+        for key, value in goal_pos.items():
+            self._mock_joint_pos[self._joint_index_by_action_key[key]] = value
+
+        return goal_pos
+
+    def _read_camera_observations(self, obs_dict: RobotObservation) -> RobotObservation:
+        for cam_key, cam in self.cameras.items():
+            if getattr(cam, "use_rgb", True):
+                start = time.perf_counter()
+                try:
+                    obs_dict[cam_key] = cam.read_latest()
+                except (RuntimeError, TimeoutError) as exc:
+                    topic = getattr(cam, "topic_name", None) or getattr(cam, "camera_index", None) or cam_key
+                    raise RuntimeError(
+                        f"没有相机输入：读取相机 '{cam_key}' 失败（{topic}）。"
+                        "请确认相机节点已启动、topic/设备索引正确，并先用 GUI 的“常用命令 > 查找相机”验证图像流。"
+                    ) from exc
+                dt_ms = (time.perf_counter() - start) * 1e3
+                logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+
+            if getattr(cam, "use_depth", False):
+                start = time.perf_counter()
+                try:
+                    obs_dict[f"{cam_key}_depth"] = cam.read_latest_depth()
+                except (RuntimeError, TimeoutError) as exc:
+                    topic = getattr(cam, "depth_topic_name", None) or getattr(cam, "topic_name", None) or cam_key
+                    raise RuntimeError(
+                        f"没有深度相机输入：读取相机 '{cam_key}' 深度图失败（{topic}）。"
+                        "请确认深度 topic 已发布、相机驱动正常，并先用 GUI 的“常用命令 > 查找相机”验证图像流。"
+                    ) from exc
+                dt_ms = (time.perf_counter() - start) * 1e3
+                logger.debug(f"{self} read {cam_key} depth: {dt_ms:.1f}ms")
+
+        return obs_dict
+
+    def _mock_rgb_image(self, camera_name: str, height: int, width: int) -> np.ndarray:
+        x = np.linspace(0, 255, width, dtype=np.uint32)[None, :]
+        y = np.linspace(0, 255, height, dtype=np.uint32)[:, None]
+        frame = self._mock_frame_index
+        name_offset = sum(camera_name.encode("utf-8")) % 255
+        image = np.empty((height, width, 3), dtype=np.uint8)
+        image[..., 0] = ((x + frame * 3) % 255).astype(np.uint8)
+        image[..., 1] = ((y + frame * 5) % 255).astype(np.uint8)
+        image[..., 2] = (name_offset + frame * 7) % 255
+        return image
+
+    def _mock_depth_image(self, height: int, width: int) -> np.ndarray:
+        depth = np.linspace(0.2, 1.2, height, dtype=np.float32)[:, None]
+        return np.repeat(depth, width, axis=1)[..., None]

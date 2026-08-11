@@ -2179,6 +2179,10 @@ class WheeledArmGui(QMainWindow):
         self.viser.setChecked(True)
         self.rerun_robot = QCheckBox("Rerun 机器人 3D")
         self.rerun_robot.setChecked(True)
+        self.mock_robot = QCheckBox("模拟机器人本体（不连接 LCM）")
+        self.mock_robot.setToolTip("用于只连接 PICO/相机、不连接实物机器人时测试采集和数据写入。")
+        self.mock_cameras = QCheckBox("模拟相机图像")
+        self.mock_cameras.setToolTip("仅完全离线测试时开启；有真实相机时保持关闭。")
         self.mock_xr = QCheckBox("模拟 PICO 输入")
         self.lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
         self.camera_override = QCheckBox("覆盖 front 相机参数")
@@ -2197,6 +2201,8 @@ class WheeledArmGui(QMainWindow):
         robot_form.addRow("", self.display_compressed_images)
         robot_form.addRow("", self.viser)
         robot_form.addRow("", self.rerun_robot)
+        robot_form.addRow("", self.mock_robot)
+        robot_form.addRow("", self.mock_cameras)
         robot_form.addRow("", self.mock_xr)
         robot_form.addRow("LCM URL", self.lcm_url)
         robot_form.addRow("", self.camera_override)
@@ -2903,6 +2909,10 @@ class WheeledArmGui(QMainWindow):
         self.common_teleop_viser.setChecked(True)
         self.common_teleop_rerun_robot = QCheckBox("Rerun 机器人 3D")
         self.common_teleop_rerun_robot.setChecked(True)
+        self.common_teleop_mock_robot = QCheckBox("模拟机器人本体（不连接 LCM）")
+        self.common_teleop_mock_robot.setToolTip("用于只连接 PICO/相机、不连接实物机器人时测试遥操作链路。")
+        self.common_teleop_mock_cameras = QCheckBox("模拟相机图像")
+        self.common_teleop_mock_cameras.setToolTip("仅完全离线测试时开启；有真实相机时保持关闭。")
         self.common_teleop_mock_xr = QCheckBox("模拟 PICO 输入")
         self.common_teleop_lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
         form.addRow("FPS", self.common_teleop_fps)
@@ -2911,6 +2921,8 @@ class WheeledArmGui(QMainWindow):
         form.addRow("显示后端", self.common_teleop_display_mode)
         form.addRow("", self.common_teleop_viser)
         form.addRow("", self.common_teleop_rerun_robot)
+        form.addRow("", self.common_teleop_mock_robot)
+        form.addRow("", self.common_teleop_mock_cameras)
         form.addRow("", self.common_teleop_mock_xr)
         form.addRow("LCM URL", self.common_teleop_lcm_url)
         return box
@@ -3472,6 +3484,8 @@ class WheeledArmGui(QMainWindow):
             self.display_compressed_images,
             self.viser,
             self.rerun_robot,
+            self.mock_robot,
+            self.mock_cameras,
             self.mock_xr,
             self.lcm_url,
             self.camera_override,
@@ -3588,6 +3602,8 @@ class WheeledArmGui(QMainWindow):
             self.common_teleop_display_mode,
             self.common_teleop_viser,
             self.common_teleop_rerun_robot,
+            self.common_teleop_mock_robot,
+            self.common_teleop_mock_cameras,
             self.common_teleop_mock_xr,
             self.common_teleop_lcm_url,
             self.common_replay_repo_id,
@@ -3724,6 +3740,12 @@ class WheeledArmGui(QMainWindow):
                 self.wait_for_episode_start.isChecked(),
             )
         )
+        self.mock_robot.setChecked(
+            _settings_bool(self.settings.value("record/mock_robot", self.mock_robot.isChecked()), False)
+        )
+        self.mock_cameras.setChecked(
+            _settings_bool(self.settings.value("record/mock_cameras", self.mock_cameras.isChecked()), False)
+        )
         self.viewer_repo_id.setText(self.settings.value("viewer/repo_id", ""))
         self.viewer_root.setText(self.settings.value("viewer/root", ""))
         self.edit_repo_id.setText(self.settings.value("edit/repo_id", ""))
@@ -3750,6 +3772,22 @@ class WheeledArmGui(QMainWindow):
             self.settings.value("common/custom_module", self.common_custom_module.text())
         )
         self.common_advanced_args.setPlainText(self.settings.value("common/advanced_args", ""))
+        self.common_teleop_mock_robot.setChecked(
+            _settings_bool(
+                self.settings.value(
+                    "common/teleop_mock_robot", self.common_teleop_mock_robot.isChecked()
+                ),
+                False,
+            )
+        )
+        self.common_teleop_mock_cameras.setChecked(
+            _settings_bool(
+                self.settings.value(
+                    "common/teleop_mock_cameras", self.common_teleop_mock_cameras.isChecked()
+                ),
+                False,
+            )
+        )
         self.joint_jog_lcm_url.setText(
             self.settings.value("joint_jog/lcm_url", self.joint_jog_lcm_url.text())
         )
@@ -3784,6 +3822,8 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue(
             "record/wait_for_episode_start", self.wait_for_episode_start.isChecked()
         )
+        self.settings.setValue("record/mock_robot", self.mock_robot.isChecked())
+        self.settings.setValue("record/mock_cameras", self.mock_cameras.isChecked())
         self.settings.setValue("viewer/repo_id", self.viewer_repo_id.text())
         self.settings.setValue("viewer/root", self.viewer_root.text())
         self.settings.setValue("edit/repo_id", self.edit_repo_id.text())
@@ -3804,6 +3844,8 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("common/replay_root", self.common_replay_root.text())
         self.settings.setValue("common/custom_module", self.common_custom_module.text())
         self.settings.setValue("common/advanced_args", self.common_advanced_args.toPlainText())
+        self.settings.setValue("common/teleop_mock_robot", self.common_teleop_mock_robot.isChecked())
+        self.settings.setValue("common/teleop_mock_cameras", self.common_teleop_mock_cameras.isChecked())
         self.settings.setValue("joint_jog/lcm_url", self.joint_jog_lcm_url.text())
         self.settings.setValue("joint_jog/urdf_path", self.joint_jog_urdf_path.text())
         self.settings.setValue("joint_jog/visualization_host", self.joint_jog_visualization_host.text())
@@ -3835,6 +3877,8 @@ class WheeledArmGui(QMainWindow):
                 f"--teleop.visualize={_bool_arg(self.viser.isChecked())}",
                 f"--teleop.rerun_visualize_robot={_bool_arg(self.rerun_robot.isChecked())}",
                 f"--teleop.mock_xr={_bool_arg(self.mock_xr.isChecked())}",
+                f"--robot.mock={_bool_arg(self.mock_robot.isChecked())}",
+                f"--robot.mock_cameras={_bool_arg(self.mock_cameras.isChecked())}",
             ]
         )
 
@@ -4147,6 +4191,8 @@ class WheeledArmGui(QMainWindow):
                     f"--teleop.visualize={_bool_arg(self.common_teleop_viser.isChecked())}",
                     f"--teleop.rerun_visualize_robot={_bool_arg(self.common_teleop_rerun_robot.isChecked())}",
                     f"--teleop.mock_xr={_bool_arg(self.common_teleop_mock_xr.isChecked())}",
+                    f"--robot.mock={_bool_arg(self.common_teleop_mock_robot.isChecked())}",
+                    f"--robot.mock_cameras={_bool_arg(self.common_teleop_mock_cameras.isChecked())}",
                 ]
             )
             if self.common_teleop_time_s.value() > 0:

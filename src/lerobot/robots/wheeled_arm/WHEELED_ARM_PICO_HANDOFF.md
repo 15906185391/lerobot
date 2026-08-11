@@ -47,6 +47,11 @@
   - `left_gripper`
   - `right_gripper`
 - `has_valid_feedback` 用于判断是否已经收到新鲜的左右臂 LCM 状态。
+- 支持显式 mock 机器人本体：
+  - `--robot.mock=true`: 不连接 LCM，不等待左右臂状态，关节 observation 使用软件内部状态并随 action 更新。
+  - 默认仍会连接真实相机，适合“已连接相机、未连接实物机器人”的遥操作采集/数据写入测试。
+  - `--robot.mock_cameras=true`: 仅完全离线测试时使用，会跳过真实相机并生成合成图像。
+  - 实物测试不要开启 `--robot.mock=true`；默认 `require_fresh_feedback=true` 会继续保护机器人，避免从旧状态或零位跳变。
 
 ### `wheeled_arm_pico` teleoperator
 
@@ -194,6 +199,20 @@ FutureWarning: ROS2Camera.read_latest() is not implemented.
 
 - 没连接实物时，数据集里的 `observation.state` 仍然可能是 0，这是正常的。
 - 此模式适合验证 PICO/action/相机链路，不适合作为真实状态训练数据。
+
+更新：
+
+- 如果未连接实物机器人但已经连接真实相机，推荐使用：
+
+```bash
+--robot.mock=true --robot.mock_cameras=false --teleop.mock_xr=false
+```
+
+- 如果 PICO 和机器人都未连接、只想完全离线验证采集/写盘/Rerun，可使用：
+
+```bash
+--robot.mock=true --robot.mock_cameras=true --teleop.mock_xr=true
+```
 
 ### 6. `LockedJointsTask` 不能实例化
 
