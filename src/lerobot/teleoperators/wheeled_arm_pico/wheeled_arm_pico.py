@@ -37,6 +37,7 @@ from .ik_utils import (
     RIGHT_TCP,
     MockXrClient,
     RelativeTeleopTarget,
+    XrPoseFilter,
     arm_action_from_q,
     arm_joint_indices,
     arm_q_from_feedback,
@@ -90,6 +91,18 @@ class WheeledArmPico(Teleoperator):
         self._last_visualization_state = None
         self._filtered_arm_q = None
         self._previous_arm_step = None
+        self._left_pose_filter = XrPoseFilter(
+            position_alpha=self.config.pico_position_smoothing_alpha,
+            orientation_alpha=self.config.pico_orientation_smoothing_alpha,
+            position_deadband_m=self.config.pico_position_deadband_m,
+            orientation_deadband_rad=self.config.pico_orientation_deadband_rad,
+        )
+        self._right_pose_filter = XrPoseFilter(
+            position_alpha=self.config.pico_position_smoothing_alpha,
+            orientation_alpha=self.config.pico_orientation_smoothing_alpha,
+            position_deadband_m=self.config.pico_position_deadband_m,
+            orientation_deadband_rad=self.config.pico_orientation_deadband_rad,
+        )
         self._left_mapper = RelativeTeleopTarget()
         self._right_mapper = RelativeTeleopTarget()
         self._last_reset_button = False
@@ -252,6 +265,8 @@ class WheeledArmPico(Teleoperator):
     def reset_baseline(self) -> None:
         self._left_mapper.reset()
         self._right_mapper.reset()
+        self._left_pose_filter.reset()
+        self._right_pose_filter.reset()
 
     @check_if_not_connected
     def get_recording_control(self) -> str | None:
@@ -369,7 +384,7 @@ class WheeledArmPico(Teleoperator):
         assert self._q_ref is not None
 
         pin = self._deps.pin
-        left_task, right_task, _posture_task = self._tasks
+        left_task, right_task, posture_task = self._tasks
         current_left = self._configuration.get_transform_frame_to_world(LEFT_TCP).copy()
         current_right = self._configuration.get_transform_frame_to_world(RIGHT_TCP).copy()
         left_target_pose = current_left
@@ -400,10 +415,16 @@ class WheeledArmPico(Teleoperator):
             )
 
             left_controller_pose = xr_pose_to_world_se3(
-                self._xr_client.get_pose_by_name(self.config.left_controller_name), pin
+                self._left_pose_filter.update(
+                    self._xr_client.get_pose_by_name(self.config.left_controller_name)
+                ),
+                pin,
             )
             right_controller_pose = xr_pose_to_world_se3(
-                self._xr_client.get_pose_by_name(self.config.right_controller_name), pin
+                self._right_pose_filter.update(
+                    self._xr_client.get_pose_by_name(self.config.right_controller_name)
+                ),
+                pin,
             )
             xr_ok = True
         except Exception as exc:
@@ -446,6 +467,22 @@ class WheeledArmPico(Teleoperator):
         left_task.transform_target_to_world = left_target_pose
         right_task.transform_target_to_world = right_target_pose
         self._update_gripper_positions(left_gripper_value, right_gripper_value)
+        hold_arm_q = np.asarray(self._configuration.q[self._arm_q_indices], dtype=float).copy()
+        active_arm_mask = self._active_arm_mask(left_active, right_active)
+
+        if not np.any(active_arm_mask):
+            self._reset_action_filter_from_q(self._configuration.q)
+            self._last_action = self._make_action(self._configuration.q)
+            self._update_visualization(
+                left_target_pose,
+                right_target_pose,
+                xr_ok,
+                left_active,
+                right_active,
+                "idle",
+                min_barrier,
+            )
+            return self._last_action.copy()
 
         if self._collision_barrier is not None:
             min_barrier = float(np.min(self._collision_barrier.compute_barrier(self._configuration)))
@@ -470,10 +507,17 @@ class WheeledArmPico(Teleoperator):
         else:
             collision_status = "disabled"
 
+        active_tasks = []
+        if left_active:
+            active_tasks.append(left_task)
+        if right_active:
+            active_tasks.append(right_task)
+        active_tasks.append(posture_task)
+
         try:
             velocity = self._deps.solve_ik(
                 self._configuration,
-                self._tasks,
+                active_tasks,
                 self._dt,
                 solver=self._solver,
                 damping=self.config.ik_damping,
@@ -490,8 +534,9 @@ class WheeledArmPico(Teleoperator):
         self._configuration.integrate_inplace(velocity, self._dt)
         q_locked = self._configuration.q.copy()
         q_locked[self._locked_q_indices] = self._q_ref[self._locked_q_indices]
+        q_locked[self._arm_q_indices[~active_arm_mask]] = hold_arm_q[~active_arm_mask]
         self._configuration.update(q_locked)
-        self._apply_action_smoothing_to_configuration()
+        self._apply_action_smoothing_to_configuration(active_arm_mask)
 
         self._last_action = self._make_action(self._configuration.q)
         self._update_visualization(
@@ -515,27 +560,47 @@ class WheeledArmPico(Teleoperator):
         self._filtered_arm_q = np.asarray(q[self._arm_q_indices], dtype=float).copy()
         self._previous_arm_step = np.zeros_like(self._filtered_arm_q)
 
-    def _apply_action_smoothing_to_configuration(self) -> None:
+    def _active_arm_mask(self, left_active: bool, right_active: bool) -> np.ndarray:
+        return np.array([left_active] * 7 + [right_active] * 7, dtype=bool)
+
+    def _apply_action_smoothing_to_configuration(self, active_arm_mask: np.ndarray) -> None:
         assert self._configuration is not None
         assert self._arm_q_indices is not None
         assert self._locked_q_indices is not None
         assert self._q_ref is not None
 
         target_arm_q = np.asarray(self._configuration.q[self._arm_q_indices], dtype=float)
+        active_arm_mask = np.asarray(active_arm_mask, dtype=bool)
+        if active_arm_mask.shape != target_arm_q.shape:
+            raise ValueError(
+                f"`active_arm_mask` shape {active_arm_mask.shape} does not match arm q shape {target_arm_q.shape}."
+            )
         current_arm_q = (
             target_arm_q
             if self._filtered_arm_q is None
             else np.asarray(self._filtered_arm_q, dtype=float)
         )
-        filtered_arm_q, arm_step = smooth_joint_positions(
-            target_arm_q,
-            current_arm_q,
-            self._previous_arm_step,
-            self._dt,
-            alpha=self.config.arm_action_smoothing_alpha,
-            max_velocity_rad_s=self.config.max_joint_velocity_rad_s,
-            max_acceleration_rad_s2=self.config.max_joint_acceleration_rad_s2,
+        previous_arm_step = (
+            np.zeros_like(target_arm_q)
+            if self._previous_arm_step is None
+            else np.asarray(self._previous_arm_step, dtype=float)
         )
+        filtered_arm_q = target_arm_q.copy()
+        arm_step = np.zeros_like(target_arm_q)
+
+        if np.any(active_arm_mask):
+            smoothed_q, smoothed_step = smooth_joint_positions(
+                target_arm_q[active_arm_mask],
+                current_arm_q[active_arm_mask],
+                previous_arm_step[active_arm_mask],
+                self._dt,
+                alpha=self.config.arm_action_smoothing_alpha,
+                max_velocity_rad_s=self.config.max_joint_velocity_rad_s,
+                max_acceleration_rad_s2=self.config.max_joint_acceleration_rad_s2,
+            )
+            filtered_arm_q[active_arm_mask] = smoothed_q
+            arm_step[active_arm_mask] = smoothed_step
+
         self._filtered_arm_q = filtered_arm_q
         self._previous_arm_step = arm_step
 

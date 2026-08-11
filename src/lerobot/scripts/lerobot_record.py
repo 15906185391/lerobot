@@ -159,6 +159,7 @@ from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dic
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.keyboard_input import apply_recording_control, init_keyboard_listener
 from lerobot.utils.robot_utils import precise_sleep
+from lerobot.utils.ros2_action_publisher import ROS2ActionPublisher
 from lerobot.utils.utils import (
     init_logging,
     log_say,
@@ -194,6 +195,10 @@ class RecordConfig:
     # If True, run teleop without saving until the operator advances with keyboard/PICO controls.
     # Useful when the operator cannot reach the keyboard while staging the robot.
     wait_for_episode_start: bool = False
+    # Publish the final sent action as sensor_msgs/msg/JointState for jitter inspection in ROS 2.
+    publish_action_ros2: bool = False
+    action_ros2_topic: str = "/lerobot/action"
+    action_ros2_node_name: str = "lerobot_action_publisher"
 
     def __post_init__(self):
         if self.teleop is None:
@@ -401,6 +406,7 @@ def record_loop(
     display_mode: str = "rerun",
     display_compressed_images: bool = False,
     display_episode_index: int | None = None,
+    action_publisher: ROS2ActionPublisher | None = None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -496,6 +502,8 @@ def record_loop(
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
         _sent_action = robot.send_action(robot_action_to_send)
+        if action_publisher is not None:
+            action_publisher.publish(_sent_action, robot.action_features)
 
         # Write to dataset
         if dataset is not None:
@@ -596,6 +604,7 @@ def record(
 
     dataset = None
     listener = None
+    action_publisher = None
 
     try:
         if cfg.resume:
@@ -664,6 +673,13 @@ def record(
                 "Streaming encoding is disabled. If you have capable hardware, consider enabling it for way faster episode saving. --dataset.streaming_encoding=true --dataset.encoder_threads=2 # --dataset.rgb_encoder.vcodec=auto. More info in the documentation: https://huggingface.co/docs/lerobot/streaming_video_encoding"
             )
 
+        if cfg.publish_action_ros2:
+            action_publisher = ROS2ActionPublisher(
+                topic=cfg.action_ros2_topic,
+                node_name=cfg.action_ros2_node_name,
+            )
+            logging.info("Publishing sent actions to ROS 2 topic '%s'.", cfg.action_ros2_topic)
+
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
@@ -686,6 +702,7 @@ def record(
                         display_mode=cfg.display_mode,
                         display_compressed_images=display_compressed_images,
                         display_episode_index=dataset.num_episodes,
+                        action_publisher=action_publisher,
                     )
                     if events["stop_recording"]:
                         break
@@ -708,6 +725,7 @@ def record(
                     display_mode=cfg.display_mode,
                     display_compressed_images=display_compressed_images,
                     display_episode_index=dataset.num_episodes,
+                    action_publisher=action_publisher,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -760,6 +778,7 @@ def record(
                         display_mode=cfg.display_mode,
                         display_compressed_images=display_compressed_images,
                         display_episode_index=dataset.num_episodes,
+                        action_publisher=action_publisher,
                     )
 
                 if events["rerecord_episode"]:
@@ -773,6 +792,9 @@ def record(
                 recorded_episodes += 1
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
+
+        if action_publisher is not None:
+            action_publisher.close()
 
         if dataset:
             dataset.finalize()

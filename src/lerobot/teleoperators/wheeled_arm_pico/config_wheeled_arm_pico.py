@@ -50,11 +50,19 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     urdf_path: Path | None = None
 
     # PICO 手柄位移到末端目标位移的比例。调大更灵敏，调小更稳。
-    scale: float = 1.0
+    scale: float = 0.8
     # grip 输入超过该阈值时，对应手臂才开始跟随手柄。
     activation_threshold: float = 0.9
     # True 时只跟踪末端位置，不跟踪手柄姿态；抖动大时可先打开。
     position_only: bool = False
+    # PICO 手柄位置输入 EMA 平滑系数，1.0 表示不平滑，越小越稳但延迟越大。
+    pico_position_smoothing_alpha: float = 0.3
+    # PICO 手柄姿态输入球面插值平滑系数，1.0 表示不平滑。
+    pico_orientation_smoothing_alpha: float = 0.5
+    # PICO 手柄位置死区，单位米。小于该幅度的输入抖动会被忽略。
+    pico_position_deadband_m: float = 0.0015
+    # PICO 手柄姿态死区，单位弧度。小于该角度的姿态抖动会被忽略。
+    pico_orientation_deadband_rad: float = 0.01
 
     # IK 求解频率。通常应与采集 fps 接近，过低会卡顿，过高会增加 CPU/QP 压力。
     solve_frequency_hz: float = 30.0
@@ -63,20 +71,20 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     # 透传给 qpsolvers.solve_problem 的参数，例如 {"verbose": False}。
     solver_kwargs: dict[str, float | int | bool | str] = field(default_factory=dict)
     # solve_ik 全局 Tikhonov damping。调大可改善数值稳定性，但动作会变慢。
-    ik_damping: float = 1e-12
+    ik_damping: float = 1e-6
     # True 时如果当前 q 超出模型限位会直接报错；False 时只警告并继续。
     ik_safety_break: bool = False
     # True 时启用模型自带 configuration/velocity limits；调试时可临时关闭。
     enforce_limits: bool = True
     # IK 输出后的关节目标 EMA 平滑系数，1.0 表示不平滑，越小越稳但跟随越慢。
-    arm_action_smoothing_alpha: float = 0.6
+    arm_action_smoothing_alpha: float = 0.3
     # IK 输出后的关节速度软限幅，单位 rad/s。None 表示不额外限幅。
     max_joint_velocity_rad_s: float | None = 1.5
     # IK 输出后的关节加速度软限幅，单位 rad/s^2。None 表示不额外限幅。
     max_joint_acceleration_rad_s2: float | None = 8.0
 
     # 是否启用自碰撞 barrier。关闭后可绕过 hpp-fcl/coal 碰撞后端。
-    use_self_collision: bool = True
+    use_self_collision: bool = False
     # 自碰撞最小安全距离，单位米。调大更保守，但可能限制可达空间。
     d_min: float = 0.03
     # 初始姿态下距离小于该值的碰撞对会被忽略；None 时使用 d_min。
@@ -115,7 +123,7 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     position_cost: float | list[float] = 5.0
     orientation_cost: float | list[float] = 1.0
     # FrameTask 的 Levenberg-Marquardt damping。目标不可达且动作抖时可适当增大。
-    frame_lm_damping: float = 0.0
+    frame_lm_damping: float = 5
     # FrameTask gain，范围 [0, 1]。调小会低通目标跟踪，动作更慢但更稳。
     task_gain: float = 0.5
     # PostureTask 让手臂保持接近参考姿态，主要用于冗余自由度正则化。
@@ -147,6 +155,12 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     def __post_init__(self) -> None:
         _validate_non_negative("scale", self.scale)
         _validate_gain("activation_threshold", self.activation_threshold)
+        _validate_gain("pico_position_smoothing_alpha", self.pico_position_smoothing_alpha)
+        _validate_gain("pico_orientation_smoothing_alpha", self.pico_orientation_smoothing_alpha)
+        _validate_non_negative("pico_position_deadband_m", self.pico_position_deadband_m)
+        _validate_non_negative(
+            "pico_orientation_deadband_rad", self.pico_orientation_deadband_rad
+        )
         _validate_non_negative("solve_frequency_hz", self.solve_frequency_hz)
         if self.solve_frequency_hz == 0.0:
             raise ValueError("`solve_frequency_hz` must be positive.")

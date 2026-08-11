@@ -20,6 +20,7 @@ from lerobot.teleoperators.config import TeleoperatorConfig
 from lerobot.teleoperators.utils import make_teleoperator_from_config
 from lerobot.teleoperators.wheeled_arm_pico import WheeledArmPico, WheeledArmPicoConfig
 from lerobot.teleoperators.wheeled_arm_pico.ik_utils import (
+    XrPoseFilter,
     arm_q_from_feedback,
     make_locked_joints_task_class,
     smooth_joint_positions,
@@ -35,6 +36,10 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
     cfg = WheeledArmPicoConfig(
         position_cost=[5.0, 4.0, 3.0],
         orientation_cost=[1.0, 0.5, 0.25],
+        pico_position_smoothing_alpha=0.35,
+        pico_orientation_smoothing_alpha=0.45,
+        pico_position_deadband_m=0.002,
+        pico_orientation_deadband_rad=0.02,
         frame_lm_damping=1e-3,
         task_gain=0.75,
         posture_gain=0.5,
@@ -59,6 +64,10 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
 
     assert cfg.position_cost == [5.0, 4.0, 3.0]
     assert cfg.orientation_cost == [1.0, 0.5, 0.25]
+    assert cfg.pico_position_smoothing_alpha == 0.35
+    assert cfg.pico_orientation_smoothing_alpha == 0.45
+    assert cfg.pico_position_deadband_m == 0.002
+    assert cfg.pico_orientation_deadband_rad == 0.02
     assert cfg.frame_lm_damping == 1e-3
     assert cfg.task_gain == 0.75
     assert cfg.posture_gain == 0.5
@@ -192,6 +201,71 @@ def test_smooth_joint_positions_can_be_disabled_with_passthrough_settings():
 
     np.testing.assert_allclose(smoothed_q, target_q)
     np.testing.assert_allclose(step, target_q)
+
+
+def test_xr_pose_filter_applies_position_deadband_and_smoothing():
+    pose_filter = XrPoseFilter(
+        position_alpha=0.5,
+        orientation_alpha=1.0,
+        position_deadband_m=0.01,
+        orientation_deadband_rad=0.0,
+    )
+    initial = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+    jitter = np.array([0.005, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+    moved = np.array([0.105, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+
+    np.testing.assert_allclose(pose_filter.update(initial), initial)
+    np.testing.assert_allclose(pose_filter.update(jitter), initial)
+    np.testing.assert_allclose(pose_filter.update(moved)[:3], [0.0525, 0.0, 0.0])
+
+
+def test_xr_pose_filter_slerps_orientation_and_resets_state():
+    pose_filter = XrPoseFilter(
+        position_alpha=1.0,
+        orientation_alpha=0.5,
+        position_deadband_m=0.0,
+        orientation_deadband_rad=0.0,
+    )
+    initial = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+    yaw_90 = np.array([0.0, 0.0, 0.0, 0.0, 0.0, np.sin(np.pi / 4), np.cos(np.pi / 4)])
+
+    pose_filter.update(initial)
+    filtered = pose_filter.update(yaw_90)
+
+    np.testing.assert_allclose(filtered[3:], [0.0, 0.0, np.sin(np.pi / 8), np.cos(np.pi / 8)])
+
+    pose_filter.reset()
+    np.testing.assert_allclose(pose_filter.update(yaw_90), yaw_90)
+
+
+def test_inactive_arm_smoothing_holds_feedback_and_clears_previous_step():
+    class FakeConfiguration:
+        def __init__(self):
+            self.q = np.arange(18, dtype=float)
+
+        def update(self, q):
+            self.q = np.asarray(q, dtype=float).copy()
+
+    teleop = WheeledArmPico(WheeledArmPicoConfig())
+    teleop._configuration = FakeConfiguration()
+    teleop._arm_q_indices = np.arange(14)
+    teleop._locked_q_indices = np.array([14, 15, 16, 17])
+    teleop._q_ref = np.zeros(18)
+    teleop._dt = 0.1
+    teleop._filtered_arm_q = np.arange(14, dtype=float) + 1.0
+    teleop._previous_arm_step = np.ones(14, dtype=float) * 0.2
+
+    left_active_mask = teleop._active_arm_mask(left_active=True, right_active=False)
+    target_q = teleop._configuration.q.copy()
+    target_q[:7] += 1.0
+    target_q[7:14] = np.arange(7, 14, dtype=float)
+    teleop._configuration.update(target_q)
+
+    teleop._apply_action_smoothing_to_configuration(left_active_mask)
+
+    assert np.all(teleop._previous_arm_step[:7] != 0.0)
+    np.testing.assert_allclose(teleop._previous_arm_step[7:], np.zeros(7))
+    np.testing.assert_allclose(teleop._configuration.q[7:14], np.arange(7, 14, dtype=float))
 
 
 def test_locked_joints_task_uses_configured_gain_and_lm_damping():

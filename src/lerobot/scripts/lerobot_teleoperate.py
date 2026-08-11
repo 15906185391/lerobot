@@ -126,6 +126,7 @@ from lerobot.teleoperators import (  # noqa: F401
 )
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
+from lerobot.utils.ros2_action_publisher import ROS2ActionPublisher
 from lerobot.utils.utils import init_logging, move_cursor_up
 from lerobot.utils.visualization_utils import (
     init_visualization,
@@ -153,6 +154,10 @@ class TeleoperateConfig:
     display_port: int | None = None
     # Whether to display compressed (JPEG) images instead of raw frames
     display_compressed_images: bool = False
+    # Publish the final sent action as sensor_msgs/msg/JointState for jitter inspection in ROS 2.
+    publish_action_ros2: bool = False
+    action_ros2_topic: str = "/lerobot/action"
+    action_ros2_node_name: str = "lerobot_action_publisher"
 
 
 def teleop_loop(
@@ -166,6 +171,7 @@ def teleop_loop(
     display_mode: str = "rerun",
     duration: float | None = None,
     display_compressed_images: bool = False,
+    action_publisher: ROS2ActionPublisher | None = None,
 ):
     """
     This function continuously reads actions from a teleoperation device, processes them through optional
@@ -212,7 +218,9 @@ def teleop_loop(
         robot_action_to_send = robot_action_processor((teleop_action, obs))
 
         # Send processed action to robot (robot_action_processor.to_output should return RobotAction)
-        _ = robot.send_action(robot_action_to_send)
+        sent_action = robot.send_action(robot_action_to_send)
+        if action_publisher is not None:
+            action_publisher.publish(sent_action, robot.action_features)
 
         if display_data:
             # Process robot observation through pipeline
@@ -259,11 +267,19 @@ def teleoperate(cfg: TeleoperateConfig):
     teleop = make_teleoperator_from_config(cfg.teleop)
     robot = make_robot_from_config(cfg.robot)
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+    action_publisher = None
 
     teleop.connect()
     robot.connect()
 
     try:
+        if cfg.publish_action_ros2:
+            action_publisher = ROS2ActionPublisher(
+                topic=cfg.action_ros2_topic,
+                node_name=cfg.action_ros2_node_name,
+            )
+            logging.info("Publishing sent actions to ROS 2 topic '%s'.", cfg.action_ros2_topic)
+
         teleop_loop(
             teleop=teleop,
             robot=robot,
@@ -275,10 +291,13 @@ def teleoperate(cfg: TeleoperateConfig):
             robot_action_processor=robot_action_processor,
             robot_observation_processor=robot_observation_processor,
             display_compressed_images=display_compressed_images,
+            action_publisher=action_publisher,
         )
     except KeyboardInterrupt:
         pass
     finally:
+        if action_publisher is not None:
+            action_publisher.close()
         if cfg.display_data:
             shutdown_visualization(cfg.display_mode)
         teleop.disconnect()

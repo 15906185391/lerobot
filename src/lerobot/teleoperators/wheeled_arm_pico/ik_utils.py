@@ -153,6 +153,99 @@ class MockXrClient:
         pass
 
 
+def _normalize_xyzw_quaternion(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=float).reshape(4)
+    norm = np.linalg.norm(quat)
+    if norm < 1e-8 or not np.isfinite(norm):
+        raise ValueError(f"Invalid XR quaternion: {quat}")
+    return quat / norm
+
+
+def _quaternion_angular_distance_rad(q_a: np.ndarray, q_b: np.ndarray) -> float:
+    q_a = _normalize_xyzw_quaternion(q_a)
+    q_b = _normalize_xyzw_quaternion(q_b)
+    dot = abs(float(np.clip(np.dot(q_a, q_b), -1.0, 1.0)))
+    return 2.0 * float(np.arccos(dot))
+
+
+def _slerp_xyzw_quaternion(q_a: np.ndarray, q_b: np.ndarray, alpha: float) -> np.ndarray:
+    q_a = _normalize_xyzw_quaternion(q_a)
+    q_b = _normalize_xyzw_quaternion(q_b)
+    dot = float(np.dot(q_a, q_b))
+    if dot < 0.0:
+        q_b = -q_b
+        dot = -dot
+
+    dot = float(np.clip(dot, -1.0, 1.0))
+    if dot > 0.9995:
+        return _normalize_xyzw_quaternion(q_a + alpha * (q_b - q_a))
+
+    theta_0 = float(np.arccos(dot))
+    theta = theta_0 * alpha
+    sin_theta = float(np.sin(theta))
+    sin_theta_0 = float(np.sin(theta_0))
+    s0 = float(np.cos(theta)) - dot * sin_theta / sin_theta_0
+    s1 = sin_theta / sin_theta_0
+    return _normalize_xyzw_quaternion(s0 * q_a + s1 * q_b)
+
+
+class XrPoseFilter:
+    """Filter raw PICO pose arrays [x, y, z, qx, qy, qz, qw] before IK mapping."""
+
+    def __init__(
+        self,
+        *,
+        position_alpha: float,
+        orientation_alpha: float,
+        position_deadband_m: float,
+        orientation_deadband_rad: float,
+    ) -> None:
+        if not 0.0 <= position_alpha <= 1.0:
+            raise ValueError(f"`position_alpha` must be in [0, 1], got {position_alpha}.")
+        if not 0.0 <= orientation_alpha <= 1.0:
+            raise ValueError(f"`orientation_alpha` must be in [0, 1], got {orientation_alpha}.")
+        if position_deadband_m < 0.0:
+            raise ValueError(f"`position_deadband_m` must be non-negative, got {position_deadband_m}.")
+        if orientation_deadband_rad < 0.0:
+            raise ValueError(
+                f"`orientation_deadband_rad` must be non-negative, got {orientation_deadband_rad}."
+            )
+
+        self.position_alpha = position_alpha
+        self.orientation_alpha = orientation_alpha
+        self.position_deadband_m = position_deadband_m
+        self.orientation_deadband_rad = orientation_deadband_rad
+        self._pose: np.ndarray | None = None
+
+    def reset(self) -> None:
+        self._pose = None
+
+    def update(self, pose: np.ndarray) -> np.ndarray:
+        pose = np.asarray(pose, dtype=float).reshape(-1)
+        if pose.shape[0] != 7 or not np.all(np.isfinite(pose)):
+            raise ValueError(f"Invalid XR pose: {pose}")
+
+        pose = pose.copy()
+        pose[3:] = _normalize_xyzw_quaternion(pose[3:])
+        if self._pose is None:
+            self._pose = pose
+            return pose.copy()
+
+        filtered = self._pose.copy()
+        position_delta = pose[:3] - filtered[:3]
+        if np.linalg.norm(position_delta) > self.position_deadband_m:
+            filtered[:3] = filtered[:3] + self.position_alpha * position_delta
+
+        orientation_delta = _quaternion_angular_distance_rad(filtered[3:], pose[3:])
+        if orientation_delta > self.orientation_deadband_rad:
+            filtered[3:] = _slerp_xyzw_quaternion(
+                filtered[3:], pose[3:], self.orientation_alpha
+            )
+
+        self._pose = filtered
+        return filtered.copy()
+
+
 class RelativeTeleopTarget:
     """Map relative XR controller motion to a robot end-effector target."""
 

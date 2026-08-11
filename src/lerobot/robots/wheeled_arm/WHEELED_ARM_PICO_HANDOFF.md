@@ -252,6 +252,11 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
   - `--teleop.orientation_cost=1.0`
   - `--teleop.frame_lm_damping=0.0`
   - `--teleop.task_gain=0.5`
+- PICO 输入滤波:
+  - `--teleop.pico_position_smoothing_alpha=0.5`
+  - `--teleop.pico_orientation_smoothing_alpha=0.5`
+  - `--teleop.pico_position_deadband_m=0.0015`
+  - `--teleop.pico_orientation_deadband_rad=0.01`
 - Posture task:
   - `--teleop.posture_cost=0.0001`
   - `--teleop.posture_gain=1.0`
@@ -295,6 +300,10 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 ```bash
 --teleop.scale=0.5 \
 --teleop.position_only=true \
+--teleop.pico_position_smoothing_alpha=0.5 \
+--teleop.pico_orientation_smoothing_alpha=0.5 \
+--teleop.pico_position_deadband_m=0.0015 \
+--teleop.pico_orientation_deadband_rad=0.01 \
 --teleop.task_gain=0.25 \
 --teleop.position_cost=3.0 \
 --teleop.orientation_cost=0.2 \
@@ -317,6 +326,10 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 
 - `position_only=true`：首测先只跟踪末端位置。姿态跟踪更容易把 PICO 手柄姿态抖动放大到腕部/肘部。
 - `scale=0.5`：降低 PICO 位移到末端位移的比例，先牺牲灵敏度换稳定性。
+- `pico_position_smoothing_alpha=0.5`：PICO 位置输入 EMA 滤波；越小越稳但手感延迟越明显。
+- `pico_orientation_smoothing_alpha=0.5`：PICO 姿态输入使用 quaternion slerp 滤波，减少手柄微小姿态抖动。
+- `pico_position_deadband_m=0.0015`：忽略 1.5 mm 内的位置微抖。
+- `pico_orientation_deadband_rad=0.01`：忽略约 0.57 度内的姿态微抖。
 - `task_gain=0.25`：降低 FrameTask 跟踪增益，让目标跟踪更柔和。
 - `position_cost=3.0` / `orientation_cost=0.2`：位置为主，弱化姿态约束，减少腕部为了追姿态快速摆动。
 - `frame_lm_damping=1e-3`：给 FrameTask 加 LM damping，靠近奇异位形或目标快速变化时更稳。
@@ -339,15 +352,17 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 如果观察到机器人抖动，优先按以下顺序调整：
 
 1. 降低 `--teleop.scale`。
-2. 降低 `--teleop.task_gain`。
-3. 保持或切回 `--teleop.position_only=true`。
-4. 降低 `--teleop.max_joint_velocity_rad_s`，例如 `1.5 -> 1.0 -> 0.6`。
-5. 降低 `--teleop.max_joint_acceleration_rad_s2`，例如 `8.0 -> 6.0 -> 4.0`。
-6. 降低 `--teleop.arm_action_smoothing_alpha`，例如 `0.6 -> 0.45 -> 0.3`。
-7. 提高 `--teleop.frame_lm_damping`，例如 `1e-3 -> 3e-3 -> 1e-2`。
-8. 提高 `--teleop.ik_damping`，例如 `1e-6 -> 1e-5`。
-9. 降低 `--teleop.orientation_cost`。
-10. 略微提高 `--teleop.posture_cost`，例如 `1e-3 -> 3e-3`。
+2. 降低 `--teleop.pico_position_smoothing_alpha` / `--teleop.pico_orientation_smoothing_alpha`。
+3. 适当提高 `--teleop.pico_position_deadband_m` / `--teleop.pico_orientation_deadband_rad`。
+4. 降低 `--teleop.task_gain`。
+5. 保持或切回 `--teleop.position_only=true`。
+6. 降低 `--teleop.max_joint_velocity_rad_s`，例如 `1.5 -> 1.0 -> 0.6`。
+7. 降低 `--teleop.max_joint_acceleration_rad_s2`，例如 `8.0 -> 6.0 -> 4.0`。
+8. 降低 `--teleop.arm_action_smoothing_alpha`，例如 `0.6 -> 0.45 -> 0.3`。
+9. 提高 `--teleop.frame_lm_damping`，例如 `1e-3 -> 3e-3 -> 1e-2`。
+10. 提高 `--teleop.ik_damping`，例如 `1e-6 -> 1e-5`。
+11. 降低 `--teleop.orientation_cost`。
+12. 略微提高 `--teleop.posture_cost`，例如 `1e-3 -> 3e-3`。
 
 不建议首次实物测试关闭 `enforce_limits` 或 `use_self_collision`。这两个选项更适合短时排查问题，
 不适合作为首测默认配置。
@@ -386,14 +401,15 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 如果出现抖动，优先按以下方向处理：
 
 1. 降低 `scale`。
-2. 降低 `task_gain`。
-3. 确认或切回 `position_only=true`。
-4. 降低 `max_joint_velocity_rad_s` 和 `max_joint_acceleration_rad_s2`。
-5. 降低 `arm_action_smoothing_alpha`。
-6. 提高 `frame_lm_damping`。
-7. 提高 `ik_damping`。
-8. 降低 `orientation_cost`。
-9. 小幅提高 `posture_cost`。
+2. 降低 PICO 输入滤波 alpha，并适当增大 PICO 输入死区。
+3. 降低 `task_gain`。
+4. 确认或切回 `position_only=true`。
+5. 降低 `max_joint_velocity_rad_s` 和 `max_joint_acceleration_rad_s2`。
+6. 降低 `arm_action_smoothing_alpha`。
+7. 提高 `frame_lm_damping`。
+8. 提高 `ik_damping`。
+9. 降低 `orientation_cost`。
+10. 小幅提高 `posture_cost`。
 
 现场建议额外准备：
 
@@ -402,11 +418,44 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 - 正式采集前，用关节点动控制台确认能从异常位置安全回到默认姿态。
 - 第一轮数据采集建议每集时间短一点，例如 10 到 15 秒；确认保存和复位流程稳定后再加长。
 
+实物测试中已发现并修复的 grip 松开逻辑：
+
+- 现象：实物遥操作时，松开 grip 后手臂有回到初始/参考关节姿态的趋势，mock 下不明显。
+- 根因：旧逻辑中 grip 松开只把 TCP target 设为当前末端位姿，但仍然继续运行 FrameTask + PostureTask。
+  PostureTask 的参考姿态是启动时的初始姿态，因此在“末端位置尽量不动”的同时，会持续把冗余关节拉回初始关节。
+- 修复：未激活的手臂不再参与 IK 求解，最终 action 中该侧关节保持最新 LCM feedback；同时清零该侧关节输出平滑的历史 step。
+- 结论：松开 grip 应表示“停止控制并保持当前实物反馈姿态”，不是“以当前 TCP 为目标继续做 IK”。
+
+Action 抖动观察：
+
+- `lerobot-record` 和 `lerobot-teleoperate` 都支持把最终下发给 robot 的 action 发布为 ROS2 `sensor_msgs/msg/JointState`：
+
+```bash
+--publish_action_ros2=true \
+--action_ros2_topic=/lerobot/action
+```
+
+- GUI 的采集页和“常用命令 > 遥操作”中也有“发布 action 到 ROS2”开关。
+- 查看消息：
+
+```bash
+ros2 topic echo /lerobot/action
+```
+
+- 观察某个关节是否抖动，可用 PlotJuggler 或 rqt_plot 订阅 `/lerobot/action`。消息中：
+  - `name`: 关节名，例如 `left_arm_0`
+  - `position`: 对应 action 目标值，单位通常为 rad 或夹爪配置单位
+- 该 topic 发布的是 `robot.send_action()` 返回后的 action，因此包含 robot 侧 `max_relative_target` 等限幅后的结果。
+
 一个实用的首测最小参数组合：
 
 ```bash
 --teleop.scale=0.5 \
 --teleop.position_only=true \
+--teleop.pico_position_smoothing_alpha=0.5 \
+--teleop.pico_orientation_smoothing_alpha=0.5 \
+--teleop.pico_position_deadband_m=0.0015 \
+--teleop.pico_orientation_deadband_rad=0.01 \
 --teleop.task_gain=0.25 \
 --teleop.frame_lm_damping=1e-3 \
 --teleop.ik_damping=1e-6 \

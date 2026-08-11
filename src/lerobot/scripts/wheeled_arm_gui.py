@@ -2185,6 +2185,18 @@ class WheeledArmGui(QMainWindow):
         self.mock_cameras.setToolTip("仅完全离线测试时开启；有真实相机时保持关闭。")
         self.mock_xr = QCheckBox("模拟 PICO 输入")
         self.lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
+        self.publish_action_ros2 = QCheckBox("发布 action 到 ROS2")
+        self.publish_action_ros2.setToolTip("发布最终下发给机器人的 action，便于观察关节命令是否抖动。")
+        self.action_ros2_topic = QLineEdit("/lerobot/action")
+        self.action_ros2_topic.setPlaceholderText("例如 /lerobot/action")
+        self.pico_position_smoothing_alpha = self._double_spin(0.05, 1.0, 0.5, 2)
+        self.pico_position_smoothing_alpha.setToolTip("PICO 手柄位置输入滤波；1.0 表示不滤波。")
+        self.pico_orientation_smoothing_alpha = self._double_spin(0.05, 1.0, 0.5, 2)
+        self.pico_orientation_smoothing_alpha.setToolTip("PICO 手柄姿态输入滤波；1.0 表示不滤波。")
+        self.pico_position_deadband = self._double_spin(0.0, 0.05, 0.0015, 4)
+        self.pico_position_deadband.setToolTip("忽略小于该幅度的位置抖动，单位 m。")
+        self.pico_orientation_deadband = self._double_spin(0.0, 0.5, 0.01, 3)
+        self.pico_orientation_deadband.setToolTip("忽略小于该角度的姿态抖动，单位 rad。")
         self.ik_smoothing_alpha = self._double_spin(0.05, 1.0, 0.6, 2)
         self.ik_smoothing_alpha.setToolTip("1.0 表示不做 EMA 平滑；越小越稳，但手柄跟随越慢。")
         self.ik_max_joint_velocity = self._double_spin(0.05, 20.0, 1.5, 2)
@@ -2211,6 +2223,12 @@ class WheeledArmGui(QMainWindow):
         robot_form.addRow("", self.mock_cameras)
         robot_form.addRow("", self.mock_xr)
         robot_form.addRow("LCM URL", self.lcm_url)
+        robot_form.addRow("", self.publish_action_ros2)
+        robot_form.addRow("Action topic", self.action_ros2_topic)
+        robot_form.addRow("PICO 位置滤波", self.pico_position_smoothing_alpha)
+        robot_form.addRow("PICO 姿态滤波", self.pico_orientation_smoothing_alpha)
+        robot_form.addRow("PICO 位置死区", self.pico_position_deadband)
+        robot_form.addRow("PICO 姿态死区", self.pico_orientation_deadband)
         robot_form.addRow("关节平滑系数", self.ik_smoothing_alpha)
         robot_form.addRow("最大关节速度", self.ik_max_joint_velocity)
         robot_form.addRow("最大关节加速度", self.ik_max_joint_acceleration)
@@ -2924,6 +2942,26 @@ class WheeledArmGui(QMainWindow):
         self.common_teleop_mock_cameras.setToolTip("仅完全离线测试时开启；有真实相机时保持关闭。")
         self.common_teleop_mock_xr = QCheckBox("模拟 PICO 输入")
         self.common_teleop_lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
+        self.common_teleop_publish_action_ros2 = QCheckBox("发布 action 到 ROS2")
+        self.common_teleop_publish_action_ros2.setToolTip(
+            "发布最终下发给机器人的 action，便于观察关节命令是否抖动。"
+        )
+        self.common_teleop_action_ros2_topic = QLineEdit("/lerobot/action")
+        self.common_teleop_action_ros2_topic.setPlaceholderText("例如 /lerobot/action")
+        self.common_teleop_pico_position_smoothing_alpha = self._double_spin(0.05, 1.0, 0.5, 2)
+        self.common_teleop_pico_position_smoothing_alpha.setToolTip(
+            "PICO 手柄位置输入滤波；1.0 表示不滤波。"
+        )
+        self.common_teleop_pico_orientation_smoothing_alpha = self._double_spin(0.05, 1.0, 0.5, 2)
+        self.common_teleop_pico_orientation_smoothing_alpha.setToolTip(
+            "PICO 手柄姿态输入滤波；1.0 表示不滤波。"
+        )
+        self.common_teleop_pico_position_deadband = self._double_spin(0.0, 0.05, 0.0015, 4)
+        self.common_teleop_pico_position_deadband.setToolTip("忽略小于该幅度的位置抖动，单位 m。")
+        self.common_teleop_pico_orientation_deadband = self._double_spin(0.0, 0.5, 0.01, 3)
+        self.common_teleop_pico_orientation_deadband.setToolTip(
+            "忽略小于该角度的姿态抖动，单位 rad。"
+        )
         self.common_teleop_ik_smoothing_alpha = self._double_spin(0.05, 1.0, 0.6, 2)
         self.common_teleop_ik_smoothing_alpha.setToolTip(
             "1.0 表示不做 EMA 平滑；越小越稳，但手柄跟随越慢。"
@@ -2946,6 +2984,12 @@ class WheeledArmGui(QMainWindow):
         form.addRow("", self.common_teleop_mock_cameras)
         form.addRow("", self.common_teleop_mock_xr)
         form.addRow("LCM URL", self.common_teleop_lcm_url)
+        form.addRow("", self.common_teleop_publish_action_ros2)
+        form.addRow("Action topic", self.common_teleop_action_ros2_topic)
+        form.addRow("PICO 位置滤波", self.common_teleop_pico_position_smoothing_alpha)
+        form.addRow("PICO 姿态滤波", self.common_teleop_pico_orientation_smoothing_alpha)
+        form.addRow("PICO 位置死区", self.common_teleop_pico_position_deadband)
+        form.addRow("PICO 姿态死区", self.common_teleop_pico_orientation_deadband)
         form.addRow("关节平滑系数", self.common_teleop_ik_smoothing_alpha)
         form.addRow("最大关节速度", self.common_teleop_ik_max_joint_velocity)
         form.addRow("最大关节加速度", self.common_teleop_ik_max_joint_acceleration)
@@ -3512,6 +3556,12 @@ class WheeledArmGui(QMainWindow):
             self.mock_cameras,
             self.mock_xr,
             self.lcm_url,
+            self.publish_action_ros2,
+            self.action_ros2_topic,
+            self.pico_position_smoothing_alpha,
+            self.pico_orientation_smoothing_alpha,
+            self.pico_position_deadband,
+            self.pico_orientation_deadband,
             self.ik_smoothing_alpha,
             self.ik_max_joint_velocity,
             self.ik_max_joint_acceleration,
@@ -3633,6 +3683,12 @@ class WheeledArmGui(QMainWindow):
             self.common_teleop_mock_cameras,
             self.common_teleop_mock_xr,
             self.common_teleop_lcm_url,
+            self.common_teleop_publish_action_ros2,
+            self.common_teleop_action_ros2_topic,
+            self.common_teleop_pico_position_smoothing_alpha,
+            self.common_teleop_pico_orientation_smoothing_alpha,
+            self.common_teleop_pico_position_deadband,
+            self.common_teleop_pico_orientation_deadband,
             self.common_teleop_ik_smoothing_alpha,
             self.common_teleop_ik_max_joint_velocity,
             self.common_teleop_ik_max_joint_acceleration,
@@ -3776,6 +3832,47 @@ class WheeledArmGui(QMainWindow):
         self.mock_cameras.setChecked(
             _settings_bool(self.settings.value("record/mock_cameras", self.mock_cameras.isChecked()), False)
         )
+        self.publish_action_ros2.setChecked(
+            _settings_bool(
+                self.settings.value(
+                    "record/publish_action_ros2", self.publish_action_ros2.isChecked()
+                ),
+                False,
+            )
+        )
+        self.action_ros2_topic.setText(
+            self.settings.value("record/action_ros2_topic", self.action_ros2_topic.text())
+        )
+        self.pico_position_smoothing_alpha.setValue(
+            float(
+                self.settings.value(
+                    "record/pico_position_smoothing_alpha",
+                    self.pico_position_smoothing_alpha.value(),
+                )
+            )
+        )
+        self.pico_orientation_smoothing_alpha.setValue(
+            float(
+                self.settings.value(
+                    "record/pico_orientation_smoothing_alpha",
+                    self.pico_orientation_smoothing_alpha.value(),
+                )
+            )
+        )
+        self.pico_position_deadband.setValue(
+            float(
+                self.settings.value(
+                    "record/pico_position_deadband", self.pico_position_deadband.value()
+                )
+            )
+        )
+        self.pico_orientation_deadband.setValue(
+            float(
+                self.settings.value(
+                    "record/pico_orientation_deadband", self.pico_orientation_deadband.value()
+                )
+            )
+        )
         self.ik_smoothing_alpha.setValue(
             float(self.settings.value("record/ik_smoothing_alpha", self.ik_smoothing_alpha.value()))
         )
@@ -3829,6 +3926,52 @@ class WheeledArmGui(QMainWindow):
                     "common/teleop_mock_cameras", self.common_teleop_mock_cameras.isChecked()
                 ),
                 False,
+            )
+        )
+        self.common_teleop_publish_action_ros2.setChecked(
+            _settings_bool(
+                self.settings.value(
+                    "common/teleop_publish_action_ros2",
+                    self.common_teleop_publish_action_ros2.isChecked(),
+                ),
+                False,
+            )
+        )
+        self.common_teleop_action_ros2_topic.setText(
+            self.settings.value(
+                "common/teleop_action_ros2_topic", self.common_teleop_action_ros2_topic.text()
+            )
+        )
+        self.common_teleop_pico_position_smoothing_alpha.setValue(
+            float(
+                self.settings.value(
+                    "common/teleop_pico_position_smoothing_alpha",
+                    self.common_teleop_pico_position_smoothing_alpha.value(),
+                )
+            )
+        )
+        self.common_teleop_pico_orientation_smoothing_alpha.setValue(
+            float(
+                self.settings.value(
+                    "common/teleop_pico_orientation_smoothing_alpha",
+                    self.common_teleop_pico_orientation_smoothing_alpha.value(),
+                )
+            )
+        )
+        self.common_teleop_pico_position_deadband.setValue(
+            float(
+                self.settings.value(
+                    "common/teleop_pico_position_deadband",
+                    self.common_teleop_pico_position_deadband.value(),
+                )
+            )
+        )
+        self.common_teleop_pico_orientation_deadband.setValue(
+            float(
+                self.settings.value(
+                    "common/teleop_pico_orientation_deadband",
+                    self.common_teleop_pico_orientation_deadband.value(),
+                )
             )
         )
         self.common_teleop_ik_smoothing_alpha.setValue(
@@ -3891,6 +4034,20 @@ class WheeledArmGui(QMainWindow):
         )
         self.settings.setValue("record/mock_robot", self.mock_robot.isChecked())
         self.settings.setValue("record/mock_cameras", self.mock_cameras.isChecked())
+        self.settings.setValue("record/publish_action_ros2", self.publish_action_ros2.isChecked())
+        self.settings.setValue("record/action_ros2_topic", self.action_ros2_topic.text())
+        self.settings.setValue(
+            "record/pico_position_smoothing_alpha",
+            self.pico_position_smoothing_alpha.value(),
+        )
+        self.settings.setValue(
+            "record/pico_orientation_smoothing_alpha",
+            self.pico_orientation_smoothing_alpha.value(),
+        )
+        self.settings.setValue("record/pico_position_deadband", self.pico_position_deadband.value())
+        self.settings.setValue(
+            "record/pico_orientation_deadband", self.pico_orientation_deadband.value()
+        )
         self.settings.setValue("record/ik_smoothing_alpha", self.ik_smoothing_alpha.value())
         self.settings.setValue("record/ik_max_joint_velocity", self.ik_max_joint_velocity.value())
         self.settings.setValue(
@@ -3918,6 +4075,29 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("common/advanced_args", self.common_advanced_args.toPlainText())
         self.settings.setValue("common/teleop_mock_robot", self.common_teleop_mock_robot.isChecked())
         self.settings.setValue("common/teleop_mock_cameras", self.common_teleop_mock_cameras.isChecked())
+        self.settings.setValue(
+            "common/teleop_publish_action_ros2",
+            self.common_teleop_publish_action_ros2.isChecked(),
+        )
+        self.settings.setValue(
+            "common/teleop_action_ros2_topic", self.common_teleop_action_ros2_topic.text()
+        )
+        self.settings.setValue(
+            "common/teleop_pico_position_smoothing_alpha",
+            self.common_teleop_pico_position_smoothing_alpha.value(),
+        )
+        self.settings.setValue(
+            "common/teleop_pico_orientation_smoothing_alpha",
+            self.common_teleop_pico_orientation_smoothing_alpha.value(),
+        )
+        self.settings.setValue(
+            "common/teleop_pico_position_deadband",
+            self.common_teleop_pico_position_deadband.value(),
+        )
+        self.settings.setValue(
+            "common/teleop_pico_orientation_deadband",
+            self.common_teleop_pico_orientation_deadband.value(),
+        )
         self.settings.setValue(
             "common/teleop_ik_smoothing_alpha",
             self.common_teleop_ik_smoothing_alpha.value(),
@@ -3963,6 +4143,18 @@ class WheeledArmGui(QMainWindow):
                 f"--teleop.mock_xr={_bool_arg(self.mock_xr.isChecked())}",
                 f"--robot.mock={_bool_arg(self.mock_robot.isChecked())}",
                 f"--robot.mock_cameras={_bool_arg(self.mock_cameras.isChecked())}",
+                f"--publish_action_ros2={_bool_arg(self.publish_action_ros2.isChecked())}",
+                f"--action_ros2_topic={self.action_ros2_topic.text().strip()}",
+                (
+                    "--teleop.pico_position_smoothing_alpha="
+                    f"{self.pico_position_smoothing_alpha.value()}"
+                ),
+                (
+                    "--teleop.pico_orientation_smoothing_alpha="
+                    f"{self.pico_orientation_smoothing_alpha.value()}"
+                ),
+                f"--teleop.pico_position_deadband_m={self.pico_position_deadband.value()}",
+                f"--teleop.pico_orientation_deadband_rad={self.pico_orientation_deadband.value()}",
                 f"--teleop.arm_action_smoothing_alpha={self.ik_smoothing_alpha.value()}",
                 f"--teleop.max_joint_velocity_rad_s={self.ik_max_joint_velocity.value()}",
                 f"--teleop.max_joint_acceleration_rad_s2={self.ik_max_joint_acceleration.value()}",
@@ -4280,6 +4472,27 @@ class WheeledArmGui(QMainWindow):
                     f"--teleop.mock_xr={_bool_arg(self.common_teleop_mock_xr.isChecked())}",
                     f"--robot.mock={_bool_arg(self.common_teleop_mock_robot.isChecked())}",
                     f"--robot.mock_cameras={_bool_arg(self.common_teleop_mock_cameras.isChecked())}",
+                    (
+                        "--publish_action_ros2="
+                        f"{_bool_arg(self.common_teleop_publish_action_ros2.isChecked())}"
+                    ),
+                    f"--action_ros2_topic={self.common_teleop_action_ros2_topic.text().strip()}",
+                    (
+                        "--teleop.pico_position_smoothing_alpha="
+                        f"{self.common_teleop_pico_position_smoothing_alpha.value()}"
+                    ),
+                    (
+                        "--teleop.pico_orientation_smoothing_alpha="
+                        f"{self.common_teleop_pico_orientation_smoothing_alpha.value()}"
+                    ),
+                    (
+                        "--teleop.pico_position_deadband_m="
+                        f"{self.common_teleop_pico_position_deadband.value()}"
+                    ),
+                    (
+                        "--teleop.pico_orientation_deadband_rad="
+                        f"{self.common_teleop_pico_orientation_deadband.value()}"
+                    ),
                     (
                         "--teleop.arm_action_smoothing_alpha="
                         f"{self.common_teleop_ik_smoothing_alpha.value()}"
