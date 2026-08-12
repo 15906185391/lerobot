@@ -358,6 +358,20 @@ def _make_reset_visualization_callback(
     return callback
 
 
+def _action_values_for_dataset(
+    robot: Robot, requested_action: RobotAction, sent_action: RobotAction
+) -> RobotAction:
+    if robot.name != "wheeled_arm":
+        return requested_action
+
+    action_features = getattr(robot, "action_features", {})
+    recorded_action = {
+        key: value for key, value in requested_action.items() if key in action_features
+    }
+    recorded_action.update({key: value for key, value in sent_action.items() if key in action_features})
+    return recorded_action
+
+
 """ --------------- record_loop() data flow --------------------------
        [ Robot ]
            V
@@ -508,10 +522,11 @@ def record_loop(
         _sent_action = robot.send_action(robot_action_to_send)
         if action_publisher is not None:
             action_publisher.publish(_sent_action, robot.action_features)
+        dataset_action_values = _action_values_for_dataset(robot, action_values, _sent_action)
 
         # Write to dataset
         if dataset is not None:
-            action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
+            action_frame = build_dataset_frame(dataset.features, dataset_action_values, prefix=ACTION)
             frame = {**observation_frame, **action_frame, "task": single_task}
             dataset.add_frame(frame)
 

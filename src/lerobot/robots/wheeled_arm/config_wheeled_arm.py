@@ -81,7 +81,18 @@ class WheeledArmConfig(RobotConfig):
     # With the default 30Hz record/IK loop, this fills the 250Hz command stream with
     # intermediate joint targets instead of repeating a stair-stepped position.
     interpolate_control_loop_actions: bool = True
+    # Fallback interpolation duration used before the second action arrives or when adaptive duration is off.
     action_interpolation_duration_s: float = 1.0 / 30.0
+    # Adapt the interpolation duration to the measured interval between incoming actions. This keeps
+    # the 250Hz command stream aligned with the real record/teleop loop when cameras or visualization
+    # make the outer loop run slower or jitter around the nominal fps.
+    adaptive_action_interpolation_duration: bool = True
+    action_interpolation_min_duration_s: float = 0.02
+    action_interpolation_max_duration_s: float = 0.06
+    # Stop publishing moving commands if no fresh action arrives for this long.
+    # This protects the real robot when the outer record/teleop loop stalls.
+    # Set to None to disable the watchdog.
+    action_watchdog_timeout_s: float | None = 0.1
 
     # Wait after creating the LCM handler so subscriptions can receive the first robot state.
     connect_timeout_s: float = 1.0
@@ -136,3 +147,14 @@ class WheeledArmConfig(RobotConfig):
             raise ValueError("`control_dt` must be positive.")
         if self.action_interpolation_duration_s <= 0:
             raise ValueError("`action_interpolation_duration_s` must be positive.")
+        if self.action_interpolation_min_duration_s <= 0:
+            raise ValueError("`action_interpolation_min_duration_s` must be positive.")
+        if self.action_interpolation_max_duration_s <= 0:
+            raise ValueError("`action_interpolation_max_duration_s` must be positive.")
+        if self.action_interpolation_min_duration_s > self.action_interpolation_max_duration_s:
+            raise ValueError(
+                "`action_interpolation_min_duration_s` must be less than or equal to "
+                "`action_interpolation_max_duration_s`."
+            )
+        if self.action_watchdog_timeout_s is not None and self.action_watchdog_timeout_s <= 0:
+            raise ValueError("`action_watchdog_timeout_s` must be positive or None.")

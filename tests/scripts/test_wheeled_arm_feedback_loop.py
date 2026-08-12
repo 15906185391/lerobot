@@ -16,6 +16,8 @@
 
 from types import SimpleNamespace
 
+import numpy as np
+
 from lerobot.scripts.lerobot_record import record_loop
 from lerobot.scripts.lerobot_teleoperate import teleop_loop
 from lerobot.teleoperators.teleoperator import Teleoperator
@@ -43,6 +45,41 @@ class FakeWheeledArmRobot:
     def send_action(self, action):
         self.sent_actions.append(action.copy())
         return action
+
+
+class ClippingFakeWheeledArmRobot(FakeWheeledArmRobot):
+    action_features = {"left_arm_0.pos": float, "right_arm_0.pos": float}
+
+    def get_observation(self):
+        return {"left_arm_0.pos": 0.0, "right_arm_0.pos": 0.0}
+
+    def send_action(self, action):
+        self.sent_actions.append(action.copy())
+        return {"left_arm_0.pos": 0.5}
+
+
+class FakeDataset:
+    fps = 100
+    features = {
+        "observation.state": {
+            "dtype": "float32",
+            "shape": (2,),
+            "names": ["left_arm_0.pos", "right_arm_0.pos"],
+        },
+        "action": {
+            "dtype": "float32",
+            "shape": (2,),
+            "names": ["left_arm_0.pos", "right_arm_0.pos"],
+        },
+    }
+
+    def __init__(self):
+        self.frames = []
+        self.num_frames = 0
+
+    def add_frame(self, frame):
+        self.frames.append(frame)
+        self.num_frames += 1
 
 
 class FakeTeleop(Teleoperator):
@@ -164,3 +201,33 @@ def test_record_loop_can_use_continuous_wheeled_arm_feedback():
     )
 
     assert teleop.feedback_count > 0
+
+
+def test_record_loop_records_sent_action_for_wheeled_arm_dataset():
+    robot = ClippingFakeWheeledArmRobot()
+    teleop = FakeTeleop(use_continuous_robot_feedback=False)
+    dataset = FakeDataset()
+    processor = IdentityProcessor()
+    events = {"exit_early": False}
+
+    def teleop_action_processor(data):
+        return {
+            "left_arm_0.pos": 2.0,
+            "right_arm_0.pos": -1.0,
+            "__wheeled_arm_active_arms": ("left_arm",),
+        }
+
+    record_loop(
+        robot=robot,
+        events=events,
+        fps=100,
+        teleop_action_processor=teleop_action_processor,
+        robot_action_processor=processor,
+        robot_observation_processor=processor,
+        dataset=dataset,
+        teleop=teleop,
+        control_time_s=0.01,
+    )
+
+    assert dataset.frames
+    np.testing.assert_allclose(dataset.frames[0]["action"], [0.5, -1.0])

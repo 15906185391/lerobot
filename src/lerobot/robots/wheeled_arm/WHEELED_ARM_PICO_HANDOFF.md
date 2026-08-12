@@ -1311,3 +1311,97 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/kuanli/miniconda3/envs/xr/bin/python -m p
 ```
 
 此外，相关 Python 文件已通过 `py_compile`，相关 diff 已通过 `git diff --check`。
+
+### 11. 2026-08-12 采集链路进一步加固：真实 sent action、锁外发布、watchdog 与自适应插值
+
+背景：
+
+- 上一轮已经把 PICO IK/record 的 30Hz action 通过 robot 侧 control loop 转成 250Hz LCM 发布。
+- 继续排查后发现，采集数据可信度和实机安全性还需要补三类保护：
+  - 数据集应记录 robot 侧真正接受/限幅后的 action，而不是只记录 teleop 原始 action。
+  - 250Hz control loop 不应在内部锁中执行 LCM publish，避免 publish 慢时阻塞下一帧 action 更新。
+  - 外层 record/teleop loop 如果被相机、Rerun 或 CPU 抖动拖慢，robot 侧不能一直保持旧 action 发布。
+- 另外，固定 `1/30s` 插值周期不适合真实 loop 抖动，需要按实际 action 到达间隔自适应。
+
+本轮已落实的代码改动：
+
+1. wheeled_arm 数据集 action 记录 robot 侧 sent action。
+   - 文件：`src/lerobot/scripts/lerobot_record.py`
+   - 新增 `_action_values_for_dataset(robot, requested_action, sent_action)`。
+   - 对普通机器人保持旧行为，仍记录 processor 后的 requested action。
+   - 对 `robot.name == "wheeled_arm"`：
+     - 先用 requested action 中属于 `robot.action_features` 的字段构造完整 action。
+     - 再用 `robot.send_action()` 返回的 sent action 覆盖对应字段。
+     - 这样 `max_relative_target` 等 robot 侧限幅后的真实发送值会进入 dataset。
+     - 内部 metadata，例如 `__wheeled_arm_active_arms`，不会进入 dataset。
+
+2. control loop 缩短锁作用域，LCM publish 移到锁外。
+   - 文件：`src/lerobot/robots/wheeled_arm/wheeled_arm.py`
+   - 新增 `_control_loop_publish_snapshot(now)`。
+   - control loop 现在在锁内只读取/更新 target、插值状态和 watchdog 状态。
+   - `_set_moving_flags(...)` 和 `upper_body_data_publisher(package)` 在锁外执行。
+   - 这样即使 LCM encode/publish 偶发变慢，外层 `send_action()` 仍能及时更新最新目标。
+
+3. 增加 action watchdog。
+   - 文件：`src/lerobot/robots/wheeled_arm/config_wheeled_arm.py`
+   - 文件：`src/lerobot/robots/wheeled_arm/wheeled_arm.py`
+   - 新增默认配置：
+     - `action_watchdog_timeout_s: float | None = 0.1`
+   - 如果 robot 侧超过该时间没有收到新的 action，control loop 会：
+     - 清空 control target。
+     - 停止所有 moving flags。
+     - 打印一次 watchdog timeout warning。
+   - 可通过下面参数关闭 watchdog：
+
+```bash
+--robot.action_watchdog_timeout_s=null
+```
+
+4. PICO 松开后 active action 为空时，立即停止 moving flags。
+   - 文件：`src/lerobot/robots/wheeled_arm/wheeled_arm.py`
+   - control loop 模式下，如果本帧 action keys 为空，会立即 `_set_moving_flags(set())`。
+   - 这避免上一帧 grip/trigger 激活状态残留，导致松手后继续保持旧 arm moving flag。
+
+5. 插值周期改为按实际 action 到达间隔自适应。
+   - 文件：`src/lerobot/robots/wheeled_arm/config_wheeled_arm.py`
+   - 文件：`src/lerobot/robots/wheeled_arm/wheeled_arm.py`
+   - 新增默认配置：
+     - `adaptive_action_interpolation_duration: bool = True`
+     - `action_interpolation_min_duration_s: float = 0.02`
+     - `action_interpolation_max_duration_s: float = 0.06`
+   - `action_interpolation_duration_s` 仍保留，作为首帧/回退值；关闭自适应时也使用它作为固定插值周期。
+   - 第二条 action 开始，robot 会用相邻 action 的实际到达间隔作为插值周期，并 clamp 到 `[0.02, 0.06]`。
+   - 这样当外层 record/teleop loop 从标称 30Hz 掉到 20Hz 或出现轻微抖动时，250Hz 发布侧不会继续按固定 33ms 追目标。
+
+建议新增对比开关：
+
+```bash
+--robot.adaptive_action_interpolation_duration=false
+```
+
+用于恢复固定 `--robot.action_interpolation_duration_s`，方便和自适应插值做 A/B 对比。
+
+如果实机仍有轻微跟随卡顿，可尝试：
+
+```bash
+--robot.action_interpolation_max_duration_s=0.08
+```
+
+但不建议一开始把 max duration 调太大，否则会明显增加遥操作延迟。
+
+本轮测试结果：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/kuanli/miniconda3/envs/xr/bin/python -m pytest \
+  tests/scripts/test_wheeled_arm_feedback_loop.py \
+  tests/teleoperators/test_wheeled_arm_pico.py \
+  tests/robots/test_wheeled_arm.py -q
+```
+
+结果：
+
+```text
+40 passed in 0.54s
+```
+
+此外，相关 Python 文件已通过 `py_compile`，相关 diff 已通过 `git diff --check`。

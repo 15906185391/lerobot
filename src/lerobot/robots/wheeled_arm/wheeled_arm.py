@@ -115,6 +115,9 @@ class WheeledArm(Robot):
         self._target_indices: np.ndarray = np.array([], dtype=int)
         self._interpolation_start_t = 0.0
         self._interpolation_duration_s = 0.0
+        self._last_action_update_t = 0.0
+        self._previous_action_update_t = 0.0
+        self._watchdog_timed_out = False
 
         self._joint_index_by_action_key = {
             f"{joint_name}.pos": idx for idx, joint_name in enumerate(self.config.joint_names)
@@ -406,6 +409,8 @@ class WheeledArm(Robot):
         action_keys = self._moving_action_keys(goal_pos, active_arms)
         if self.config.use_control_loop:
             self._set_control_loop_target(package, action_keys)
+            if not action_keys:
+                self._set_moving_flags(set())
         else:
             self._set_moving_flags(action_keys)
             self._handler.upper_body_data_publisher(package)
@@ -447,23 +452,51 @@ class WheeledArm(Robot):
     def _control_loop(self) -> None:
         while not self._control_loop_stop_event.is_set():
             loop_start = time.perf_counter()
-            with self._control_loop_lock:
-                if (
-                    not self._control_loop_pause
-                    and self._target_package is not None
-                    and self._target_action_keys
-                ):
-                    assert self._handler is not None
-                    self._set_moving_flags(self._target_action_keys)
-                    package = self._interpolated_control_loop_package(time.perf_counter())
-                    self._handler.upper_body_data_publisher(package)
-                    self._commanded_package = package.copy()
+            package, action_keys, watchdog_timed_out = self._control_loop_publish_snapshot(
+                time.perf_counter()
+            )
+            if watchdog_timed_out:
+                assert self._handler is not None
+                self._set_moving_flags(set())
+            elif package is not None:
+                assert self._handler is not None
+                assert action_keys is not None
+                self._set_moving_flags(action_keys)
+                self._handler.upper_body_data_publisher(package)
 
             elapsed_s = time.perf_counter() - loop_start
             time.sleep(max(self.config.control_dt - elapsed_s, 0.0))
 
+    def _control_loop_publish_snapshot(
+        self, now: float
+    ) -> tuple[np.ndarray | None, set[str] | None, bool]:
+        with self._control_loop_lock:
+            if self._control_loop_pause:
+                return None, None, False
+            if self._target_package is None or not self._target_action_keys:
+                return None, None, False
+            if self._action_watchdog_timed_out(now):
+                self._commanded_package = None
+                self._interpolation_start_package = None
+                self._target_package = None
+                self._target_action_keys = set()
+                self._target_indices = np.array([], dtype=int)
+                if not self._watchdog_timed_out:
+                    logger.warning(
+                        "wheeled_arm action watchdog timed out after %.3fs without a fresh action; "
+                        "stopping moving flags.",
+                        self.config.action_watchdog_timeout_s,
+                    )
+                self._watchdog_timed_out = True
+                return None, None, True
+
+            package = self._interpolated_control_loop_package(now)
+            self._commanded_package = package.copy()
+            return package, self._target_action_keys.copy(), False
+
     def _set_control_loop_target(self, package: np.ndarray, action_keys: set[str]) -> None:
         with self._control_loop_lock:
+            now = time.perf_counter()
             target_package = np.asarray(package, dtype=np.float32).copy()
             self._interpolation_start_package = self._current_control_loop_start_package(
                 target_package
@@ -471,8 +504,11 @@ class WheeledArm(Robot):
             self._target_package = target_package
             self._target_action_keys = action_keys.copy()
             self._target_indices = self._action_key_indices(action_keys)
-            self._interpolation_start_t = time.perf_counter()
-            self._interpolation_duration_s = self.config.action_interpolation_duration_s
+            self._interpolation_start_t = now
+            self._interpolation_duration_s = self._next_interpolation_duration(now)
+            self._previous_action_update_t = self._last_action_update_t
+            self._last_action_update_t = now
+            self._watchdog_timed_out = False
 
     def _clear_control_loop_target(self) -> None:
         with self._control_loop_lock:
@@ -483,6 +519,30 @@ class WheeledArm(Robot):
             self._target_indices = np.array([], dtype=int)
             self._interpolation_start_t = 0.0
             self._interpolation_duration_s = 0.0
+            self._last_action_update_t = 0.0
+            self._previous_action_update_t = 0.0
+            self._watchdog_timed_out = False
+
+    def _next_interpolation_duration(self, now: float) -> float:
+        fallback_s = self.config.action_interpolation_duration_s
+        if not self.config.adaptive_action_interpolation_duration:
+            return fallback_s
+        if self._last_action_update_t <= 0.0:
+            return fallback_s
+        measured_s = now - self._last_action_update_t
+        return float(
+            np.clip(
+                measured_s,
+                self.config.action_interpolation_min_duration_s,
+                self.config.action_interpolation_max_duration_s,
+            )
+        )
+
+    def _action_watchdog_timed_out(self, now: float) -> bool:
+        timeout_s = self.config.action_watchdog_timeout_s
+        if timeout_s is None or self._last_action_update_t <= 0.0:
+            return False
+        return now - self._last_action_update_t > timeout_s
 
     def _current_control_loop_start_package(self, target_package: np.ndarray) -> np.ndarray:
         if self._commanded_package is not None:
@@ -531,6 +591,9 @@ class WheeledArm(Robot):
                     robot._target_package = None
                     robot._target_action_keys = set()
                     robot._target_indices = np.array([], dtype=int)
+                    robot._last_action_update_t = 0.0
+                    robot._previous_action_update_t = 0.0
+                    robot._watchdog_timed_out = False
                 return None
 
             def __exit__(self, exc_type, exc, traceback):
@@ -541,6 +604,9 @@ class WheeledArm(Robot):
                     robot._target_package = None
                     robot._target_action_keys = set()
                     robot._target_indices = np.array([], dtype=int)
+                    robot._last_action_update_t = 0.0
+                    robot._previous_action_update_t = 0.0
+                    robot._watchdog_timed_out = False
                 return False
 
         return ControlLoopPause()
