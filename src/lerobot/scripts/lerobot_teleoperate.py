@@ -203,7 +203,11 @@ def teleop_loop(
         # given that it is the identity processor as default
         obs = robot.get_observation()
 
-        if robot.name == "wheeled_arm" and getattr(robot, "has_valid_feedback", True):
+        if (
+            robot.name == "wheeled_arm"
+            and getattr(robot, "has_valid_feedback", True)
+            and getattr(getattr(teleop, "config", None), "use_continuous_robot_feedback", True)
+        ):
             teleop.send_feedback(obs)
         if robot.name == "unitree_g1":
             teleop.send_feedback(obs)
@@ -236,9 +240,13 @@ def teleop_loop(
             print("\n" + "-" * (display_len + 10))
             print(f"{'NAME':<{display_len}} | {'NORM':>7}")
             # Display the final robot action that was sent
+            displayed_actions = 0
             for motor, value in robot_action_to_send.items():
+                if motor not in robot.action_features:
+                    continue
                 print(f"{motor:<{display_len}} | {value:>7.2f}")
-            move_cursor_up(len(robot_action_to_send) + 3)
+                displayed_actions += 1
+            move_cursor_up(displayed_actions + 3)
 
         dt_s = time.perf_counter() - loop_start
         precise_sleep(max(1 / fps - dt_s, 0.0))
@@ -248,6 +256,27 @@ def teleop_loop(
 
         if duration is not None and time.perf_counter() - start >= duration:
             return
+
+
+def _sync_teleop_feedback_from_robot(robot: Robot, teleop: Teleoperator) -> None:
+    if robot.name != "wheeled_arm":
+        return
+
+    require_feedback = bool(getattr(getattr(robot, "config", None), "require_fresh_feedback", False))
+    if require_feedback:
+        require_valid_feedback = getattr(robot, "require_valid_feedback", None)
+        if callable(require_valid_feedback):
+            require_valid_feedback("initial teleop feedback sync")
+    elif not getattr(robot, "has_valid_feedback", True):
+        return
+
+    send_feedback = getattr(teleop, "send_feedback", None)
+    if callable(send_feedback):
+        send_feedback(robot.get_observation())
+
+    reset_baseline = getattr(teleop, "reset_baseline", None)
+    if callable(reset_baseline):
+        reset_baseline()
 
 
 @parser.wrap()
@@ -271,6 +300,7 @@ def teleoperate(cfg: TeleoperateConfig):
 
     teleop.connect()
     robot.connect()
+    _sync_teleop_feedback_from_robot(robot, teleop)
 
     try:
         if cfg.publish_action_ros2:

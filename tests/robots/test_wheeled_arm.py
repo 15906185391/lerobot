@@ -23,7 +23,10 @@ import numpy as np
 from lerobot.robots import make_robot_from_config
 from lerobot.robots.config import RobotConfig
 from lerobot.robots.wheeled_arm import WheeledArm, WheeledArmConfig
-from lerobot.robots.wheeled_arm.config_wheeled_arm import wheeled_arm_cameras_config
+from lerobot.robots.wheeled_arm.config_wheeled_arm import (
+    WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY,
+    wheeled_arm_cameras_config,
+)
 
 
 class FakeLCMHandler:
@@ -31,6 +34,7 @@ class FakeLCMHandler:
         self.joint_current_pos = np.arange(23, dtype=np.float32)
         self.joint_current_pos_lock = threading.Lock()
         self.last_package = None
+        self.published_packages = []
         self.stopped = False
         self.has_feedback = True
         self.arm_state_time_s = time.monotonic()
@@ -48,6 +52,7 @@ class FakeLCMHandler:
 
     def upper_body_data_publisher(self, package):
         self.last_package = np.asarray(package).copy()
+        self.published_packages.append(self.last_package)
 
     def has_arm_state_feedback(self, max_age_s=None, min_time_s=None):
         if not self.has_feedback:
@@ -89,6 +94,7 @@ class FakeCamera:
 
 def _make_robot(**overrides):
     handler = FakeLCMHandler()
+    overrides.setdefault("use_control_loop", False)
     with patch("lerobot.robots.wheeled_arm.wheeled_arm._make_lcm_handler", return_value=handler):
         robot = WheeledArm(WheeledArmConfig(
             cameras={}, connect_timeout_s=0, **overrides))
@@ -135,6 +141,87 @@ def test_has_valid_feedback_reflects_lcm_arm_state_availability():
     assert robot.has_valid_feedback is False
 
 
+def test_robot_side_control_loop_publishes_latest_target_at_control_dt():
+    robot, handler = _make_robot(
+        use_control_loop=True,
+        control_dt=0.01,
+        interpolate_control_loop_actions=False,
+    )
+
+    returned = robot.send_action({"left_arm_0.pos": 1.5})
+
+    deadline = time.monotonic() + 0.2
+    while len(handler.published_packages) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    assert returned == {"left_arm_0.pos": 1.5}
+    assert len(handler.published_packages) >= 2
+    assert handler.last_package[0] == 1.5
+    assert handler.left_arm_moving is True
+    assert handler.right_arm_moving is False
+
+    robot.disconnect()
+    assert robot._control_loop_thread is None
+
+
+def test_control_loop_interpolates_between_last_command_and_new_target():
+    robot, _handler = _make_robot()
+    target = np.arange(23, dtype=np.float32)
+    target[0] = 2.0
+
+    robot._commanded_package = np.zeros(23, dtype=np.float32)
+    robot._target_package = target
+    robot._target_action_keys = {"left_arm_0.pos"}
+    robot._target_indices = np.array([0], dtype=int)
+    robot._interpolation_start_package = np.zeros(23, dtype=np.float32)
+    robot._interpolation_start_t = 10.0
+    robot._interpolation_duration_s = 1.0
+
+    package = robot._interpolated_control_loop_package(now=10.5)
+
+    assert package[0] == 1.0
+    np.testing.assert_allclose(package[1:], target[1:])
+    robot.disconnect()
+
+
+def test_control_loop_interpolation_can_be_disabled():
+    robot, _handler = _make_robot(
+        interpolate_control_loop_actions=False,
+    )
+    target = np.arange(23, dtype=np.float32)
+    target[0] = 2.0
+
+    robot._target_package = target
+    robot._target_action_keys = {"left_arm_0.pos"}
+    robot._target_indices = np.array([0], dtype=int)
+    robot._interpolation_start_package = np.zeros(23, dtype=np.float32)
+    robot._interpolation_start_t = 10.0
+    robot._interpolation_duration_s = 1.0
+
+    package = robot._interpolated_control_loop_package(now=10.5)
+
+    np.testing.assert_allclose(package, target)
+    robot.disconnect()
+
+
+def test_robot_side_control_loop_publishes_interpolated_targets():
+    robot, handler = _make_robot(
+        use_control_loop=True,
+        control_dt=0.01,
+        action_interpolation_duration_s=1.0,
+    )
+
+    robot.send_action({"left_arm_0.pos": 2.0})
+
+    deadline = time.monotonic() + 0.2
+    while not handler.published_packages and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    assert handler.published_packages
+    assert 0.0 <= handler.published_packages[0][0] < 2.0
+    robot.disconnect()
+
+
 def test_send_action_publishes_23_dim_package_for_arm_joints_only():
     robot, handler = _make_robot()
 
@@ -164,6 +251,30 @@ def test_send_action_publishes_23_dim_package_for_arm_joints_only():
     assert handler.head_moving is False
     assert handler.waist_moving is False
     assert handler.leg_moving is False
+
+
+def test_send_action_respects_pico_active_arm_metadata():
+    robot, handler = _make_robot()
+
+    returned = robot.send_action(
+        {
+            "left_arm_0.pos": 1.5,
+            "right_arm_6.pos": 2.5,
+            "left_gripper.pos": 0.25,
+            WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY: ("left_arm",),
+        }
+    )
+
+    assert returned == {
+        "left_arm_0.pos": 1.5,
+        "right_arm_6.pos": 2.5,
+        "left_gripper.pos": 0.25,
+    }
+    assert handler.last_package[0] == 1.5
+    assert handler.last_package[13] == 2.5
+    assert handler.left_arm_moving is True
+    assert handler.right_arm_moving is False
+    assert handler.left_gripper_moving is True
 
 
 def test_send_action_respects_disabled_parts_and_relative_limit():

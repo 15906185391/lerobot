@@ -1156,3 +1156,158 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/kuanli/miniconda3/envs/xr/bin/python -m p
 4. 临时关掉 `use_self_collision`，排除碰撞边界抖动。
 5. 临时设 `position_only=true`，排除姿态跟踪带来的高频修正。
 6. 如果 `mock_xr` 平稳、真机抖，重点放在 LCM 反馈质量和底层控制器，不要继续盯 PICO 的上层平滑。
+
+### 10. 2026-08-12 实机抖动治理：控制节拍、反馈、active arm 与插值
+
+本轮问题现象：
+
+- PICO/viser/Rerun 里看到的机器人关节数据比较平滑。
+- 但实物机器人手臂运行时明显震动、卡顿。
+- 这说明上层 IK 输出已经不是唯一嫌疑，问题更可能出现在“低频目标如何下发给实机控制器”和“实机反馈如何重新进入 IK 状态”之间。
+
+参考 `src/lerobot/teleoperators/unitree_g1` 的思路后，当前判断是：
+
+- Unitree G1 路径更强调机器人侧稳定控制节拍，例如 `control_dt=1/250`。
+- wheeled arm 之前主要由 30Hz 的 record/teleoperate loop 直接触发 LCM 下发。
+- 如果 30Hz IK 目标直接变成实机位置命令，底层会看到阶梯状目标；即使可视化曲线看起来平滑，实机控制器仍可能因为目标保持、反馈延迟或零速度命令语义出现抖动。
+
+本轮已落实的代码改动：
+
+1. 机器人侧增加 250Hz 控制节拍。
+   - 文件：`src/lerobot/robots/wheeled_arm/config_wheeled_arm.py`
+   - 文件：`src/lerobot/robots/wheeled_arm/wheeled_arm.py`
+   - 新增默认配置：
+     - `use_control_loop: bool = True`
+     - `control_dt: float = 1.0 / 250.0`
+   - `send_action()` 不再直接依赖外层 30Hz loop 的调用时刻发布所有命令，而是保存最新目标，由机器人侧后台 control loop 按 `control_dt` 稳定发布。
+   - `reset_to_rest_pose()` 会暂停 control loop，避免 movej 复位轨迹和后台控制线程抢发命令。
+
+2. 30Hz IK/记录频率与 250Hz 发布频率之间增加关节数据插值。
+   - 文件：`src/lerobot/robots/wheeled_arm/config_wheeled_arm.py`
+   - 文件：`src/lerobot/robots/wheeled_arm/wheeled_arm.py`
+   - 新增默认配置：
+     - `interpolate_control_loop_actions: bool = True`
+     - `action_interpolation_duration_s: float = 1.0 / 30.0`
+   - control loop 收到新的低频 action target 后，会在约一个 30Hz 周期内从上一条发布目标插值到新目标。
+   - 目标是把 30Hz 阶梯命令变成 250Hz 小步进命令，降低实机位置控制器看到的瞬时跳变。
+   - 插值只作用在当前 moving/active 的 action keys 上，不会强行驱动未激活手臂。
+
+3. 未激活手臂不再发布 arm action 命令。
+   - 文件：`src/lerobot/robots/wheeled_arm/config_wheeled_arm.py`
+   - 文件：`src/lerobot/robots/wheeled_arm/wheeled_arm.py`
+   - 文件：`src/lerobot/teleoperators/wheeled_arm_pico/wheeled_arm_pico.py`
+   - 新增内部 action metadata key：
+     - `WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY = "__wheeled_arm_active_arms"`
+   - `WheeledArmPico._make_action()` 仍会生成完整 action，便于数据集和可视化保持完整关节字段。
+   - 但 robot 侧会读取该 metadata，只对真正按下 grip/trigger 的 active arm 发布 moving flags 和 LCM arm commands。
+   - 当左右手都未激活，metadata 为空，robot 侧不会因为“保持姿态”而持续给未操作手臂下发 arm 命令。
+
+4. 默认不再把每帧实机 LCM 反馈送回 PICO IK。
+   - 文件：`src/lerobot/teleoperators/wheeled_arm_pico/config_wheeled_arm_pico.py`
+   - 文件：`src/lerobot/scripts/lerobot_record.py`
+   - 文件：`src/lerobot/scripts/lerobot_teleoperate.py`
+   - 新增默认配置：
+     - `use_continuous_robot_feedback: bool = False`
+   - record/teleoperate 的主循环中，wheeled arm PICO 默认不再每帧执行 `teleop.send_feedback(obs)`。
+   - 初始 connect 后同步、episode reset 后同步仍然保留，让 IK 初始状态和复位状态对齐。
+   - 这样可以避免实机 LCM 延迟反馈在每帧覆盖 IK 内部平滑状态，引入“旧反馈把新目标拉回去”的抖动。
+
+5. 命令行显示和 mock 路径适配内部 metadata。
+   - 文件：`src/lerobot/scripts/lerobot_teleoperate.py`
+   - 文件：`src/lerobot/robots/wheeled_arm/wheeled_arm.py`
+   - terminal display 会跳过内部 metadata，避免 tuple 类型被当 float 打印。
+   - mock publish path 会剥离 `__wheeled_arm_active_arms`，保持 mock action 和真实硬件 action 语义一致。
+
+建议实机基线命令：
+
+```bash
+lerobot-teleoperate \
+  --robot.type=wheeled_arm \
+  --teleop.type=wheeled_arm_pico \
+  --fps=30 \
+  --display_data=false \
+  --teleop.visualize=false \
+  --teleop.position_only=true \
+  --teleop.scale=0.2 \
+  --teleop.max_joint_velocity_rad_s=0.2 \
+  --teleop.max_joint_acceleration_rad_s2=1.0
+```
+
+这条命令会使用当前默认值：
+
+- `--robot.use_control_loop=true`
+- `--robot.control_dt=0.004`
+- `--robot.interpolate_control_loop_actions=true`
+- `--robot.action_interpolation_duration_s=0.0333333333`
+- `--teleop.use_continuous_robot_feedback=false`
+
+建议逐项对比开关：
+
+1. 对比旧式直接发布路径：
+
+```bash
+--robot.use_control_loop=false
+```
+
+如果关闭后明显更抖，说明机器人侧 250Hz 节拍有效。
+
+2. 只关闭插值，保留 250Hz loop：
+
+```bash
+--robot.interpolate_control_loop_actions=false
+```
+
+如果关闭插值后出现更明显的阶梯感或抖动，说明 30Hz 到 250Hz 的插值有效。
+
+3. 恢复每帧实机反馈进入 PICO IK：
+
+```bash
+--teleop.use_continuous_robot_feedback=true
+```
+
+如果恢复后抖动加重，说明 LCM 反馈延迟确实在污染 IK 状态。
+
+4. 如果仍有轻微卡顿，可以把插值周期略微加长：
+
+```bash
+--robot.action_interpolation_duration_s=0.04
+```
+
+或：
+
+```bash
+--robot.action_interpolation_duration_s=0.05
+```
+
+注意不要盲目加太大，否则遥操作会变得明显拖手。
+
+实机验证建议：
+
+1. 先只激活左手，监控右臂 LCM command channel 是否没有持续新命令。
+2. 再只激活右手，监控左臂 LCM command channel 是否没有持续新命令。
+3. 保持 PICO 不动但 grip/trigger 按下，观察实机是否仍高频微抖。
+4. 缓慢移动单手，比较开启/关闭插值时实机动作是否从“阶梯跳动”变成“小步连续跟随”。
+5. 如果可视化仍平滑但实机继续抖，下一步重点查 LCM command package 里 `vel=0.0` 的底层语义。
+
+仍未完全确认的问题：
+
+- 当前 arm command 中的 velocity 字段仍需要实机侧确认。
+- 如果底层把 `vel=0.0` 理解为“目标速度必须为 0”，而不是“速度前馈为空/忽略”，那么持续发送变化的位置目标加零速度目标可能会让控制器在每个点上急停式跟踪。
+- 若上述四项改动后实机仍抖，应优先尝试记录/打印实际发布的 position、velocity、moving flag，并确认底层控制器期望的速度字段、增益和模式。
+
+本轮测试结果：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/kuanli/miniconda3/envs/xr/bin/python -m pytest \
+  tests/scripts/test_wheeled_arm_feedback_loop.py \
+  tests/teleoperators/test_wheeled_arm_pico.py \
+  tests/robots/test_wheeled_arm.py -q
+```
+
+结果：
+
+```text
+34 passed in 0.44s
+```
+
+此外，相关 Python 文件已通过 `py_compile`，相关 diff 已通过 `git diff --check`。

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable
 from functools import cached_property
@@ -30,7 +31,7 @@ from lerobot.utils.decorators import check_if_already_connected, check_if_not_co
 
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
-from .config_wheeled_arm import WheeledArmConfig
+from .config_wheeled_arm import WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY, WheeledArmConfig
 
 if TYPE_CHECKING:
     from .hardware_interface.lcm_handler import LCMHandler
@@ -103,6 +104,17 @@ class WheeledArm(Robot):
         self._mock_connected = False
         self._mock_joint_pos: np.ndarray | None = None
         self._mock_frame_index = 0
+        self._control_loop_thread: threading.Thread | None = None
+        self._control_loop_stop_event = threading.Event()
+        self._control_loop_lock = threading.Lock()
+        self._control_loop_pause = False
+        self._commanded_package: np.ndarray | None = None
+        self._interpolation_start_package: np.ndarray | None = None
+        self._target_package: np.ndarray | None = None
+        self._target_action_keys: set[str] = set()
+        self._target_indices: np.ndarray = np.array([], dtype=int)
+        self._interpolation_start_t = 0.0
+        self._interpolation_duration_s = 0.0
 
         self._joint_index_by_action_key = {
             f"{joint_name}.pos": idx for idx, joint_name in enumerate(self.config.joint_names)
@@ -239,6 +251,7 @@ class WheeledArm(Robot):
                 self,
             )
 
+        self._start_control_loop()
         logger.info(f"{self} connected.")
 
     def calibrate(self) -> None:
@@ -280,21 +293,23 @@ class WheeledArm(Robot):
         target_joint_position[_PART_SLICES["left_arm"]] = _RESET_LEFT_ARM_RAD
         target_joint_position[_PART_SLICES["right_arm"]] = _RESET_RIGHT_ARM_RAD
 
-        self._set_movej_reset_flags()
-        movej = MOVEJ(
-            self._handler,
-            Collision_Detection(self._handler),
-            stop_requested=stop_requested,
-            progress_callback=self._make_reset_progress_callback(progress_callback),
-        )
-        completed = bool(movej.moveJ2target(current_joint_position, target_joint_position))
-        if not completed:
-            self._stop_all_moving_flags()
-            logger.warning("wheeled_arm movej reset interrupted by emergency stop request.")
-            return False
+        with self._pause_control_loop():
+            self._set_movej_reset_flags()
+            movej = MOVEJ(
+                self._handler,
+                Collision_Detection(self._handler),
+                stop_requested=stop_requested,
+                progress_callback=self._make_reset_progress_callback(progress_callback),
+            )
+            completed = bool(movej.moveJ2target(current_joint_position, target_joint_position))
+            if not completed:
+                self._stop_all_moving_flags()
+                logger.warning("wheeled_arm movej reset interrupted by emergency stop request.")
+                return False
 
         if self.config.require_fresh_feedback:
             self.require_valid_feedback("post-reset LCM feedback", min_time_s=reset_start_t)
+        self._clear_control_loop_target()
         return True
 
     def joint_observation_from_package(self, joint_positions: np.ndarray) -> RobotObservation:
@@ -364,14 +379,19 @@ class WheeledArm(Robot):
 
         assert self._handler is not None
 
-        unknown_keys = set(action) - set(self.action_features)
+        active_arms = action.get(WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY)
+        hardware_action = {
+            key: value for key, value in action.items() if key != WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY
+        }
+
+        unknown_keys = set(hardware_action) - set(self.action_features)
         if unknown_keys:
             raise ValueError(f"Unknown wheeled_arm action keys: {sorted(unknown_keys)}")
 
         with self._handler.joint_current_pos_lock:
             package = np.asarray(self._handler.joint_current_pos, dtype=np.float32).copy()
 
-        goal_pos = {key: float(value) for key, value in action.items() if key.endswith(".pos")}
+        goal_pos = {key: float(value) for key, value in hardware_action.items() if key.endswith(".pos")}
 
         if self.config.max_relative_target is not None:
             goal_present_pos = {
@@ -383,10 +403,147 @@ class WheeledArm(Robot):
         for key, value in goal_pos.items():
             package[self._joint_index_by_action_key[key]] = value
 
-        self._set_moving_flags(set(goal_pos))
-        self._handler.upper_body_data_publisher(package)
+        action_keys = self._moving_action_keys(goal_pos, active_arms)
+        if self.config.use_control_loop:
+            self._set_control_loop_target(package, action_keys)
+        else:
+            self._set_moving_flags(action_keys)
+            self._handler.upper_body_data_publisher(package)
 
         return goal_pos
+
+    def _moving_action_keys(self, goal_pos: dict[str, float], active_arms) -> set[str]:
+        action_keys = set(goal_pos)
+        if active_arms is None:
+            return action_keys
+
+        active_arm_set = {active_arms} if isinstance(active_arms, str) else {str(part) for part in active_arms}
+        for part in ("left_arm", "right_arm"):
+            if part in active_arm_set:
+                continue
+            part_slice = _PART_SLICES[part]
+            action_keys -= {f"{joint_name}.pos" for joint_name in self.config.joint_names[part_slice]}
+        return action_keys
+
+    def _start_control_loop(self) -> None:
+        if not self.config.use_control_loop:
+            return
+        if self._handler is None:
+            return
+        self._control_loop_stop_event.clear()
+        self._control_loop_thread = threading.Thread(
+            target=self._control_loop,
+            name="wheeled-arm-control-loop",
+            daemon=True,
+        )
+        self._control_loop_thread.start()
+        logger.info(
+            "%s robot-side control loop started with control_dt=%.4fs (%.1fHz).",
+            self,
+            self.config.control_dt,
+            1.0 / self.config.control_dt,
+        )
+
+    def _control_loop(self) -> None:
+        while not self._control_loop_stop_event.is_set():
+            loop_start = time.perf_counter()
+            with self._control_loop_lock:
+                if (
+                    not self._control_loop_pause
+                    and self._target_package is not None
+                    and self._target_action_keys
+                ):
+                    assert self._handler is not None
+                    self._set_moving_flags(self._target_action_keys)
+                    package = self._interpolated_control_loop_package(time.perf_counter())
+                    self._handler.upper_body_data_publisher(package)
+                    self._commanded_package = package.copy()
+
+            elapsed_s = time.perf_counter() - loop_start
+            time.sleep(max(self.config.control_dt - elapsed_s, 0.0))
+
+    def _set_control_loop_target(self, package: np.ndarray, action_keys: set[str]) -> None:
+        with self._control_loop_lock:
+            target_package = np.asarray(package, dtype=np.float32).copy()
+            self._interpolation_start_package = self._current_control_loop_start_package(
+                target_package
+            )
+            self._target_package = target_package
+            self._target_action_keys = action_keys.copy()
+            self._target_indices = self._action_key_indices(action_keys)
+            self._interpolation_start_t = time.perf_counter()
+            self._interpolation_duration_s = self.config.action_interpolation_duration_s
+
+    def _clear_control_loop_target(self) -> None:
+        with self._control_loop_lock:
+            self._commanded_package = None
+            self._interpolation_start_package = None
+            self._target_package = None
+            self._target_action_keys = set()
+            self._target_indices = np.array([], dtype=int)
+            self._interpolation_start_t = 0.0
+            self._interpolation_duration_s = 0.0
+
+    def _current_control_loop_start_package(self, target_package: np.ndarray) -> np.ndarray:
+        if self._commanded_package is not None:
+            return self._commanded_package.copy()
+        if self._handler is not None:
+            with self._handler.joint_current_pos_lock:
+                return np.asarray(self._handler.joint_current_pos, dtype=np.float32).copy()
+        return target_package.copy()
+
+    def _action_key_indices(self, action_keys: set[str]) -> np.ndarray:
+        indices = [
+            self._joint_index_by_action_key[key]
+            for key in action_keys
+            if key in self._joint_index_by_action_key
+        ]
+        return np.asarray(indices, dtype=int)
+
+    def _interpolated_control_loop_package(self, now: float) -> np.ndarray:
+        assert self._target_package is not None
+        if (
+            not self.config.interpolate_control_loop_actions
+            or self._interpolation_start_package is None
+            or self._target_indices.size == 0
+        ):
+            return self._target_package.copy()
+
+        alpha = (now - self._interpolation_start_t) / self._interpolation_duration_s
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        package = self._target_package.copy()
+        indices = self._target_indices
+        package[indices] = (
+            self._interpolation_start_package[indices] * (1.0 - alpha)
+            + self._target_package[indices] * alpha
+        )
+        return package
+
+    def _pause_control_loop(self):
+        robot = self
+
+        class ControlLoopPause:
+            def __enter__(self):
+                with robot._control_loop_lock:
+                    robot._control_loop_pause = True
+                    robot._commanded_package = None
+                    robot._interpolation_start_package = None
+                    robot._target_package = None
+                    robot._target_action_keys = set()
+                    robot._target_indices = np.array([], dtype=int)
+                return None
+
+            def __exit__(self, exc_type, exc, traceback):
+                with robot._control_loop_lock:
+                    robot._control_loop_pause = False
+                    robot._commanded_package = None
+                    robot._interpolation_start_package = None
+                    robot._target_package = None
+                    robot._target_action_keys = set()
+                    robot._target_indices = np.array([], dtype=int)
+                return False
+
+        return ControlLoopPause()
 
     def _set_moving_flags(self, action_keys: set[str]) -> None:
         assert self._handler is not None
@@ -415,6 +572,14 @@ class WheeledArm(Robot):
             return
 
         assert self._handler is not None
+
+        self._control_loop_stop_event.set()
+        if self._control_loop_thread is not None:
+            self._control_loop_thread.join(timeout=2.0)
+            if self._control_loop_thread.is_alive():
+                logger.warning("wheeled_arm control loop did not stop cleanly.")
+            self._control_loop_thread = None
+        self._clear_control_loop_target()
 
         if hasattr(self._handler, "stop"):
             self._handler.stop()
@@ -459,11 +624,15 @@ class WheeledArm(Robot):
     def _send_mock_action(self, action: RobotAction) -> RobotAction:
         assert self._mock_joint_pos is not None
 
-        unknown_keys = set(action) - set(self.action_features)
+        hardware_action = {
+            key: value for key, value in action.items() if key != WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY
+        }
+
+        unknown_keys = set(hardware_action) - set(self.action_features)
         if unknown_keys:
             raise ValueError(f"Unknown wheeled_arm action keys: {sorted(unknown_keys)}")
 
-        goal_pos = {key: float(value) for key, value in action.items() if key.endswith(".pos")}
+        goal_pos = {key: float(value) for key, value in hardware_action.items() if key.endswith(".pos")}
 
         if self.config.max_relative_target is not None:
             goal_present_pos = {

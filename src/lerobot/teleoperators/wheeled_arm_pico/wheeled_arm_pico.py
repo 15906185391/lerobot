@@ -24,6 +24,7 @@ import numpy as np
 
 from lerobot.lerobot_types import RobotAction
 from lerobot.robots.wheeled_arm.config_wheeled_arm import (
+    WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY,
     WHEELED_ARM_ARM_JOINT_NAMES,
     WHEELED_ARM_GRIPPER_NAMES,
     WHEELED_ARM_JOINT_NAMES,
@@ -230,7 +231,7 @@ class WheeledArmPico(Teleoperator):
         self._solver = select_solver(self._deps.qpsolvers, self.config.solver)
         self._xr_client = MockXrClient() if self.config.mock_xr else self._make_xr_client()
         self._reset_action_filter_from_q(self._configuration.q)
-        self._last_action = self._make_action(self._configuration.q)
+        self._last_action = self._make_action(self._configuration.q, set())
         if self.config.visualize:
             self._visualizer = WheeledArmPicoVisualizer(
                 self.config,
@@ -430,6 +431,7 @@ class WheeledArmPico(Teleoperator):
         except Exception as exc:
             logger.warning("Waiting for valid PICO XR data: %s", exc)
             self.reset_baseline()
+            self._last_action[WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY] = ()
             self._update_visualization(
                 left_target_pose,
                 right_target_pose,
@@ -472,7 +474,7 @@ class WheeledArmPico(Teleoperator):
 
         if not np.any(active_arm_mask):
             self._reset_action_filter_from_q(self._configuration.q)
-            self._last_action = self._make_action(self._configuration.q)
+            self._last_action = self._make_action(self._configuration.q, set())
             self._update_visualization(
                 left_target_pose,
                 right_target_pose,
@@ -490,7 +492,10 @@ class WheeledArmPico(Teleoperator):
                 collision_status = "collision"
                 logger.warning("PICO IK target rejected by self-collision barrier: %.4f", min_barrier)
                 self._reset_action_filter_from_q(self._configuration.q)
-                self._last_action = self._make_action(self._configuration.q)
+                self._last_action = self._make_action(
+                    self._configuration.q,
+                    self._active_arm_names(left_active, right_active),
+                )
                 self._update_visualization(
                     left_target_pose,
                     right_target_pose,
@@ -538,7 +543,10 @@ class WheeledArmPico(Teleoperator):
         self._configuration.update(q_locked)
         self._apply_action_smoothing_to_configuration(active_arm_mask)
 
-        self._last_action = self._make_action(self._configuration.q)
+        self._last_action = self._make_action(
+            self._configuration.q,
+            self._active_arm_names(left_active, right_active),
+        )
         self._update_visualization(
             left_target_pose,
             right_target_pose,
@@ -550,9 +558,10 @@ class WheeledArmPico(Teleoperator):
         )
         return self._last_action.copy()
 
-    def _make_action(self, q: np.ndarray) -> RobotAction:
+    def _make_action(self, q: np.ndarray, active_arms: set[str] | None = None) -> RobotAction:
         action = arm_action_from_q(q, self._arm_q_indices, self.arm_joint_names)
         action.update(self._gripper_positions)
+        action[WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY] = tuple(sorted(active_arms or set()))
         return action
 
     def _reset_action_filter_from_q(self, q: np.ndarray) -> None:
@@ -562,6 +571,14 @@ class WheeledArmPico(Teleoperator):
 
     def _active_arm_mask(self, left_active: bool, right_active: bool) -> np.ndarray:
         return np.array([left_active] * 7 + [right_active] * 7, dtype=bool)
+
+    def _active_arm_names(self, left_active: bool, right_active: bool) -> set[str]:
+        active_arms = set()
+        if left_active:
+            active_arms.add("left_arm")
+        if right_active:
+            active_arms.add("right_arm")
+        return active_arms
 
     def _apply_action_smoothing_to_configuration(self, active_arm_mask: np.ndarray) -> None:
         assert self._configuration is not None

@@ -82,6 +82,9 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     max_joint_velocity_rad_s: float | None = 1.5
     # IK 输出后的关节加速度软限幅，单位 rad/s^2。None 表示不额外限幅。
     max_joint_acceleration_rad_s2: float | None = 8.0
+    # True 时每个控制周期都用机器人 LCM 反馈重置 IK 当前关节状态。
+    # 实机反馈延迟/抖动明显时建议保持 False，仅使用启动和 reset 后的同步。
+    use_continuous_robot_feedback: bool = False
 
     # 是否启用自碰撞 barrier。关闭后可绕过 hpp-fcl/coal 碰撞后端。
     use_self_collision: bool = False

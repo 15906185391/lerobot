@@ -41,6 +41,8 @@ WHEELED_ARM_PARTS = (
     "right_gripper",
 )
 
+WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY = "__wheeled_arm_active_arms"
+
 
 def wheeled_arm_cameras_config() -> dict[str, CameraConfig]:
     return {
@@ -69,6 +71,17 @@ class WheeledArmConfig(RobotConfig):
 
     # Caps target jumps relative to the latest observed joint position. None disables clipping.
     max_relative_target: float | dict[str, float] | None = None
+
+    # Robot-side command loop. When enabled, send_action() updates the latest target
+    # and a background loop republishes it at control_dt, decoupling hardware command
+    # timing from camera/Rerun/dataset loop timing.
+    use_control_loop: bool = True
+    control_dt: float = 1.0 / 250.0
+    # Interpolate between incoming low-rate actions inside the robot-side control loop.
+    # With the default 30Hz record/IK loop, this fills the 250Hz command stream with
+    # intermediate joint targets instead of repeating a stair-stepped position.
+    interpolate_control_loop_actions: bool = True
+    action_interpolation_duration_s: float = 1.0 / 30.0
 
     # Wait after creating the LCM handler so subscriptions can receive the first robot state.
     connect_timeout_s: float = 1.0
@@ -119,3 +132,7 @@ class WheeledArmConfig(RobotConfig):
 
         if self.feedback_wait_timeout_s < 0:
             raise ValueError("`feedback_wait_timeout_s` must be non-negative.")
+        if self.control_dt <= 0:
+            raise ValueError("`control_dt` must be positive.")
+        if self.action_interpolation_duration_s <= 0:
+            raise ValueError("`action_interpolation_duration_s` must be positive.")

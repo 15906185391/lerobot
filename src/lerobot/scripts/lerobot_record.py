@@ -460,7 +460,11 @@ def record_loop(
 
         # Get action from teleop
         if isinstance(teleop, Teleoperator):
-            if robot.name == "wheeled_arm" and getattr(robot, "has_valid_feedback", True):
+            if (
+                robot.name == "wheeled_arm"
+                and getattr(robot, "has_valid_feedback", True)
+                and getattr(getattr(teleop, "config", None), "use_continuous_robot_feedback", True)
+            ):
                 teleop.send_feedback(obs)
             act = teleop.get_action()
             if robot.name == "unitree_g1":

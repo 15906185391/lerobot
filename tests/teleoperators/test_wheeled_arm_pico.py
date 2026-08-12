@@ -16,6 +16,7 @@
 
 import numpy as np
 
+from lerobot.robots.wheeled_arm.config_wheeled_arm import WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY
 from lerobot.teleoperators.config import TeleoperatorConfig
 from lerobot.teleoperators.utils import make_teleoperator_from_config
 from lerobot.teleoperators.wheeled_arm_pico import WheeledArmPico, WheeledArmPicoConfig
@@ -80,6 +81,7 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
     assert cfg.arm_action_smoothing_alpha == 0.4
     assert cfg.max_joint_velocity_rad_s == 1.2
     assert cfg.max_joint_acceleration_rad_s2 == 6.0
+    assert cfg.use_continuous_robot_feedback is False
     assert cfg.self_collision_gain == 12.0
     assert cfg.self_collision_safe_displacement_gain == 6.0
     assert cfg.collision_warning_distance == 0.02
@@ -99,6 +101,21 @@ def test_action_features_match_wheeled_arm_arm_and_gripper_joints():
         "left_gripper.pos",
         "right_gripper.pos",
     ]
+
+
+def test_make_action_marks_only_active_arms_without_changing_action_features():
+    teleop = WheeledArmPico(WheeledArmPicoConfig())
+    teleop._arm_q_indices = np.arange(14)
+    q = np.arange(14, dtype=float)
+
+    action = teleop._make_action(q, {"right_arm"})
+
+    assert WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY not in teleop.action_features
+    assert action[WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY] == ("right_arm",)
+    assert "left_arm_0.pos" in action
+    assert "right_arm_6.pos" in action
+    assert "left_gripper.pos" in action
+    assert "right_gripper.pos" in action
 
 
 def test_pico_recording_controls_are_edge_triggered():
