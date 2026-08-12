@@ -1125,3 +1125,34 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/kuanli/miniconda3/envs/xr/bin/python -m p
 ```text
 17 passed
 ```
+
+### 9. 最新版本再分析与排查
+
+最新代码里，`wheeled_arm_pico` 已经补了几层稳定化处理：
+
+- `XrPoseFilter` 对 PICO 手柄位姿做了 EMA + deadband 过滤。
+- `smooth_joint_positions()` 对 IK 输出做了 EMA + 速度/加速度软限幅。
+- `lerobot-record` 会在开始录制和 reset 后把机器人反馈同步给 teleop。
+- `wheeled_arm` 默认要求新鲜左右臂反馈，避免旧状态直接进入闭环。
+
+所以如果现在真机仍然抖，优先级要和旧版本不一样，不要再把“没有平滑”当第一嫌疑。
+
+更可能的原因按优先级排序：
+
+1. 机器人反馈本身在抖，或者左右臂反馈不同步。
+2. `activation_threshold` 附近来回波动，导致 active / inactive 频繁切换。
+3. 自碰撞 barrier 在边界附近反复触发，目标被拒绝后又重新求解。
+4. IK 输出虽然平滑了，但最终还是直接发位置目标，没有真正的底层 rate limiter。
+5. 实机控制器增益、回读延迟、机械背隙或共振在放大小幅命令变化。
+
+建议按这个顺序排查：
+
+1. 先看 `has_valid_feedback` 是否稳定为真，左右臂状态时间戳是否持续刷新。
+2. 再看日志里是否频繁出现：
+   - `Waiting for valid PICO XR data`
+   - `PICO IK solver failed`
+   - `PICO IK target rejected by self-collision barrier`
+3. 把 `activation_threshold` 临时调低一点，观察是否还会“抖一下就重置”。
+4. 临时关掉 `use_self_collision`，排除碰撞边界抖动。
+5. 临时设 `position_only=true`，排除姿态跟踪带来的高频修正。
+6. 如果 `mock_xr` 平稳、真机抖，重点放在 LCM 反馈质量和底层控制器，不要继续盯 PICO 的上层平滑。
