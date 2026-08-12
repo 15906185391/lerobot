@@ -6,7 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 ENV_NAME="${CONDA_DEFAULT_ENV:-xr}"
-PYTHON_VERSION="3.10"
+PYTHON_VERSION=""
+PYTHON_VERSION_SET=0
 CREATE_ENV=0
 SKIP_EDITABLE=0
 SKIP_PICO_SDK=0
@@ -23,7 +24,8 @@ wheeled_arm + wheeled_arm_pico.
 
 Options:
   --env NAME          Conda environment to use. Default: current env, or xr.
-  --python VERSION    Python version used with --create-env. Default: 3.10.
+  --python VERSION    Python version used with --create-env.
+                       Default: Ubuntu 22.04 -> 3.10, Ubuntu 24.04 -> 3.12.
   --create-env        Create the conda env if it does not already exist.
   --skip-editable     Do not run pip install -e ".[core_scripts,gui]".
   --skip-pico-sdk     Do not clone/install XRoboToolkit PICO SDK.
@@ -37,7 +39,8 @@ Options:
 
 Examples:
   bash scripts/setup_wheeled_arm_pico_conda.bash --env xr
-  bash scripts/setup_wheeled_arm_pico_conda.bash --create-env --env xr --python 3.10
+  bash scripts/setup_wheeled_arm_pico_conda.bash --create-env --env xr
+  bash scripts/setup_wheeled_arm_pico_conda.bash --create-env --env xr --python 3.12
 EOF
 }
 
@@ -69,6 +72,10 @@ python_any_module_available() {
     done
     return 1
 }
+
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
 
 conda_package_installed() {
     local package="$1"
@@ -185,6 +192,7 @@ while [[ $# -gt 0 ]]; do
         --python)
             [[ $# -ge 2 ]] || die "--python requires a value"
             PYTHON_VERSION="$2"
+            PYTHON_VERSION_SET=1
             shift 2
             ;;
         --create-env)
@@ -225,6 +233,7 @@ if [[ "$(uname -s)" != "Linux" ]]; then
     die "This installer is intended for Linux/Ubuntu conda environments."
 fi
 
+UBUNTU_VERSION_ID=""
 if [[ -f /etc/os-release ]]; then
     # shellcheck disable=SC1091
     . /etc/os-release
@@ -232,7 +241,20 @@ if [[ -f /etc/os-release ]]; then
         log "Warning: this script has only been tested on Ubuntu. Detected: ${PRETTY_NAME:-unknown}"
     elif [[ "${VERSION_ID:-}" != "22.04" && "${VERSION_ID:-}" != "24.04" ]]; then
         log "Warning: this script has only been tested on Ubuntu 22.04/24.04. Detected: ${VERSION_ID:-unknown}"
+    else
+        UBUNTU_VERSION_ID="${VERSION_ID}"
     fi
+fi
+
+if [[ "${PYTHON_VERSION_SET}" -eq 0 ]]; then
+    case "${UBUNTU_VERSION_ID}" in
+        24.04)
+            PYTHON_VERSION="3.12"
+            ;;
+        22.04|*)
+            PYTHON_VERSION="3.10"
+            ;;
+    esac
 fi
 
 install_qt_system_packages() {
@@ -286,6 +308,27 @@ else
     die "Could not find conda.sh. Install Miniconda/Anaconda first."
 fi
 
+conda_activate_env() {
+    local env_name="$1"
+    local nounset_was_enabled=0
+
+    case "$-" in
+        *u*)
+            nounset_was_enabled=1
+            set +u
+            ;;
+    esac
+
+    conda activate "${env_name}"
+    local status=$?
+
+    if [[ "${nounset_was_enabled}" -eq 1 ]]; then
+        set -u
+    fi
+
+    return "${status}"
+}
+
 if [[ "${CREATE_ENV}" -eq 1 ]]; then
     if conda env list | awk '{print $1}' | grep -qx "${ENV_NAME}"; then
         log "Conda env '${ENV_NAME}' already exists; reusing it."
@@ -295,13 +338,14 @@ if [[ "${CREATE_ENV}" -eq 1 ]]; then
     fi
 fi
 
-conda activate "${ENV_NAME}" || die "Could not activate conda env '${ENV_NAME}'. Use --create-env or create it first."
+conda_activate_env "${ENV_NAME}" || die "Could not activate conda env ${ENV_NAME}. Use --create-env or create it first."
 
 log "Using Python: $(command -v python)"
 python --version
 
 install_missing_conda_packages \
     "libstdcxx-ng:" \
+    "ffmpeg:ffmpeg" \
     "pinocchio:pinocchio" \
     "hpp-fcl:hppfcl,coal" \
     "qpsolvers:qpsolvers" \
@@ -356,7 +400,13 @@ if [[ "${SKIP_PICO_SDK}" -eq 0 ]]; then
         fi
 
         log "Installing XRoboToolkit SDK."
-        bash "${SDK_DIR}/setup_ubuntu.sh"
+        (
+            cd "${SDK_DIR}"
+            bash setup_ubuntu.sh
+        )
+        if ! python_module_available "xrobotoolkit_sdk"; then
+            die "XRoboToolkit SDK install completed, but 'xrobotoolkit_sdk' is still not importable in conda env '${ENV_NAME}'. Check the SDK build output above."
+        fi
     fi
 fi
 

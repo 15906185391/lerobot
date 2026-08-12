@@ -267,6 +267,7 @@ COMMON_COMMAND_LABELS = {
     "设置电机": "setup_motors",
     "查关节限位": "find_joint_limits",
     "设置/测试 CAN": "setup_can",
+    "PICO USB 有线连接": "pico_usb_service",
     "训练策略": "train",
     "评估策略": "eval",
     "策略 Rollout": "rollout",
@@ -659,13 +660,24 @@ class ProcessRunner(QObject):
     def is_running(self) -> bool:
         return self._handle is not None and self._handle.process.poll() is None
 
-    def start(self, command: list[str], cwd: Path = PROJECT_ROOT) -> bool:
+    def start(
+        self,
+        command: list[str],
+        cwd: Path = PROJECT_ROOT,
+        env_overrides: dict[str, str | None] | None = None,
+    ) -> bool:
         if self.is_running:
             self.failed.emit(f"{self.name} 已在运行。")
             return False
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        if env_overrides:
+            for key, value in env_overrides.items():
+                if value is None:
+                    env.pop(key, None)
+                else:
+                    env[key] = value
         kwargs: dict[str, object] = {
             "cwd": str(cwd),
             "env": env,
@@ -2532,6 +2544,7 @@ class WheeledArmGui(QMainWindow):
         self.common_stack.addWidget(self._make_setup_motors_common_panel())
         self.common_stack.addWidget(self._make_find_joint_limits_common_panel())
         self.common_stack.addWidget(self._make_setup_can_common_panel())
+        self.common_stack.addWidget(self._make_pico_usb_common_panel())
         self.common_stack.addWidget(self._make_train_common_panel())
         self.common_stack.addWidget(self._make_eval_common_panel())
         self.common_stack.addWidget(self._make_rollout_common_panel())
@@ -3083,6 +3096,32 @@ class WheeledArmGui(QMainWindow):
         form.addRow("motor ids", self.common_can_motor_ids)
         form.addRow("timeout", self.common_can_timeout)
         form.addRow("speed iters", self.common_can_speed_iterations)
+        return box
+
+    def _make_pico_usb_common_panel(self) -> QWidget:
+        box = QGroupBox("PICO USB 有线连接")
+        form = QFormLayout(box)
+        self._setup_form_layout(form)
+        self.common_pico_usb_port = self._spin(1, 65535, 63901)
+        self.common_pico_usb_serial = QLineEdit()
+        self.common_pico_usb_serial.setPlaceholderText("多个 ADB 设备时填写 adb devices 中的序列号")
+        self.common_pico_usb_service_dir = QLineEdit("/opt/apps/roboticsservice")
+        self.common_pico_usb_log_file = QLineEdit("/tmp/xrobotoolkit-pc-service.log")
+        self.common_pico_usb_no_service = QCheckBox("只配置 ADB reverse，不启动 PC Service")
+        self.common_pico_usb_remove = QCheckBox("移除 USB 端口转发")
+        hint = QLabel(
+            "先用 USB-C 数据线连接 PICO，并在头显内授权 USB 调试。运行后在 PICO 的 "
+            "XRoboToolkit app 中把 PC service IP 填为 127.0.0.1。"
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("MutedLabel")
+        form.addRow("端口", self.common_pico_usb_port)
+        form.addRow("ADB serial", self.common_pico_usb_serial)
+        form.addRow("service dir", self.common_pico_usb_service_dir)
+        form.addRow("log file", self.common_pico_usb_log_file)
+        form.addRow("", self.common_pico_usb_no_service)
+        form.addRow("", self.common_pico_usb_remove)
+        form.addRow("", hint)
         return box
 
     def _make_train_common_panel(self) -> QWidget:
@@ -3716,6 +3755,12 @@ class WheeledArmGui(QMainWindow):
             self.common_can_motor_ids,
             self.common_can_timeout,
             self.common_can_speed_iterations,
+            self.common_pico_usb_port,
+            self.common_pico_usb_serial,
+            self.common_pico_usb_service_dir,
+            self.common_pico_usb_log_file,
+            self.common_pico_usb_no_service,
+            self.common_pico_usb_remove,
             self.common_train_dataset_repo_id,
             self.common_train_policy_type,
             self.common_train_steps,
@@ -3912,6 +3957,30 @@ class WheeledArmGui(QMainWindow):
             self.settings.value("common/custom_module", self.common_custom_module.text())
         )
         self.common_advanced_args.setPlainText(self.settings.value("common/advanced_args", ""))
+        self.common_pico_usb_port.setValue(
+            int(self.settings.value("common/pico_usb_port", self.common_pico_usb_port.value()))
+        )
+        self.common_pico_usb_serial.setText(
+            self.settings.value("common/pico_usb_serial", self.common_pico_usb_serial.text())
+        )
+        self.common_pico_usb_service_dir.setText(
+            self.settings.value("common/pico_usb_service_dir", self.common_pico_usb_service_dir.text())
+        )
+        self.common_pico_usb_log_file.setText(
+            self.settings.value("common/pico_usb_log_file", self.common_pico_usb_log_file.text())
+        )
+        self.common_pico_usb_no_service.setChecked(
+            _settings_bool(
+                self.settings.value("common/pico_usb_no_service", self.common_pico_usb_no_service.isChecked()),
+                self.common_pico_usb_no_service.isChecked(),
+            )
+        )
+        self.common_pico_usb_remove.setChecked(
+            _settings_bool(
+                self.settings.value("common/pico_usb_remove", self.common_pico_usb_remove.isChecked()),
+                self.common_pico_usb_remove.isChecked(),
+            )
+        )
         self.common_teleop_mock_robot.setChecked(
             _settings_bool(
                 self.settings.value(
@@ -4073,6 +4142,12 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("common/replay_root", self.common_replay_root.text())
         self.settings.setValue("common/custom_module", self.common_custom_module.text())
         self.settings.setValue("common/advanced_args", self.common_advanced_args.toPlainText())
+        self.settings.setValue("common/pico_usb_port", self.common_pico_usb_port.value())
+        self.settings.setValue("common/pico_usb_serial", self.common_pico_usb_serial.text())
+        self.settings.setValue("common/pico_usb_service_dir", self.common_pico_usb_service_dir.text())
+        self.settings.setValue("common/pico_usb_log_file", self.common_pico_usb_log_file.text())
+        self.settings.setValue("common/pico_usb_no_service", self.common_pico_usb_no_service.isChecked())
+        self.settings.setValue("common/pico_usb_remove", self.common_pico_usb_remove.isChecked())
         self.settings.setValue("common/teleop_mock_robot", self.common_teleop_mock_robot.isChecked())
         self.settings.setValue("common/teleop_mock_cameras", self.common_teleop_mock_cameras.isChecked())
         self.settings.setValue(
@@ -4447,6 +4522,8 @@ class WheeledArmGui(QMainWindow):
         if command_type == "custom":
             module = self.common_custom_module.text().strip()
             command = _module_command(module)
+        elif command_type == "pico_usb_service":
+            command = ["/bin/bash", str(PROJECT_ROOT / "scripts/start_pico_usb_service.bash")]
         else:
             command = _module_command(COMMON_SCRIPT_MODULES[command_type])
 
@@ -4554,6 +4631,18 @@ class WheeledArmGui(QMainWindow):
             )
             if self.common_joint_lcm_url.text().strip():
                 command.append(f"--robot.lcm_url={self.common_joint_lcm_url.text().strip()}")
+        elif command_type == "pico_usb_service":
+            command.extend(["--port", str(self.common_pico_usb_port.value())])
+            if self.common_pico_usb_serial.text().strip():
+                command.extend(["--serial", self.common_pico_usb_serial.text().strip()])
+            if self.common_pico_usb_service_dir.text().strip():
+                command.extend(["--service-dir", self.common_pico_usb_service_dir.text().strip()])
+            if self.common_pico_usb_log_file.text().strip():
+                command.extend(["--log-file", self.common_pico_usb_log_file.text().strip()])
+            if self.common_pico_usb_no_service.isChecked():
+                command.append("--no-service")
+            if self.common_pico_usb_remove.isChecked():
+                command.append("--remove")
         elif command_type == "setup_can":
             command.extend(
                 [
@@ -4987,6 +5076,14 @@ class WheeledArmGui(QMainWindow):
             if command_type == "find_joint_limits" and not self.common_joint_target_frame.text().strip():
                 QMessageBox.warning(self, "缺少目标 frame", "请填写目标 frame 名称。")
                 return False
+            if command_type == "pico_usb_service":
+                helper_script = PROJECT_ROOT / "scripts/start_pico_usb_service.bash"
+                if not helper_script.exists():
+                    QMessageBox.warning(self, "脚本不存在", f"未找到 PICO USB 脚本：\n{helper_script}")
+                    return False
+                if not self.common_pico_usb_remove.isChecked() and not self.common_pico_usb_service_dir.text().strip():
+                    QMessageBox.warning(self, "缺少 service dir", "请填写 XRoboToolkit PC Service 目录。")
+                    return False
             if command_type == "setup_can" and not self.common_can_interfaces.text().strip():
                 QMessageBox.warning(self, "缺少 CAN 接口", "请填写 CAN interface，例如 can0。")
                 return False
@@ -5166,7 +5263,10 @@ class WheeledArmGui(QMainWindow):
         if not self.validate_common_form():
             return
         self._save_settings()
-        if self.common_runner.start(self.build_common_command()):
+        env_overrides = None
+        if COMMON_COMMAND_LABELS[self.common_command.currentText()] == "pico_usb_service":
+            env_overrides = {"LD_LIBRARY_PATH": None}
+        if self.common_runner.start(self.build_common_command(), env_overrides=env_overrides):
             self.start_common_btn.setEnabled(False)
             self.stop_common_btn.setEnabled(True)
             self.common_enter_btn.setEnabled(True)
