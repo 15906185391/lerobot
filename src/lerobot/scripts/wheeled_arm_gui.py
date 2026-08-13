@@ -1640,12 +1640,16 @@ _HELP_RECORDING_HTML = """
 <table>
   <tr><th>步骤</th><th>要做什么</th><th>确认结果</th></tr>
   <tr><td>7. 自动复位</td><td>机器人通过 movej 回到默认采集姿态。</td><td>Rerun 和 viser 同步显示复位过程。</td></tr>
-  <tr><td>8. 重录或停止</td><td>动作失败按 <span class="kbd">B</span>；结束整次采集按 <span class="kbd">X</span>。</td><td>失败集不会误保存，或采集流程正常停止。</td></tr>
+  <tr><td>8. 重录或停止</td><td>动作失败按 <span class="kbd">B</span>；结束整次采集按 <span class="kbd">X</span>。复位过程中按住 <span class="kbd">X</span> 会中断 movej 并结束采集。</td><td>失败集不会误保存，或采集流程正常停止。</td></tr>
   <tr><td>9. 查看结果</td><td>到“查看数据集”页点击“使用最近采集”，再点击“打开数据集”。</td><td>确认 episode、图像、状态和动作曲线正常。</td></tr>
 </table>
 
 <div class="note">
   <b>数据目录：</b>默认使用 LeRobot 的 <code>HF_LEROBOT_HOME</code>。如果采集时填写了自定义 root，查看和编辑时也要填写同一个 root。
+</div>
+
+<div class="note">
+  <b>抖动排查：</b>需要观察最终下发关节命令时，可勾选“发布 action 到 ROS2”，默认发布到 <code>/lerobot/action</code>。
 </div>
 """
 
@@ -1676,7 +1680,7 @@ _HELP_TELEOP_HTML = """
   <tr><td><span class="kbd">Trigger</span></td><td>控制对应夹爪开合</td><td>夹爪范围可在高级参数调整。</td></tr>
   <tr><td><span class="kbd">A</span></td><td>开始 episode 或提前进入下一阶段</td><td>等待阶段最常用。</td></tr>
   <tr><td><span class="kbd">B</span></td><td>丢弃当前 episode 并重录</td><td>动作失败时使用。</td></tr>
-  <tr><td><span class="kbd">X</span></td><td>停止整次采集；reset 时请求中断 movej</td><td>异常时优先使用硬件急停。</td></tr>
+  <tr><td><span class="kbd">X</span></td><td>停止整次采集；reset 时按住会中断 movej 复位轨迹</td><td>异常时优先使用硬件急停。</td></tr>
   <tr><td><span class="kbd">Y</span></td><td>重置 PICO 相对位姿基线</td><td>先松开 grip，再按 Y。</td></tr>
 </table>
 
@@ -1686,7 +1690,7 @@ _HELP_TELEOP_HTML = """
 右臂: [-20, 70, 75, 100, 25, 0, 0]</pre>
 
 <div class="warn">
-  <b>注意：</b><span class="kbd">X</span> 是软件层停止请求，不能替代硬件急停、断电保护或底层控制器安全机制。
+  <b>注意：</b><span class="kbd">X</span> 是软件层停止请求。reset 中断会停止继续发布 movej 并关闭 moving flags，但不能替代硬件急停、断电保护或底层控制器安全机制。
 </div>
 """
 
@@ -1699,7 +1703,9 @@ _HELP_DATASET_HTML = """
 在“查看数据集”页点击“使用最近采集”，GUI 会跳过空数据集目录，自动填入最近一个已保存 episode 的数据集。</div>
 <div class="step"><span class="step-title">2. 打开数据集</span><br>
 选择 episode 后打开 Rerun/Foxglove，检查图像、observation、action 和 recording metadata。</div>
-<div class="step"><span class="step-title">3. 再做编辑</span><br>
+<div class="step"><span class="step-title">3. 本地预览</span><br>
+在“编辑数据集”页填写输入 Repo ID 后点击“加载预览”，可切换 episode、播放、拖动帧、Shift+拖动选择区间，并把当前 episode 自动填入删除操作。</div>
+<div class="step"><span class="step-title">4. 再做编辑</span><br>
 需要删除失败 episode、修改任务文本、重算统计或重编码视频时，进入“编辑数据集”页。</div>
 
 <h2>编辑操作</h2>
@@ -1707,6 +1713,7 @@ _HELP_DATASET_HTML = """
   <tr><th>操作</th><th>用途</th><th>提醒</th></tr>
   <tr><td>查看信息</td><td>读取数据集 meta 信息。</td><td>适合排查 episode 数量和 frame 数。</td></tr>
   <tr><td>删除 Episode</td><td>移除失败演示。</td><td>未填写新 Repo ID/root 时会修改原数据集。</td></tr>
+  <tr><td>预览区间</td><td>快速检查动作片段。</td><td>“裁剪区间”只显示提示，当前不会直接删除 parquet/video 帧。</td></tr>
   <tr><td>拆分/合并</td><td>整理训练、验证或多个数据集。</td><td>建议写入新数据集。</td></tr>
   <tr><td>修改任务文本</td><td>统一或修正任务描述。</td><td>训练前建议确认 task 一致。</td></tr>
   <tr><td>重算统计</td><td>更新 stats。</td><td>视频或动作改动后再执行。</td></tr>
@@ -1726,9 +1733,11 @@ _HELP_COMMANDS_HTML = """
   <tr><td>检查环境</td><td>系统信息</td><td>确认 Python、LeRobot、PyTorch、CUDA、FFmpeg。</td></tr>
   <tr><td>检查硬件</td><td>查找相机 / 查找串口 / 设置 CAN</td><td>采集前排查连接和权限。</td></tr>
   <tr><td>只试遥操作</td><td>遥操作</td><td>不保存数据，只验证 PICO、IK、LCM 和可视化链路。</td></tr>
+  <tr><td>检查下发动作</td><td>遥操作/采集中勾选发布 action 到 ROS2</td><td>把最终发送给机器人的 action 发布到 <code>/lerobot/action</code>，用于排查抖动。</td></tr>
   <tr><td>检查数据动作</td><td>回放 Episode</td><td>把数据集动作重新下发给 wheeled_arm。</td></tr>
   <tr><td>训练和部署</td><td>训练策略 / 评估策略 / 策略 Rollout</td><td>数据质量确认后再使用。</td></tr>
   <tr><td>数据后处理</td><td>数据标注 / 图像增强预览 / 统计补充</td><td>训练前增强或补齐数据。</td></tr>
+  <tr><td>异常姿态救援</td><td>关节点动</td><td>打开独立点动控制台，手动连接后小步移动到安全姿态。</td></tr>
 </table>
 
 <div class="note">
@@ -1757,7 +1766,7 @@ _HELP_JOINT_JOG_HTML = """
 <table>
   <tr><th>步骤</th><th>操作</th><th>确认</th></tr>
   <tr><td>1</td><td>进入“关节点动”页，确认 LCM URL 和 URDF 路径。</td><td>命令预览正确。</td></tr>
-  <tr><td>2</td><td>点击“打开点动控制台”。</td><td>此时还没有连接机器人。</td></tr>
+  <tr><td>2</td><td>点击“打开点动控制台”，在确认框里再次确认安全条件。</td><td>此时还没有连接机器人。</td></tr>
   <tr><td>3</td><td>在新窗口点击“启动连接”。</td><td>状态显示“反馈新鲜”，viser 显示当前姿态。</td></tr>
   <tr><td>4</td><td>点击“同步当前为目标”。</td><td>目标列等于当前反馈。</td></tr>
   <tr><td>5</td><td>用单关节 +/- 小步点动，或勾选关节后点动到目标。</td><td>观察实物和 URDF 是否一致。</td></tr>
@@ -1803,8 +1812,9 @@ HELP_PLAIN_TEXT = """Wheeled Arm PICO 使用说明
 4. 点击“开始采集”，先看运行日志是否完成 robot、PICO、相机连接。
 5. 默认“等待 PICO 开始每集”开启。先把机器人移动到任务起点，再按 A 开始保存 episode。
 6. 按住左右 grip 控制对应机械臂，trigger 控制夹爪。
-7. 一集结束后自动 movej 复位；需要重录按 B，需要停止整次采集按 X。
+7. 一集结束后自动 movej 复位；需要重录按 B，需要停止整次采集按 X；复位过程中按住 X 会中断 movej 并结束采集。
 8. 采集完成后到“查看数据集”页点击“使用最近采集”，再打开数据集。
+9. 需要排查最终下发关节命令时，可勾选“发布 action 到 ROS2”，默认 topic 为 /lerobot/action。
 
 二、遥操作流程
 1. 佩戴 PICO，双手自然放在安全位置，先不要按 grip。
@@ -1816,7 +1826,7 @@ HELP_PLAIN_TEXT = """Wheeled Arm PICO 使用说明
 7. 左 trigger/右 trigger 控制左右夹爪。
 8. 手柄相对位置不顺手时，松开 grip 后按 Y 重置 PICO 相对位姿基线。
 9. 动作失败或质量不好时按 B 重录当前 episode。
-10. 按 X 停止全部采集；reset 时也会请求中断 movej。
+10. 按 X 停止全部采集；reset 阶段按住 X 会请求中断 movej，record 会结束本次采集流程。
 
 三、PICO 按键速查
 Left grip: 激活左臂跟随。
@@ -1824,7 +1834,7 @@ Right grip: 激活右臂跟随。
 Trigger: 控制对应夹爪开合。
 A: 开始 episode 或提前进入下一阶段。
 B: 丢弃当前 episode 并重录。
-X: 停止整次采集；reset 时请求中断 movej。
+X: 停止整次采集；reset 时按住会请求中断 movej。
 Y: 重置 PICO 相对位姿基线，不直接移动机器人。
 
 复位姿态:
@@ -1834,11 +1844,13 @@ Y: 重置 PICO 相对位姿基线，不直接移动机器人。
 
 四、数据集
 1. 先查看最近采集，确认 episode、图像、observation、action 和 metadata 正常。
-2. 再编辑失败 episode、任务文本、统计或视频。
-3. 删除、覆盖、重编码前建议备份，或输出到新 Repo ID/root。
+2. 在“编辑数据集”页可加载本地预览，切换 episode、播放、拖动帧、Shift+拖动选择区间。
+3. “填入删除当前 Episode”会把当前 episode 写入删除操作；“裁剪区间”只提示当前区间，不会直接删除帧。
+4. 再编辑失败 episode、任务文本、统计或视频。
+5. 删除、覆盖、重编码前建议备份，或输出到新 Repo ID/root。
 
 五、异常姿态救援：关节点动
-- 主 GUI 的“关节点动”页只负责打开独立控制台，平时不会连接机器人。
+- 主 GUI 的“关节点动”页只负责打开独立控制台，平时不会连接机器人；打开前会弹出安全确认。
 - 独立控制台内仍需手动点击“启动连接”，之后才会创建 LCM handler 和 viser URDF 可视化。
 - 每次发布前检查左右臂新鲜 LCM 反馈，禁止从零位或旧状态发命令。
 - 推荐先点击“同步当前为目标”，再用单关节 +/- 小步点动。

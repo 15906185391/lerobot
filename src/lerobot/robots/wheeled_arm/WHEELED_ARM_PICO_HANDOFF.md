@@ -923,9 +923,10 @@ pytest 状态：
 - `HelpDialog` 使用 `QDialog + QTabWidget + QTextBrowser` 实现。
 - 帮助页签包括：
   - 采集
-  - PICO 遥操作
+  - 遥操作流程
   - 数据集
   - 常用命令
+  - 关节点动
   - 故障排查
 - 帮助窗口支持 `复制说明`，会把纯文本版说明复制到剪贴板。
 - 修复帮助内容背景发黑问题：
@@ -947,7 +948,7 @@ pytest 状态：
 
 侧边栏：
 
-- 新增左侧导航栏：`采集`、`查看`、`编辑`、`转换`、`常用`。
+- 新增左侧导航栏：`采集`、`查看`、`编辑`、`转换`、`常用`、`点动`。
 - 侧边栏按钮与主 `QTabWidget` 双向同步。
 - 侧边栏底部保留 `F1 帮助` 快捷按钮。
 
@@ -993,13 +994,13 @@ offscreen GUI 验证已通过：
 
 ```text
 dialog title: Wheeled Arm PICO 使用说明
-dialog size: 860 640
-help pages: 5
+dialog size: 920 700
+help pages: 6
 first page object: HelpText
 first page stylesheet contains white: True
 window title: LeRobot Wheeled Arm 控制台
-tabs: ['采集', '查看数据集', '编辑数据集', '格式转换', '常用命令']
-sidebar buttons: ['采集', '查看', '编辑', '转换', '常用']
+tabs: ['采集', '查看数据集', '编辑数据集', '格式转换', '常用命令', '关节点动']
+sidebar buttons: ['采集', '查看', '编辑', '转换', '常用', '点动']
 menus: ['文件', '视图', '运行', '帮助']
 help button: 使用说明
 help base color: #ffffff
@@ -1018,6 +1019,15 @@ git diff --check -- src/lerobot/scripts/wheeled_arm_gui.py
 - `gmr` 环境尚未安装 `pytest`，因此未运行完整 pytest。
 - 尚未在实物机器人上验证 movej 复位下发。
 - 尚未在真实桌面会话中打开 GUI 做截图/人工视觉验收；当前只完成 offscreen 构造和样式检查。
+
+使用说明内容同步：
+
+- “采集”页补充说明：reset 过程中按住 `X` 会中断 movej 并结束本次采集流程。
+- “采集/常用命令”页补充 `发布 action 到 ROS2` 用法，默认 topic 为 `/lerobot/action`，用于观察最终下发关节命令。
+- “数据集”页补充本地预览流程：加载预览、切换 episode、播放、拖动帧、Shift+拖动选择区间、填入删除当前 Episode。
+- “数据集”页明确 `裁剪区间` 目前只弹出提示，不会直接修改 parquet/video；帧级裁剪需要新增安全 dataset operation 后再接入 GUI。
+- “常用命令”页补充 `关节点动` 作为异常姿态救援入口。
+- “关节点动”页补充打开控制台前的安全确认框：主 GUI 只启动独立窗口，真正连接 LCM 和 viser 必须在新窗口手动点击 `启动连接`。
 
 ### 7. 复位过程中的 PICO 急停逻辑
 
@@ -1048,6 +1058,7 @@ git diff --check -- src/lerobot/scripts/wheeled_arm_gui.py
   - 设置 `events["exit_early"] = True`。
   - 输出 `Emergency stop requested during robot reset`。
   - 跳出后续 reset loop，结束本次采集流程。
+- GUI 使用说明同步强调：普通录制阶段 `X` 是停止整次采集；reset 阶段按住 `X` 会中断 movej 复位轨迹，并让 `record()` 结束当前采集流程。
 
 注意：
 
