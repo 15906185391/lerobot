@@ -47,10 +47,11 @@ WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY = "__wheeled_arm_active_arms"
 def wheeled_arm_cameras_config() -> dict[str, CameraConfig]:
     return {
         "front": LeRobotCameraROS2Config(
+            # topic_name="/camera/color/image_raw",
             topic_name="/camera/color/image_raw",
             node_name="wheeled_arm_front_camera",
-            width=640,
-            height=480,
+            width=1280,
+            height=720,
             fps=30,
         )
     }

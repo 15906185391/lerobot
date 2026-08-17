@@ -547,6 +547,35 @@ def test_mock_wheeled_arm_can_generate_synthetic_camera_images():
     assert camera.disconnect_calls == 0
 
 
+def test_real_wheeled_arm_can_use_synthetic_camera_images_without_connecting_camera():
+    camera = FakeCamera()
+    handler = FakeLCMHandler()
+
+    with patch(
+        "lerobot.robots.wheeled_arm.wheeled_arm._make_lcm_handler", return_value=handler
+    ) as make_handler:
+        robot = WheeledArm(
+            WheeledArmConfig(
+                cameras={}, mock=False, mock_cameras=True, connect_timeout_s=0, use_control_loop=False
+            )
+        )
+        robot.cameras = {"front": camera}
+        robot.connect()
+
+    make_handler.assert_called_once()
+    assert robot.is_connected is True
+    assert camera.connect_calls == 0
+
+    obs = robot.get_observation()
+    np.testing.assert_allclose(obs["left_arm_0.pos"], 0.0)
+    assert obs["front"].shape == (480, 640, 3)
+    assert obs["front"].dtype == np.uint8
+
+    robot.disconnect()
+    assert camera.disconnect_calls == 0
+    assert robot.is_connected is False
+
+
 def test_unknown_action_key_raises():
     robot, _handler = _make_robot()
 

@@ -152,7 +152,10 @@ class WheeledArm(Robot):
                 cam.is_connected for cam in self.cameras.values()
             )
             return self._mock_connected and cameras_connected
-        return self._handler is not None and all(cam.is_connected for cam in self.cameras.values())
+        cameras_connected = self.config.mock_cameras or all(
+            cam.is_connected for cam in self.cameras.values()
+        )
+        return self._handler is not None and cameras_connected
 
     @property
     def is_calibrated(self) -> bool:
@@ -234,8 +237,9 @@ class WheeledArm(Robot):
             return
 
         self._handler = _make_lcm_handler(self.config.lcm_url)
-        for cam in self.cameras.values():
-            cam.connect()
+        if not self.config.mock_cameras:
+            for cam in self.cameras.values():
+                cam.connect()
 
         self.configure()
         wait_timeout_s = max(self.config.connect_timeout_s, self.config.feedback_wait_timeout_s)
@@ -255,6 +259,12 @@ class WheeledArm(Robot):
             )
 
         self._start_control_loop()
+        if self.config.mock_cameras:
+            logger.warning(
+                "%s connected with real robot feedback and synthetic camera images. "
+                "ROS/camera devices will not be read.",
+                self,
+            )
         logger.info(f"{self} connected.")
 
     def calibrate(self) -> None:
@@ -373,6 +383,8 @@ class WheeledArm(Robot):
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
+        if self.config.mock_cameras:
+            return self._add_mock_camera_observations(obs_dict)
         return self._read_camera_observations(obs_dict)
 
     @check_if_not_connected
@@ -651,8 +663,9 @@ class WheeledArm(Robot):
             self._handler.stop()
         self._handler = None
 
-        for cam in self.cameras.values():
-            cam.disconnect()
+        if not self.config.mock_cameras:
+            for cam in self.cameras.values():
+                cam.disconnect()
 
         logger.info(f"{self} disconnected.")
 
@@ -674,17 +687,7 @@ class WheeledArm(Robot):
         assert self._mock_joint_pos is not None
         obs_dict = self.joint_observation_from_package(self._mock_joint_pos)
         if self.config.mock_cameras:
-            for cam_key, cam in self.cameras.items():
-                if getattr(cam, "use_rgb", True):
-                    obs_dict[cam_key] = self._mock_rgb_image(
-                        cam_key, int(cam.height), int(cam.width)
-                    )
-                if getattr(cam, "use_depth", False):
-                    obs_dict[f"{cam_key}_depth"] = self._mock_depth_image(
-                        int(cam.height), int(cam.width)
-                    )
-            self._mock_frame_index += 1
-            return obs_dict
+            return self._add_mock_camera_observations(obs_dict)
         return self._read_camera_observations(obs_dict)
 
     def _send_mock_action(self, action: RobotAction) -> RobotAction:
@@ -740,6 +743,17 @@ class WheeledArm(Robot):
                 dt_ms = (time.perf_counter() - start) * 1e3
                 logger.debug(f"{self} read {cam_key} depth: {dt_ms:.1f}ms")
 
+        return obs_dict
+
+    def _add_mock_camera_observations(self, obs_dict: RobotObservation) -> RobotObservation:
+        for cam_key, cam in self.cameras.items():
+            height = int(cam.height)
+            width = int(cam.width)
+            if getattr(cam, "use_rgb", True):
+                obs_dict[cam_key] = self._mock_rgb_image(cam_key, height, width)
+            if getattr(cam, "use_depth", False):
+                obs_dict[f"{cam_key}_depth"] = self._mock_depth_image(height, width)
+        self._mock_frame_index += 1
         return obs_dict
 
     def _mock_rgb_image(self, camera_name: str, height: int, width: int) -> np.ndarray:
