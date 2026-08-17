@@ -22,6 +22,7 @@ import argparse
 import os
 import signal
 import sys
+import threading
 import time
 import webbrowser
 import xml.etree.ElementTree as ET
@@ -124,6 +125,8 @@ DEFAULT_URDF_PATH = (
     / "src/lerobot/teleoperators/wheeled_arm_pico/assets/wheeled_robot_sim/urdf/real_robot.urdf"
 )
 DEFAULT_LCM_URL = "udpm://239.255.76.67:8880?ttl=1"
+DEFAULT_COMMAND_HZ = 100.0
+DEFAULT_MAX_SPEED_DEG_S = 8.0
 ARM_JOINT_NAMES = [f"left_arm_{i}" for i in range(7)] + [f"right_arm_{i}" for i in range(7)]
 JOINT_NAMES = [*ARM_JOINT_NAMES, "left_gripper", "right_gripper"]
 RESET_LEFT_ARM_DEG = np.array([20.0, 70.0, -75.0, 100.0, -25.0, 0.0, 0.0], dtype=np.float32)
@@ -258,14 +261,21 @@ class JointJogSession(QObject):
         self.last_feedback = np.zeros(23, dtype=np.float32)
         self.last_command_position = np.zeros(23, dtype=np.float32)
         self.feedback_timeout_s = 1.0
-        self.command_hz = 20.0
-        self.max_speed_rad_s = _deg_to_rad(8.0)
+        self.command_hz = DEFAULT_COMMAND_HZ
+        self.max_speed_rad_s = _deg_to_rad(DEFAULT_MAX_SPEED_DEG_S)
+        self.command_lock = threading.Lock()
+        self.command_stop_event = threading.Event()
+        self.command_thread: threading.Thread | None = None
+        self.command_generation = 0
+        self.last_command_time = 0.0
+        self.last_status_text = ""
+        self.last_status_emit_time = 0.0
+        self.last_visualization_update_time = 0.0
+        self.visualization_update_interval_s = 0.2
 
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(100)
         self.poll_timer.timeout.connect(self.poll_feedback)
-        self.command_timer = QTimer(self)
-        self.command_timer.timeout.connect(self._command_step)
 
     def start(
         self,
@@ -281,13 +291,15 @@ class JointJogSession(QObject):
         visualization_open_browser: bool,
     ) -> None:
         if self.connected:
-            self.status.emit("关节点动已经启动。")
+            self._emit_status("关节点动已经启动。", force=True)
             return
         try:
             from lerobot.robots.wheeled_arm.hardware_interface.lcm_handler import LCMHandler
         except ModuleNotFoundError as exc:
             if exc.name == "lcm":
-                self.error.emit("缺少 Python lcm 模块。请确认在 conda xr 环境中安装机器人 SDK 依赖。")
+                self.error.emit(
+                    "缺少 Python lcm 模块。请确认在 conda xr 环境中安装机器人 SDK 依赖。"
+                )
                 return
             self.error.emit(str(exc))
             return
@@ -311,16 +323,13 @@ class JointJogSession(QObject):
 
         self.connected = True
         self.connectedChanged.emit(True)
-        self.status.emit("已启动 LCM，正在等待新鲜左右臂反馈。")
+        self._emit_status("已启动 LCM，正在等待新鲜左右臂反馈。", force=True)
         self.poll_timer.start()
-        self.command_timer.setInterval(max(10, int(1000 / self.command_hz)))
         self.poll_feedback()
 
     def stop(self) -> None:
-        self.command_timer.stop()
+        self._stop_command_thread()
         self.poll_timer.stop()
-        self.active_target = None
-        self._set_moving_flags(set())
         if self.visualizer is not None:
             self.visualizer.close()
             self.visualizer = None
@@ -332,7 +341,7 @@ class JointJogSession(QObject):
         if self.connected:
             self.connected = False
             self.connectedChanged.emit(False)
-        self.status.emit("关节点动已停止。")
+        self._emit_status("关节点动已停止。", force=True)
 
     def has_fresh_feedback(self) -> bool:
         if self.handler is None:
@@ -353,9 +362,14 @@ class JointJogSession(QObject):
             self.target_position = self.last_feedback.copy()
         self.feedback.emit(self.last_feedback.copy())
         mode = "反馈新鲜" if self.has_fresh_feedback() else "等待反馈/反馈超时"
-        if self.visualizer is not None:
+        now = time.monotonic()
+        if (
+            self.visualizer is not None
+            and now - self.last_visualization_update_time >= self.visualization_update_interval_s
+        ):
             self.visualizer.update(self.last_feedback, mode)
-        self.status.emit(mode)
+            self.last_visualization_update_time = now
+        self._emit_status(mode, min_interval_s=1.0)
 
     def sync_target_to_feedback(self) -> None:
         if self.handler is None:
@@ -363,10 +377,8 @@ class JointJogSession(QObject):
         self.poll_feedback()
         self.target_position = self.last_feedback.copy()
         self.last_command_position = self.last_feedback.copy()
-        self.active_target = None
-        self.command_timer.stop()
-        self._set_moving_flags(set())
-        self.status.emit("已将目标同步到当前 LCM 反馈。")
+        self._stop_command_thread()
+        self._emit_status("已将目标同步到当前 LCM 反馈。", force=True)
 
     def jog_to(self, index: int, target_value: float) -> None:
         if not self._can_publish():
@@ -379,7 +391,7 @@ class JointJogSession(QObject):
         if not self._can_publish():
             return
         if not moving_indices:
-            self.status.emit("没有选择要移动的关节。")
+            self._emit_status("没有选择要移动的关节。", force=True)
             return
         target = self.last_feedback.copy()
         for index in moving_indices:
@@ -387,10 +399,8 @@ class JointJogSession(QObject):
         self._start_target(target, moving_indices)
 
     def stop_publish(self) -> None:
-        self.command_timer.stop()
-        self.active_target = None
-        self._set_moving_flags(set())
-        self.status.emit("已停止继续发布关节命令。")
+        self._stop_command_thread()
+        self._emit_status("已停止继续发布关节命令。", force=True)
 
     def _can_publish(self) -> bool:
         if self.handler is None or not self.connected:
@@ -403,44 +413,97 @@ class JointJogSession(QObject):
         return True
 
     def _start_target(self, target: np.ndarray, moving_indices: set[int]) -> None:
-        self.active_target = JointCommand(target=target.astype(np.float32, copy=True), moving_indices=moving_indices)
-        self.last_command_position = self.last_feedback.copy()
-        self.command_timer.start()
-        self._command_step()
+        self._stop_command_thread(clear_target=False)
+        with self.command_lock:
+            self.command_generation += 1
+            generation = self.command_generation
+            self.active_target = JointCommand(
+                target=target.astype(np.float32, copy=True), moving_indices=set(moving_indices)
+            )
+            self.last_command_position = self.last_feedback.copy()
+            self.last_command_time = time.perf_counter()
+            self.command_stop_event.clear()
+        self.command_thread = threading.Thread(
+            target=self._command_loop,
+            args=(generation,),
+            name="wheeled-arm-joint-jog-command",
+            daemon=True,
+        )
+        self.command_thread.start()
 
-    def _command_step(self) -> None:
-        if self.handler is None or self.active_target is None:
-            self.command_timer.stop()
-            return
-        if not self.has_fresh_feedback():
-            self.stop_publish()
-            self.error.emit("反馈超时，已停止关节点动发布。")
-            return
+    def _stop_command_thread(self, *, clear_target: bool = True) -> None:
+        self.command_stop_event.set()
+        thread = self.command_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        self.command_thread = None
+        with self.command_lock:
+            self.command_generation += 1
+            if clear_target:
+                self.active_target = None
+            self.last_command_time = 0.0
+        self._set_moving_flags(set())
 
-        dt = max(0.001, self.command_timer.interval() / 1000.0)
-        max_delta = self.max_speed_rad_s * dt
-        package = self.last_command_position.copy()
-        done = True
-        for index in self.active_target.moving_indices:
-            delta = float(self.active_target.target[index] - package[index])
-            if abs(delta) > max_delta:
-                package[index] += np.sign(delta) * max_delta
-                done = False
-            else:
-                package[index] = self.active_target.target[index]
+    def _command_loop(self, generation: int) -> None:
+        period_s = 1.0 / self.command_hz
+        while not self.command_stop_event.is_set():
+            loop_start = time.perf_counter()
+            if not self.has_fresh_feedback():
+                with self.command_lock:
+                    if generation == self.command_generation:
+                        self.active_target = None
+                self._set_moving_flags(set())
+                self.error.emit("反馈超时，已停止关节点动发布。")
+                return
 
-        self._set_moving_flags(self.active_target.moving_indices)
-        self.handler.upper_body_data_publisher(package)
-        self.last_command_position = package.copy()
-        if self.visualizer is not None:
-            self.visualizer.update(package, "正在点动发布")
+            done = self._command_step(time.perf_counter(), generation)
+            if done:
+                return
+
+            elapsed_s = time.perf_counter() - loop_start
+            self.command_stop_event.wait(max(period_s - elapsed_s, 0.0))
+
+    def _command_step(self, now: float, generation: int) -> bool:
+        with self.command_lock:
+            if self.handler is None or self.active_target is None or generation != self.command_generation:
+                return True
+
+            dt = max(0.001, now - self.last_command_time)
+            max_delta = self.max_speed_rad_s * dt
+            package = self.last_command_position.copy()
+            moving_indices = self.active_target.moving_indices.copy()
+            done = True
+            for index in moving_indices:
+                delta = float(self.active_target.target[index] - package[index])
+                if abs(delta) > max_delta:
+                    package[index] += np.sign(delta) * max_delta
+                    done = False
+                else:
+                    package[index] = self.active_target.target[index]
+
+            self.last_command_position = package.copy()
+            self.last_command_time = now
+            handler = self.handler
+
+        self._set_moving_flags(moving_indices)
+        if not self.command_stop_event.is_set() and handler is not None:
+            handler.upper_body_data_publisher(package)
 
         if done:
-            self.command_timer.stop()
-            moving = self.active_target.moving_indices
-            self.active_target = None
+            with self.command_lock:
+                if generation == self.command_generation:
+                    self.active_target = None
             self._set_moving_flags(set())
-            self.status.emit(f"点动完成，关节数：{len(moving)}。")
+            self._emit_status(f"点动完成，关节数：{len(moving_indices)}。", force=True)
+            return True
+        return False
+
+    def _emit_status(self, text: str, *, min_interval_s: float = 0.0, force: bool = False) -> None:
+        now = time.monotonic()
+        if force or text != self.last_status_text or now - self.last_status_emit_time >= min_interval_s:
+            self.last_status_text = text
+            self.last_status_emit_time = now
+            self.status.emit(text)
 
     def _set_moving_flags(self, moving_indices: set[int]) -> None:
         if self.handler is None:
@@ -616,12 +679,12 @@ class JointJogWindow(QMainWindow):
         self.feedback_timeout.setValue(1.0)
         self.feedback_timeout.setSuffix(" s")
         self.command_hz = QDoubleSpinBox()
-        self.command_hz.setRange(1.0, 100.0)
-        self.command_hz.setValue(20.0)
+        self.command_hz.setRange(1.0, 250.0)
+        self.command_hz.setValue(DEFAULT_COMMAND_HZ)
         self.command_hz.setSuffix(" Hz")
         self.max_speed = QDoubleSpinBox()
         self.max_speed.setRange(0.1, 60.0)
-        self.max_speed.setValue(8.0)
+        self.max_speed.setValue(DEFAULT_MAX_SPEED_DEG_S)
         self.max_speed.setSuffix(" deg/s")
         self.jog_step_deg = QDoubleSpinBox()
         self.jog_step_deg.setRange(0.05, 10.0)
@@ -759,6 +822,8 @@ class JointJogWindow(QMainWindow):
         self.visualization_port.setValue(self.args.visualization_port)
         self.visualize.setChecked(self.args.visualize)
         self.open_browser.setChecked(self.args.open_browser)
+        self.command_hz.setValue(self.args.command_hz)
+        self.max_speed.setValue(self.args.max_speed_deg_s)
 
     def _rebuild_joint_rows(self) -> None:
         for row in self.joint_rows:
@@ -1036,6 +1101,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visualization-host", default="0.0.0.0")
     parser.add_argument("--visualization-port", type=int, default=8092)
     parser.add_argument("--open-browser", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--command-hz", type=float, default=DEFAULT_COMMAND_HZ)
+    parser.add_argument("--max-speed-deg-s", type=float, default=DEFAULT_MAX_SPEED_DEG_S)
     return parser.parse_args()
 
 
