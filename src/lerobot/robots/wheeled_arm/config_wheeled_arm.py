@@ -17,7 +17,7 @@
 from dataclasses import dataclass, field
 
 from lerobot.cameras import CameraConfig
-from lerobot.cameras.lerobot_camera_ros2 import LeRobotCameraROS2Config
+from lerobot.cameras.orbbec.configuration_orbbec import OrbbecCameraConfig
 
 from ..config import RobotConfig
 
@@ -44,14 +44,15 @@ WHEELED_ARM_PARTS = (
 WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY = "__wheeled_arm_active_arms"
 
 
+WHEELED_ARM_DEFAULT_ORBBEC_SERIAL_NUMBER_OR_NAME = "Orbbec Gemini 335"
+
+
 def wheeled_arm_cameras_config() -> dict[str, CameraConfig]:
     return {
-        "front": LeRobotCameraROS2Config(
-            # topic_name="/camera/color/image_raw",
-            topic_name="/camera/color/image_raw",
-            node_name="wheeled_arm_front_camera",
-            width=1280,
-            height=720,
+        "front": OrbbecCameraConfig(
+            serial_number_or_name=WHEELED_ARM_DEFAULT_ORBBEC_SERIAL_NUMBER_OR_NAME,
+            width=640,
+            height=480,
             fps=30,
         )
     }

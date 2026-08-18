@@ -37,7 +37,6 @@ import numpy as np
 
 from lerobot.utils.constants import HF_LEROBOT_HOME
 
-
 QT_XCB_INSTALL_HINT = (
     "sudo apt-get update && sudo apt-get install -y "
     "libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 "
@@ -106,13 +105,26 @@ _prepare_linux_qt_platform()
 
 try:
     from PySide6.QtCore import QObject, QRect, QSettings, QSize, Qt, QTimer, Signal, Slot
-    from PySide6.QtGui import QAction, QBrush, QClipboard, QColor, QFont, QIcon, QImage, QPainter, QPalette, QPen, QPixmap
+    from PySide6.QtGui import (
+        QAction,
+        QBrush,
+        QClipboard,
+        QColor,
+        QFont,
+        QIcon,
+        QImage,
+        QPainter,
+        QPalette,
+        QPen,
+        QPixmap,
+    )
     from PySide6.QtWidgets import (
         QApplication,
         QButtonGroup,
         QCheckBox,
         QComboBox,
         QDialog,
+        QDoubleSpinBox,
         QFileDialog,
         QFormLayout,
         QFrame,
@@ -124,15 +136,14 @@ try:
         QLineEdit,
         QMainWindow,
         QMessageBox,
-        QPushButton,
         QPlainTextEdit,
-        QDoubleSpinBox,
+        QPushButton,
         QScrollArea,
         QSizePolicy,
         QSpinBox,
         QStackedWidget,
-        QTextBrowser,
         QTabWidget,
+        QTextBrowser,
         QTextEdit,
         QVBoxLayout,
         QWidget,
@@ -2227,8 +2238,9 @@ class WheeledArmGui(QMainWindow):
         self.ik_max_joint_velocity.setToolTip("IK 输出后的每关节目标速度软限幅，单位 rad/s。")
         self.ik_max_joint_acceleration = self._double_spin(0.1, 200.0, 8.0, 1)
         self.ik_max_joint_acceleration.setToolTip("IK 输出后的每关节目标加速度软限幅，单位 rad/s^2。")
-        self.camera_override = QCheckBox("覆盖 front 相机参数")
-        self.camera_topic = QLineEdit("/camera/color/image_raw")
+        self.camera_override = QCheckBox("覆盖 front Orbbec 相机参数")
+        self.camera_serial_number_or_name = QLineEdit("Orbbec Gemini 335")
+        self.camera_serial_number_or_name.setPlaceholderText("例如 SN123456 或 Orbbec Gemini 335")
         self.camera_width = self._spin(1, 8192, 640)
         self.camera_height = self._spin(1, 8192, 480)
         self.camera_fps = self._spin(1, 240, 30)
@@ -2257,7 +2269,7 @@ class WheeledArmGui(QMainWindow):
         robot_form.addRow("最大关节速度", self.ik_max_joint_velocity)
         robot_form.addRow("最大关节加速度", self.ik_max_joint_acceleration)
         robot_form.addRow("", self.camera_override)
-        robot_form.addRow("相机 topic", self.camera_topic)
+        robot_form.addRow("相机序列号/名称", self.camera_serial_number_or_name)
         robot_form.addRow("相机宽", self.camera_width)
         robot_form.addRow("相机高", self.camera_height)
         robot_form.addRow("相机 FPS", self.camera_fps)
@@ -2928,7 +2940,7 @@ class WheeledArmGui(QMainWindow):
         form = QFormLayout(box)
         self._setup_form_layout(form)
         self.common_camera_type = QComboBox()
-        self.common_camera_type.addItems(["全部", "opencv", "realsense", "ros2"])
+        self.common_camera_type.addItems(["全部", "orbbec", "opencv", "realsense", "ros2"])
         self.common_camera_output_dir = PathPicker("outputs/captured_images")
         self.common_camera_record_time = self._double_spin(0.1, 3600.0, 2.0, 1)
         self.common_camera_warmup = self._spin(0, 60, 1)
@@ -3617,7 +3629,7 @@ class WheeledArmGui(QMainWindow):
             self.ik_max_joint_velocity,
             self.ik_max_joint_acceleration,
             self.camera_override,
-            self.camera_topic,
+            self.camera_serial_number_or_name,
             self.camera_width,
             self.camera_height,
             self.camera_fps,
@@ -3889,6 +3901,17 @@ class WheeledArmGui(QMainWindow):
         self.mock_cameras.setChecked(
             _settings_bool(self.settings.value("record/mock_cameras", self.mock_cameras.isChecked()), False)
         )
+        self.camera_override.setChecked(
+            _settings_bool(self.settings.value("record/camera_override", self.camera_override.isChecked()), False)
+        )
+        self.camera_serial_number_or_name.setText(
+            self.settings.value(
+                "record/camera_serial_number_or_name", self.camera_serial_number_or_name.text()
+            )
+        )
+        self.camera_width.setValue(int(self.settings.value("record/camera_width", self.camera_width.value())))
+        self.camera_height.setValue(int(self.settings.value("record/camera_height", self.camera_height.value())))
+        self.camera_fps.setValue(int(self.settings.value("record/camera_fps", self.camera_fps.value())))
         self.publish_action_ros2.setChecked(
             _settings_bool(
                 self.settings.value(
@@ -4115,6 +4138,13 @@ class WheeledArmGui(QMainWindow):
         )
         self.settings.setValue("record/mock_robot", self.mock_robot.isChecked())
         self.settings.setValue("record/mock_cameras", self.mock_cameras.isChecked())
+        self.settings.setValue("record/camera_override", self.camera_override.isChecked())
+        self.settings.setValue(
+            "record/camera_serial_number_or_name", self.camera_serial_number_or_name.text()
+        )
+        self.settings.setValue("record/camera_width", self.camera_width.value())
+        self.settings.setValue("record/camera_height", self.camera_height.value())
+        self.settings.setValue("record/camera_fps", self.camera_fps.value())
         self.settings.setValue("record/publish_action_ros2", self.publish_action_ros2.isChecked())
         self.settings.setValue("record/action_ros2_topic", self.action_ros2_topic.text())
         self.settings.setValue(
@@ -4264,9 +4294,8 @@ class WheeledArmGui(QMainWindow):
             command.append(f"--robot.lcm_url={self.lcm_url.text().strip()}")
         if self.camera_override.isChecked():
             camera_config = (
-                "{front: {type: ros2, "
-                f"topic_name: {self.camera_topic.text().strip()}, "
-                "node_name: wheeled_arm_front_camera, "
+                "{front: {type: orbbec, "
+                f"serial_number_or_name: {self.camera_serial_number_or_name.text().strip()}, "
                 f"width: {self.camera_width.value()}, "
                 f"height: {self.camera_height.value()}, "
                 f"fps: {self.camera_fps.value()}}}"

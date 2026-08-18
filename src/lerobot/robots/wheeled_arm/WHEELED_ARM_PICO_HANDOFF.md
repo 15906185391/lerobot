@@ -6,7 +6,7 @@
 
 - 在 LeRobot 中支持自定义机器人 `wheeled_arm`。
 - 使用机器人 SDK/LCM 接口控制和记录左右臂、左右夹爪。
-- 相机使用 `lerobot_camera_ros2`。
+- 相机默认使用 Orbbec（`type: orbbec`），默认前置相机名为 `Orbbec Gemini 335`。
 - 使用 PICO 控制器作为 `wheeled_arm_pico` teleoperator。
 - 支持 `viser` 可视化环境，便于不连接实物机器人时先验证 PICO 到 IK/action 的链路。
 
@@ -555,30 +555,33 @@ sudo ip route add 224.0.0.0/4 dev lo
 
 连接真实机器人时，应确保连接到机器人所在网络，并且该网络接口有 multicast route。
 
-### 13. 相机图像尺寸与 dataset feature 不一致
+### 13. Orbbec 相机图像尺寸与 dataset feature 不一致
 
 现象：
 
 ```text
 ValueError: The feature 'observation.images.front' of shape '(480, 640, 3)'
-does not have the expected shape '(720, 1280, 3)' or '(1280, 3, 720)'.
+does not have the expected shape configured in dataset metadata.
 ```
 
 根因：
 
-- `wheeled_arm` 默认相机配置登记的是 1280x720。
-- 当前 ROS2 前置相机实际发布的是 640x480 图像。
-- 数据集 feature 在 `robot.connect()` 前根据 config 创建，因此 ROS2 camera 连接后读取到的实际尺寸不会反向更新本次 dataset metadata。
+- `wheeled_arm` 默认 Orbbec 前置相机配置登记的是 640x480@30。
+- 数据集 feature 在 `robot.connect()` 前根据 config 创建，因此 Orbbec camera 连接后读取到的实际尺寸不会反向更新本次 dataset metadata。
+- 如果实际 Orbbec profile 与 config 不一致，采集时会出现 shape mismatch。
 
 处理：
 
-- `wheeled_arm_cameras_config()` 的默认 `front` 相机尺寸改为：
+- `wheeled_arm_cameras_config()` 默认 `front` 相机改为：
+  - `type=orbbec`
+  - `serial_number_or_name="Orbbec Gemini 335"`
   - `width=640`
   - `height=480`
+  - `fps=30`
 
 注意：
 
-- 如果后续相机 topic 改成其他分辨率，需要同步修改 robot camera config，或在 CLI 中覆盖 `--robot.cameras=...`。
+- 如果现场 Orbbec 的序列号/名称或分辨率不同，需要同步修改 robot camera config，或在 CLI 中覆盖 `--robot.cameras=...`。
 
 ## 常用命令
 
@@ -691,9 +694,18 @@ python /home/kuanli/Documents/lerobot/src/lerobot/teleoperators/wheeled_arm_pico
 
 ### 数据采集
 
+先确认 Orbbec 设备 ID / 名称：
+
+```bash
+lerobot-find-cameras orbbec
+```
+
+如果只接了一台默认型号相机，下面命令可直接使用；否则把 `serial_number_or_name` 改成上一步输出中的 `Id`。
+
 ```bash
 lerobot-record \
   --robot.type=wheeled_arm \
+  --robot.cameras='{front: {type: orbbec, serial_number_or_name: "Orbbec Gemini 335", width: 640, height: 480, fps: 30}}' \
   --teleop.type=wheeled_arm_pico \
   --teleop.visualize=true \
   --wait_for_episode_start=true \
@@ -712,6 +724,7 @@ lerobot-record \
 ```bash
 lerobot-record \
   --robot.type=wheeled_arm \
+  --robot.cameras='{front: {type: orbbec, serial_number_or_name: "Orbbec Gemini 335", width: 640, height: 480, fps: 30}}' \
   --teleop.type=wheeled_arm_pico \
   --teleop.visualize=true \
   --teleop.gripper_open_pos=0.0 \
@@ -820,8 +833,9 @@ grippers=[...]
   - `MANIP_RIGHT_GRIPPER_STATE`
 - 如果 teleop 又回零，检查 `WheeledArm.has_valid_feedback` 和 LCM 状态时间戳。
 - 如果夹爪方向反了，交换 `gripper_open_pos` 和 `gripper_closed_pos`，或调整实物 SDK 的夹爪单位。
-- 如果相机没有图像，确认 ROS2 topic 默认是 `/camera/color/image_raw`，并检查 encoding 是否为 `rgb8`、`bgr8`、`rgba8`、`bgra8` 或 `mono8`。
-- 如果需要深度图，先修复 `cv_bridge` 与 NumPy 的兼容问题。
+- 如果相机没有图像，先运行 `lerobot-find-cameras orbbec`，确认 `pyorbbecsdk2` 可导入、设备能被枚举，并把输出中的 `Id` 或唯一 `Name` 填入 `serial_number_or_name`。
+- 如果 `pyorbbecsdk` 报 native symbol / shared library 错误，检查 Orbbec SDK native libraries 与 Python wheel 版本是否匹配。
+- 当前 Orbbec 接入默认只采集 RGB；如需深度图，需要另行扩展 Orbbec depth stream。
 
 ## 2026-08-10 近期变更记录
 

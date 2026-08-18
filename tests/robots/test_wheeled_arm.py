@@ -25,6 +25,7 @@ from lerobot.robots.config import RobotConfig
 from lerobot.robots.wheeled_arm import WheeledArm, WheeledArmConfig
 from lerobot.robots.wheeled_arm.config_wheeled_arm import (
     WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY,
+    WHEELED_ARM_DEFAULT_ORBBEC_SERIAL_NUMBER_OR_NAME,
     wheeled_arm_cameras_config,
 )
 
@@ -114,14 +115,15 @@ def test_wheeled_arm_config_is_registered():
         WheeledArmConfig(cameras={}, connect_timeout_s=0)), WheeledArm)
 
 
-def test_default_camera_config_uses_ros2_camera():
+def test_default_camera_config_uses_orbbec_camera():
     cameras = wheeled_arm_cameras_config()
 
     assert list(cameras) == ["front"]
-    assert cameras["front"].type == "lerobot_camera_ros2"
-    assert cameras["front"].topic_name == "/camera/color/image_raw"
+    assert cameras["front"].type == "orbbec"
+    assert cameras["front"].serial_number_or_name == WHEELED_ARM_DEFAULT_ORBBEC_SERIAL_NUMBER_OR_NAME
     assert cameras["front"].width == 640
     assert cameras["front"].height == 480
+    assert cameras["front"].fps == 30
 
 
 def test_get_observation_reads_left_and_right_arm_joint_positions():
