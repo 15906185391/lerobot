@@ -39,6 +39,7 @@ from PIL import Image
 from lerobot.cameras import ColorMode
 from lerobot.cameras.lerobot_camera_ros2 import ROS2Camera, ROS2CameraConfig
 from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
+from lerobot.cameras.orbbec import OrbbecCamera, OrbbecCameraConfig
 from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
 from lerobot.utils.utils import init_logging
 
@@ -87,6 +88,28 @@ def find_all_realsense_cameras() -> list[dict[str, Any]]:
     return all_realsense_cameras_info
 
 
+def find_all_orbbec_cameras() -> list[dict[str, Any]]:
+    """
+    Finds all available Orbbec cameras plugged into the system.
+
+    Returns:
+        A list of all available Orbbec cameras with their metadata.
+    """
+    all_orbbec_cameras_info: list[dict[str, Any]] = []
+    logger.info("Searching for Orbbec cameras...")
+    try:
+        orbbec_cameras = OrbbecCamera.find_cameras()
+        for cam_info in orbbec_cameras:
+            all_orbbec_cameras_info.append(cam_info)
+        logger.info(f"Found {len(orbbec_cameras)} Orbbec cameras.")
+    except ImportError:
+        logger.warning("Skipping Orbbec camera search: pyorbbecsdk library not found or not importable.")
+    except Exception as e:
+        logger.error(f"Error finding Orbbec cameras: {e}")
+
+    return all_orbbec_cameras_info
+
+
 def find_all_ros2_cameras() -> list[dict[str, Any]]:
     """
     Finds all available ROS 2 image topics.
@@ -114,7 +137,7 @@ def find_and_print_cameras(camera_type_filter: str | None = None) -> list[dict[s
     Finds available cameras based on an optional filter and prints their information.
 
     Args:
-        camera_type_filter: Optional string to filter cameras ("realsense", "opencv", or "ros2").
+        camera_type_filter: Optional string to filter cameras ("realsense", "orbbec", "opencv", or "ros2").
                             If None, lists all cameras.
 
     Returns:
@@ -129,6 +152,8 @@ def find_and_print_cameras(camera_type_filter: str | None = None) -> list[dict[s
         all_cameras_info.extend(find_all_opencv_cameras())
     if camera_type_filter is None or camera_type_filter == "realsense":
         all_cameras_info.extend(find_all_realsense_cameras())
+    if camera_type_filter is None or camera_type_filter == "orbbec":
+        all_cameras_info.extend(find_all_orbbec_cameras())
     if camera_type_filter is None or camera_type_filter == "ros2":
         all_cameras_info.extend(find_all_ros2_cameras())
 
@@ -136,7 +161,7 @@ def find_and_print_cameras(camera_type_filter: str | None = None) -> list[dict[s
         if camera_type_filter:
             logger.warning(f"No {camera_type_filter} cameras were detected.")
         else:
-            logger.warning("No cameras (OpenCV, RealSense, or ROS 2 image topics) were detected.")
+            logger.warning("No cameras (OpenCV, RealSense, Orbbec, or ROS 2 image topics) were detected.")
     else:
         print("\n--- Detected Cameras ---")
         for i, cam_info in enumerate(all_cameras_info):
@@ -199,6 +224,13 @@ def create_camera_instance(cam_meta: dict[str, Any], *, warmup_s: int = 1) -> di
                 warmup_s=warmup_s,
             )
             instance = RealSenseCamera(rs_config)
+        elif cam_type == "Orbbec":
+            ob_config = OrbbecCameraConfig(
+                serial_number_or_name=cam_id,
+                color_mode=ColorMode.RGB,
+                warmup_s=warmup_s,
+            )
+            instance = OrbbecCamera(ob_config)
         elif cam_type == "ROS2":
             ros2_config = ROS2CameraConfig(
                 topic_name=str(cam_meta.get("topic_name", cam_id)),
@@ -268,7 +300,7 @@ def save_images_from_all_cameras(
     Args:
         output_dir: Directory to save images.
         record_time_s: Duration in seconds to record images.
-        camera_type: Optional string to filter cameras ("realsense", "opencv", or "ros2").
+        camera_type: Optional string to filter cameras ("realsense", "orbbec", "opencv", or "ros2").
                             If None, uses all detected cameras.
         warmup_s: Duration in seconds to warmup camera before recording images.
     """
@@ -311,9 +343,9 @@ def main():
         type=str,
         nargs="?",
         default=None,
-        choices=["realsense", "opencv", "ros2"],
+        choices=["realsense", "orbbec", "opencv", "ros2"],
         help=(
-            "Specify camera type to capture from (e.g., 'realsense', 'opencv', 'ros2'). "
+            "Specify camera type to capture from (e.g., 'realsense', 'orbbec', 'opencv', 'ros2'). "
             "Captures from all if omitted."
         ),
     )
