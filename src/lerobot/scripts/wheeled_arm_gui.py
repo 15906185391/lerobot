@@ -23,6 +23,7 @@ import os
 import random
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -261,6 +262,8 @@ COMMON_COMMAND_LABELS = {
     "系统信息": "info",
     "查找相机": "find_cameras",
     "查找串口": "find_port",
+    "启动机器人": "remote_robot_start",
+    "启动相机": "remote_camera_start",
     "遥操作": "teleoperate",
     "回放 Episode": "replay",
     "校准设备": "calibrate",
@@ -302,6 +305,14 @@ DEFAULT_WHEELED_ARM_URDF = (
     PROJECT_ROOT
     / "src/lerobot/teleoperators/wheeled_arm_pico/assets/wheeled_robot_sim/urdf/real_robot.urdf"
 )
+DEFAULT_HAL_DRIVER_COMMAND = "/home/agi/workspace/gateway_app/install/hal_driver/lib/hal_driver/hal_driver a2406"
+DEFAULT_ORBBEC_CAMERA_COMMAND = (
+    "ros2 launch orbbec_camera gemini_330_series.launch.py "
+    "color_width:=640 color_height:=480 color_fps:=30 "
+    "enable_depth:=false enable_point_cloud:=false "
+    "enable_left_ir:=false enable_right_ir:=false "
+    "color.image_raw.enable_pub_plugins:='[\"image_transport/compressed\"]'"
+)
 
 
 def _bool_arg(value: bool) -> str:
@@ -322,6 +333,146 @@ def _module_command(module: str) -> list[str]:
 
 def _format_command(command: list[str]) -> str:
     return shlex.join(command)
+
+
+def _remote_bash_invocation(command: str) -> str:
+    return f"bash -lc {shlex.quote(command)}"
+
+
+def _remote_start_script(
+    *,
+    ssh_command: list[str],
+    setup_script: str,
+    gateway_command: str,
+    controller_dir: str,
+    controller_command: str,
+    start_delay_s: int,
+) -> str:
+    ssh_invocation = " ".join(shlex.quote(part) for part in ssh_command)
+    setup_remote_command = f"source {shlex.quote(setup_script)} && exec {gateway_command}"
+    controller_remote_command = f"cd {shlex.quote(controller_dir)} && exec {controller_command}"
+    setup_payload = shlex.quote(_remote_bash_invocation(setup_remote_command))
+    controller_payload = shlex.quote(_remote_bash_invocation(controller_remote_command))
+    setup_label = f"source {setup_script} && {gateway_command}"
+    controller_label = f"cd {controller_dir} && {controller_command}"
+
+    return f"""set -u
+run_ssh() {{
+  {ssh_invocation} "$1"
+}}
+
+hal_pid=
+controller_pid=
+askpass_file=
+if [ -n "${{LEROBOT_REMOTE_ROBOT_PASSWORD:-}}" ]; then
+  askpass_file="$(mktemp /tmp/lerobot-ssh-askpass.XXXXXX)"
+  cat > "$askpass_file" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$LEROBOT_REMOTE_ROBOT_PASSWORD"
+EOF
+  chmod 700 "$askpass_file"
+  export SSH_ASKPASS="$askpass_file"
+  export SSH_ASKPASS_REQUIRE=force
+  export DISPLAY="${{DISPLAY:-:0}}"
+else
+  unset SSH_ASKPASS
+  export SSH_ASKPASS_REQUIRE=never
+fi
+cleanup() {{
+  trap - INT TERM EXIT
+  if [ -n "${{controller_pid:-}}" ]; then
+    kill "$controller_pid" 2>/dev/null || true
+  fi
+  if [ -n "${{hal_pid:-}}" ]; then
+    kill "$hal_pid" 2>/dev/null || true
+  fi
+  wait 2>/dev/null || true
+  if [ -n "${{askpass_file:-}}" ]; then
+    rm -f "$askpass_file"
+  fi
+}}
+trap cleanup INT TERM EXIT
+
+echo "[1/2] 启动网关: {shlex.quote(setup_label)}"
+run_ssh {setup_payload} &
+hal_pid=$!
+
+sleep {start_delay_s}
+if ! kill -0 "$hal_pid" 2>/dev/null; then
+  set +e
+  wait "$hal_pid"
+  hal_status=$?
+  set -e
+  echo "网关常驻命令提前退出，退出码 $hal_status；不会继续启动机器人控制器。"
+  exit "$hal_status"
+fi
+
+echo "[2/2] 启动机器人控制器: {shlex.quote(controller_label)}"
+run_ssh {controller_payload} &
+controller_pid=$!
+
+set +e
+wait -n "$hal_pid" "$controller_pid"
+status=$?
+set -e
+cleanup
+exit "$status"
+"""
+
+
+def _remote_single_command_script(
+    *,
+    ssh_command: list[str],
+    remote_command: str,
+    label: str,
+) -> str:
+    ssh_invocation = " ".join(shlex.quote(part) for part in ssh_command)
+    remote_label = shlex.quote(label)
+    remote_payload = shlex.quote(_remote_bash_invocation(remote_command))
+
+    return f"""set -u
+run_ssh() {{
+  {ssh_invocation} "$1"
+}}
+
+remote_pid=
+askpass_file=
+if [ -n "${{LEROBOT_REMOTE_ROBOT_PASSWORD:-}}" ]; then
+  askpass_file="$(mktemp /tmp/lerobot-ssh-askpass.XXXXXX)"
+  cat > "$askpass_file" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$LEROBOT_REMOTE_ROBOT_PASSWORD"
+EOF
+  chmod 700 "$askpass_file"
+  export SSH_ASKPASS="$askpass_file"
+  export SSH_ASKPASS_REQUIRE=force
+  export DISPLAY="${{DISPLAY:-:0}}"
+else
+  unset SSH_ASKPASS
+  export SSH_ASKPASS_REQUIRE=never
+fi
+cleanup() {{
+  trap - INT TERM EXIT
+  if [ -n "${{remote_pid:-}}" ]; then
+    kill "$remote_pid" 2>/dev/null || true
+  fi
+  wait 2>/dev/null || true
+  if [ -n "${{askpass_file:-}}" ]; then
+    rm -f "$askpass_file"
+  fi
+}}
+trap cleanup INT TERM EXIT
+
+echo "启动远端命令: {remote_label}"
+run_ssh {remote_payload} &
+remote_pid=$!
+set +e
+wait "$remote_pid"
+status=$?
+set -e
+cleanup
+exit "$status"
+"""
 
 
 def _find_free_tcp_port() -> int:
@@ -1737,6 +1888,8 @@ _HELP_COMMANDS_HTML = """
   <tr><th>目标</th><th>选择</th><th>什么时候用</th></tr>
   <tr><td>检查环境</td><td>系统信息</td><td>确认 Python、LeRobot、PyTorch、CUDA、FFmpeg。</td></tr>
   <tr><td>检查硬件</td><td>查找相机 / 查找串口 / 设置 CAN</td><td>采集前排查连接和权限。</td></tr>
+  <tr><td>远端启动</td><td>启动机器人</td><td>通过 SSH 依次启动 gateway_app 和 robot_controller。</td></tr>
+  <tr><td>相机节点</td><td>启动相机</td><td>在机器人侧启动 Orbbec ROS2 相机 launch。</td></tr>
   <tr><td>只试遥操作</td><td>遥操作</td><td>不保存数据，只验证 PICO、IK、LCM 和可视化链路。</td></tr>
   <tr><td>检查数据动作</td><td>回放 Episode</td><td>把数据集动作重新下发给 wheeled_arm。</td></tr>
   <tr><td>训练和部署</td><td>训练策略 / 评估策略 / 策略 Rollout</td><td>数据质量确认后再使用。</td></tr>
@@ -2538,6 +2691,8 @@ class WheeledArmGui(QMainWindow):
         self.common_stack.addWidget(self._make_system_info_common_panel())
         self.common_stack.addWidget(self._make_find_cameras_common_panel())
         self.common_stack.addWidget(self._make_find_port_common_panel())
+        self.common_stack.addWidget(self._make_remote_robot_start_common_panel())
+        self.common_stack.addWidget(self._make_remote_camera_start_common_panel())
         self.common_stack.addWidget(self._make_teleoperate_common_panel())
         self.common_stack.addWidget(self._make_replay_common_panel())
         self.common_stack.addWidget(self._make_calibrate_common_panel())
@@ -2933,6 +3088,65 @@ class WheeledArmGui(QMainWindow):
         label.setWordWrap(True)
         label.setObjectName("MutedLabel")
         layout.addWidget(label)
+        return box
+
+    def _make_remote_robot_start_common_panel(self) -> QWidget:
+        box = QGroupBox("启动机器人")
+        form = QFormLayout(box)
+        self._setup_form_layout(form)
+        self.common_robot_ssh_user = QLineEdit("agi")
+        self.common_robot_ssh_host = QLineEdit("10.42.0.60")
+        self.common_robot_ssh_password = QLineEdit()
+        self.common_robot_ssh_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.common_robot_ssh_password.setPlaceholderText("未配置 SSH key 时填写；不保存")
+        self.common_robot_setup_script = QLineEdit("/home/agi/workspace/gateway_app/install/setup.bash")
+        self.common_robot_gateway_command = QLineEdit(DEFAULT_HAL_DRIVER_COMMAND)
+        self.common_robot_controller_dir = QLineEdit("/home/agi/zmf")
+        self.common_robot_controller_command = QLineEdit("./robot_controller_0804")
+        self.common_robot_start_delay = self._spin(0, 60, 3)
+        hint = QLabel(
+            "按顺序执行：先 source setup.bash 并让 hal_driver a2406 常驻运行；等待几秒后，同时启动 robot_controller_0804。"
+            "SSH 密码只用于本次启动，不会保存；更推荐配置 SSH key 后留空密码。"
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("MutedLabel")
+        form.addRow("SSH 用户", self.common_robot_ssh_user)
+        form.addRow("SSH 主机", self.common_robot_ssh_host)
+        form.addRow("SSH 密码", self.common_robot_ssh_password)
+        form.addRow("setup.bash", self.common_robot_setup_script)
+        form.addRow("网关命令", self.common_robot_gateway_command)
+        form.addRow("控制器目录", self.common_robot_controller_dir)
+        form.addRow("控制器命令", self.common_robot_controller_command)
+        form.addRow("启动间隔秒", self.common_robot_start_delay)
+        form.addRow("", hint)
+        return box
+
+    def _make_remote_camera_start_common_panel(self) -> QWidget:
+        box = QGroupBox("启动相机")
+        form = QFormLayout(box)
+        self._setup_form_layout(form)
+        self.common_camera_ssh_user = QLineEdit("agi")
+        self.common_camera_ssh_host = QLineEdit("10.42.0.60")
+        self.common_camera_ssh_password = QLineEdit()
+        self.common_camera_ssh_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.common_camera_ssh_password.setPlaceholderText("未配置 SSH key 时填写；不保存")
+        self.common_camera_setup_script = QLineEdit()
+        self.common_camera_setup_script.setPlaceholderText("可选：/opt/ros/jazzy/setup.bash 或相机工作空间 setup.bash")
+        self.common_camera_command = QPlainTextEdit()
+        self.common_camera_command.setPlainText(DEFAULT_ORBBEC_CAMERA_COMMAND)
+        self.common_camera_command.setFixedHeight(96)
+        hint = QLabel(
+            "在机器人侧通过 SSH 启动 Orbbec ROS2 相机节点。"
+            "如果 ros2 命令在非交互 SSH 中找不到，请填写启动前 source 路径。"
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("MutedLabel")
+        form.addRow("SSH 用户", self.common_camera_ssh_user)
+        form.addRow("SSH 主机", self.common_camera_ssh_host)
+        form.addRow("SSH 密码", self.common_camera_ssh_password)
+        form.addRow("启动前 source", self.common_camera_setup_script)
+        form.addRow("相机命令", self.common_camera_command)
+        form.addRow("", hint)
         return box
 
     def _make_teleoperate_common_panel(self) -> QWidget:
@@ -3712,6 +3926,19 @@ class WheeledArmGui(QMainWindow):
             self.common_camera_type,
             self.common_camera_record_time,
             self.common_camera_warmup,
+            self.common_robot_ssh_user,
+            self.common_robot_ssh_host,
+            self.common_robot_ssh_password,
+            self.common_robot_setup_script,
+            self.common_robot_gateway_command,
+            self.common_robot_controller_dir,
+            self.common_robot_controller_command,
+            self.common_robot_start_delay,
+            self.common_camera_ssh_user,
+            self.common_camera_ssh_host,
+            self.common_camera_ssh_password,
+            self.common_camera_setup_script,
+            self.common_camera_command,
             self.common_teleop_fps,
             self.common_teleop_time_s,
             self.common_teleop_display_data,
@@ -3951,6 +4178,39 @@ class WheeledArmGui(QMainWindow):
         self.v30_repo_id.setText(self.settings.value("conversion/v30_repo_id", ""))
         self.v3021_repo_id.setText(self.settings.value("conversion/v3021_repo_id", ""))
         self.conversion_advanced_args.setPlainText(self.settings.value("conversion/advanced_args", ""))
+        self.common_robot_ssh_user.setText(
+            self.settings.value("common/robot_ssh_user", self.common_robot_ssh_user.text())
+        )
+        self.common_robot_ssh_host.setText(
+            self.settings.value("common/robot_ssh_host", self.common_robot_ssh_host.text())
+        )
+        self.common_robot_setup_script.setText(
+            self.settings.value("common/robot_setup_script", self.common_robot_setup_script.text())
+        )
+        self.common_robot_gateway_command.setText(
+            self.settings.value("common/robot_gateway_command", self.common_robot_gateway_command.text())
+        )
+        self.common_robot_controller_dir.setText(
+            self.settings.value("common/robot_controller_dir", self.common_robot_controller_dir.text())
+        )
+        self.common_robot_controller_command.setText(
+            self.settings.value("common/robot_controller_command", self.common_robot_controller_command.text())
+        )
+        self.common_robot_start_delay.setValue(
+            int(self.settings.value("common/robot_start_delay", self.common_robot_start_delay.value()))
+        )
+        self.common_camera_ssh_user.setText(
+            self.settings.value("common/camera_ssh_user", self.common_robot_ssh_user.text())
+        )
+        self.common_camera_ssh_host.setText(
+            self.settings.value("common/camera_ssh_host", self.common_robot_ssh_host.text())
+        )
+        self.common_camera_setup_script.setText(
+            self.settings.value("common/camera_setup_script", self.common_camera_setup_script.text())
+        )
+        self.common_camera_command.setPlainText(
+            self.settings.value("common/camera_command", self.common_camera_command.toPlainText())
+        )
         self.common_replay_repo_id.setText(self.settings.value("common/replay_repo_id", ""))
         self.common_replay_root.setText(self.settings.value("common/replay_root", ""))
         self.common_custom_module.setText(
@@ -4138,6 +4398,17 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("conversion/v30_repo_id", self.v30_repo_id.text())
         self.settings.setValue("conversion/v3021_repo_id", self.v3021_repo_id.text())
         self.settings.setValue("conversion/advanced_args", self.conversion_advanced_args.toPlainText())
+        self.settings.setValue("common/robot_ssh_user", self.common_robot_ssh_user.text())
+        self.settings.setValue("common/robot_ssh_host", self.common_robot_ssh_host.text())
+        self.settings.setValue("common/robot_setup_script", self.common_robot_setup_script.text())
+        self.settings.setValue("common/robot_gateway_command", self.common_robot_gateway_command.text())
+        self.settings.setValue("common/robot_controller_dir", self.common_robot_controller_dir.text())
+        self.settings.setValue("common/robot_controller_command", self.common_robot_controller_command.text())
+        self.settings.setValue("common/robot_start_delay", self.common_robot_start_delay.value())
+        self.settings.setValue("common/camera_ssh_user", self.common_camera_ssh_user.text())
+        self.settings.setValue("common/camera_ssh_host", self.common_camera_ssh_host.text())
+        self.settings.setValue("common/camera_setup_script", self.common_camera_setup_script.text())
+        self.settings.setValue("common/camera_command", self.common_camera_command.toPlainText())
         self.settings.setValue("common/replay_repo_id", self.common_replay_repo_id.text())
         self.settings.setValue("common/replay_root", self.common_replay_root.text())
         self.settings.setValue("common/custom_module", self.common_custom_module.text())
@@ -4522,6 +4793,69 @@ class WheeledArmGui(QMainWindow):
         if command_type == "custom":
             module = self.common_custom_module.text().strip()
             command = _module_command(module)
+        elif command_type == "remote_robot_start":
+            ssh_command = []
+            ssh_command.extend(
+                [
+                    "ssh",
+                    "-tt",
+                    "-o",
+                    "ServerAliveInterval=15",
+                    "-o",
+                    "ServerAliveCountMax=3",
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
+                    f"{self.common_robot_ssh_user.text().strip()}@{self.common_robot_ssh_host.text().strip()}",
+                ]
+            )
+            controller_command = self.common_robot_controller_command.text().strip()
+            extra = self.common_advanced_args.toPlainText().strip()
+            if extra:
+                shlex.split(extra)
+                controller_command = f"{controller_command} {extra}"
+            command = [
+                "/bin/bash",
+                "-lc",
+                _remote_start_script(
+                    ssh_command=ssh_command,
+                    setup_script=self.common_robot_setup_script.text().strip(),
+                    gateway_command=self.common_robot_gateway_command.text().strip(),
+                    controller_dir=self.common_robot_controller_dir.text().strip(),
+                    controller_command=controller_command,
+                    start_delay_s=self.common_robot_start_delay.value(),
+                ),
+            ]
+        elif command_type == "remote_camera_start":
+            ssh_command = [
+                "ssh",
+                "-tt",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                f"{self.common_camera_ssh_user.text().strip()}@{self.common_camera_ssh_host.text().strip()}",
+            ]
+            camera_command = self.common_camera_command.toPlainText().strip()
+            extra = self.common_advanced_args.toPlainText().strip()
+            if extra:
+                shlex.split(extra)
+                camera_command = f"{camera_command} {extra}"
+            if self.common_camera_setup_script.text().strip():
+                setup_script = shlex.quote(self.common_camera_setup_script.text().strip())
+                remote_command = f"source {setup_script} && exec {camera_command}"
+            else:
+                remote_command = f"exec {camera_command}"
+            command = [
+                "/bin/bash",
+                "-lc",
+                _remote_single_command_script(
+                    ssh_command=ssh_command,
+                    remote_command=remote_command,
+                    label=camera_command,
+                ),
+            ]
         elif command_type == "pico_usb_service":
             command = ["/bin/bash", str(PROJECT_ROOT / "scripts/start_pico_usb_service.bash")]
         else:
@@ -4788,7 +5122,7 @@ class WheeledArmGui(QMainWindow):
                 command.append(f"--hub_repo_id={self.common_tokenizer_hub_repo_id.text().strip()}")
 
         extra = self.common_advanced_args.toPlainText().strip()
-        if extra:
+        if extra and command_type not in {"remote_robot_start", "remote_camera_start"}:
             command.extend(shlex.split(extra))
         return command
 
@@ -5067,6 +5401,59 @@ class WheeledArmGui(QMainWindow):
             if command_type == "custom" and not self.common_custom_module.text().strip():
                 QMessageBox.warning(self, "缺少模块名", "请填写要运行的 Python 模块。")
                 return False
+            if command_type == "remote_robot_start":
+                if shutil.which("ssh") is None:
+                    QMessageBox.warning(self, "缺少 ssh", "本机未找到 ssh 命令，请先安装 openssh-client。")
+                    return False
+                if not self.common_robot_ssh_user.text().strip():
+                    QMessageBox.warning(self, "缺少 SSH 用户", "请填写远端 SSH 用户，例如 agi。")
+                    return False
+                if not self.common_robot_ssh_host.text().strip():
+                    QMessageBox.warning(self, "缺少 SSH 主机", "请填写远端 SSH 主机，例如 10.42.0.60。")
+                    return False
+                if not self.common_robot_setup_script.text().strip():
+                    QMessageBox.warning(self, "缺少 setup.bash", "请填写远端 gateway_app setup.bash 路径。")
+                    return False
+                if not self.common_robot_gateway_command.text().strip():
+                    QMessageBox.warning(self, "缺少网关命令", "请填写远端 hal_driver 启动命令，例如 hal_driver a2406。")
+                    return False
+                if not self.common_robot_controller_dir.text().strip():
+                    QMessageBox.warning(self, "缺少控制器目录", "请填写远端 robot_controller 所在目录。")
+                    return False
+                if not self.common_robot_controller_command.text().strip():
+                    QMessageBox.warning(self, "缺少控制器命令", "请填写远端 robot_controller 启动命令。")
+                    return False
+                self.build_common_command()
+                answer = QMessageBox.question(
+                    self,
+                    "确认启动机器人",
+                    "即将通过 SSH 按顺序启动远端网关和机器人控制器。\n\n"
+                    "请确认急停可用、供电正常、机器人工作空间已清空，然后再继续。",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                return answer == QMessageBox.StandardButton.Yes
+            if command_type == "remote_camera_start":
+                if shutil.which("ssh") is None:
+                    QMessageBox.warning(self, "缺少 ssh", "本机未找到 ssh 命令，请先安装 openssh-client。")
+                    return False
+                if not self.common_camera_ssh_user.text().strip():
+                    QMessageBox.warning(self, "缺少 SSH 用户", "请填写远端 SSH 用户，例如 agi。")
+                    return False
+                if not self.common_camera_ssh_host.text().strip():
+                    QMessageBox.warning(self, "缺少 SSH 主机", "请填写远端 SSH 主机，例如 10.42.0.60。")
+                    return False
+                if not self.common_camera_command.toPlainText().strip():
+                    QMessageBox.warning(self, "缺少相机命令", "请填写远端 ROS2 相机启动命令。")
+                    return False
+                self.build_common_command()
+                answer = QMessageBox.question(
+                    self,
+                    "确认启动相机",
+                    "即将通过 SSH 在机器人侧启动 Orbbec ROS2 相机节点。\n\n"
+                    "请确认相机已连接、机器人侧 ROS2 环境正确，然后再继续。",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                return answer == QMessageBox.StandardButton.Yes
             if command_type == "replay" and not self.common_replay_repo_id.text().strip():
                 QMessageBox.warning(self, "缺少数据集", "回放 Episode 需要填写数据集 Repo ID。")
                 return False
@@ -5263,9 +5650,18 @@ class WheeledArmGui(QMainWindow):
         if not self.validate_common_form():
             return
         self._save_settings()
+        command_type = COMMON_COMMAND_LABELS[self.common_command.currentText()]
         env_overrides = None
-        if COMMON_COMMAND_LABELS[self.common_command.currentText()] == "pico_usb_service":
+        if command_type == "pico_usb_service":
             env_overrides = {"LD_LIBRARY_PATH": None}
+        elif command_type == "remote_robot_start":
+            env_overrides = {"LD_LIBRARY_PATH": None}
+            if self.common_robot_ssh_password.text():
+                env_overrides["LEROBOT_REMOTE_ROBOT_PASSWORD"] = self.common_robot_ssh_password.text()
+        elif command_type == "remote_camera_start":
+            env_overrides = {"LD_LIBRARY_PATH": None}
+            if self.common_camera_ssh_password.text():
+                env_overrides["LEROBOT_REMOTE_ROBOT_PASSWORD"] = self.common_camera_ssh_password.text()
         if self.common_runner.start(self.build_common_command(), env_overrides=env_overrides):
             self.start_common_btn.setEnabled(False)
             self.stop_common_btn.setEnabled(True)
