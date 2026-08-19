@@ -54,6 +54,7 @@ def wheeled_arm_cameras_config() -> dict[str, CameraConfig]:
             width=640,
             height=480,
             fps=30,
+            warmup_s=3,
         )
     }
 

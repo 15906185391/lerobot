@@ -362,6 +362,19 @@ class TestEncoderDetection:
         cfg = RGBEncoderConfig(vcodec="h264")
         assert cfg.vcodec == "h264"
 
+    def test_libsvtav1_default_falls_back_to_h264_when_unavailable(self, monkeypatch):
+        def fake_detect_available_encoders(self, encoders):
+            encoders = [encoders] if isinstance(encoders, str) else list(encoders)
+            return [encoder for encoder in encoders if encoder == "h264"]
+
+        monkeypatch.setattr(RGBEncoderConfig, "detect_available_encoders", fake_detect_available_encoders)
+        monkeypatch.setattr(RGBEncoderConfig, "validate", lambda self: None)
+
+        cfg = RGBEncoderConfig()
+
+        assert cfg.vcodec == "h264"
+        assert cfg.preset is None
+
     @require_videotoolbox
     def test_auto_picks_videotoolbox_when_available(self):
         """``h264_videotoolbox`` sits at the top of ``HW_VIDEO_CODECS`` so it wins when present."""

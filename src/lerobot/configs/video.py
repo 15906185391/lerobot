@@ -43,6 +43,12 @@ HW_VIDEO_CODECS = [
     "h264_vaapi",  # Linux Intel/AMD
     "h264_qsv",  # Intel Quick Sync
 ]
+SW_VIDEO_CODECS = [
+    "libsvtav1",
+    "h264",
+    "hevc",
+    "libaom-av1",
+]
 VALID_VIDEO_CODECS: frozenset[str] = frozenset(
     {"h264", "hevc", "libsvtav1", "libaom-av1", "auto", *HW_VIDEO_CODECS}
 )
@@ -91,7 +97,7 @@ DEPTH_ENCODER_INFO_FIELD_NAMES: frozenset[str] = frozenset({"depth_min", "depth_
 class VideoEncoderConfig:
     """Video encoder configuration."""
 
-    vcodec: str = "libsvtav1"  # Video codec name. "auto" picks a hardware codec if available, else libsvtav1.
+    vcodec: str = "libsvtav1"  # Video codec name. "auto" picks a hardware codec if available, else a software fallback.
     pix_fmt: str = "yuv420p"  # Pixel format (e.g. yuv420p).
     g: int | None = 2  # GOP size (keyframe interval).
     crf: int | float | None = 30  # Quality level. Lower means better quality and larger files.
@@ -175,8 +181,8 @@ class VideoEncoderConfig:
     def resolve_vcodec(self) -> None:
         """Check ``vcodec`` and, when it is ``"auto"``, pick a concrete encoder.
 
-        For ``"auto"``, the first hardware encoder in the preference list that is available is chosen; if none are available, ``libsvtav1`` is used. If the
-        resolved codec (explicit or after auto-selection) is not available, raises ``ValueError``.
+        For ``"auto"``, the first hardware encoder in the preference list that is available is chosen; if none are available, the first available software
+        encoder from :data:`SW_VIDEO_CODECS` is used. If the resolved codec is not available, raises ``ValueError``.
 
         Stream-derived canonical codec names listed in :data:`VIDEO_CODECS_ALIASES` are
         rewritten to their corresponding encoder name (e.g. ``"av1"`` → ``"libsvtav1"``).
@@ -184,6 +190,7 @@ class VideoEncoderConfig:
         self.vcodec = VIDEO_CODECS_ALIASES.get(self.vcodec, self.vcodec)
         if self.vcodec not in VALID_VIDEO_CODECS:
             raise ValueError(f"Invalid vcodec '{self.vcodec}'. Must be one of: {sorted(VALID_VIDEO_CODECS)}")
+        requested_vcodec = self.vcodec
         if self.vcodec == "auto":
             available = self.detect_available_encoders(HW_VIDEO_CODECS)
             for encoder in HW_VIDEO_CODECS:
@@ -191,12 +198,27 @@ class VideoEncoderConfig:
                     logger.info(f"Auto-selected video codec: {encoder}")
                     self.vcodec = encoder
                     return
-            logger.warning("No hardware encoder available, falling back to software encoder 'libsvtav1'")
-            self.vcodec = "libsvtav1"
+            logger.warning("No hardware encoder available, falling back to a software video encoder.")
+            software_codecs = SW_VIDEO_CODECS
+        elif self.vcodec == "libsvtav1":
+            software_codecs = ["libsvtav1", "h264"]
+        else:
+            software_codecs = [self.vcodec]
 
-        if self.detect_available_encoders(self.vcodec):
-            logger.info(f"Using video codec: {self.vcodec}")
-            return
+        available = self.detect_available_encoders(software_codecs)
+        for encoder in software_codecs:
+            if encoder in available:
+                if encoder != requested_vcodec:
+                    logger.warning(
+                        "Video codec '%s' is unavailable with backend '%s'; falling back to '%s'.",
+                        requested_vcodec,
+                        self.video_backend,
+                        encoder,
+                    )
+                else:
+                    logger.info(f"Using video codec: {self.vcodec}")
+                self.vcodec = encoder
+                return
         raise ValueError(f"Unsupported video codec: {self.vcodec} with video backend {self.video_backend}")
 
     def get_codec_options(

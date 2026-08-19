@@ -17,11 +17,14 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import time
 import webbrowser
 from pathlib import Path
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from .config_wheeled_arm_pico import WheeledArmPicoConfig
 from .ik_utils import (
@@ -156,6 +159,7 @@ class WheeledArmPicoVisualizer:
         self.collision_handle = self.server.scene.add_icosphere(
             "/collision_status", radius=0.04, color=(0, 255, 0)
         )
+        self._missing_urdf_joint_names: set[str] = set()
 
         self.update(
             left_target_pose=configuration.get_transform_frame_to_world("AR5-5_07L-W4C4A2_tcp"),
@@ -187,7 +191,7 @@ class WheeledArmPicoVisualizer:
             return
         self._last_update_t = now
 
-        self.urdf_vis.update_cfg(pinocchio_to_yourdfpy_cfg(self.robot.model, self.configuration.q))
+        self._update_urdf_cfg()
         left_pos, left_wxyz = se3_to_position_wxyz(left_target_pose, self.deps.pin)
         right_pos, right_wxyz = se3_to_position_wxyz(right_target_pose, self.deps.pin)
         self.left_target.position = left_pos
@@ -213,6 +217,25 @@ class WheeledArmPicoVisualizer:
         arm_q = self.configuration.q[self.arm_q_indices]
         self.joint_values_gui.content = format_joint_table(arm_q)
         self._update_joint_plots(arm_q)
+
+    def _update_urdf_cfg(self) -> None:
+        cfg = pinocchio_to_yourdfpy_cfg(self.robot.model, self.configuration.q)
+        urdf = getattr(self.urdf_vis, "_urdf", None)
+        joint_map = getattr(urdf, "_joint_map", None)
+        if isinstance(joint_map, dict):
+            missing = set(cfg) - set(joint_map)
+            if missing:
+                new_missing = missing - self._missing_urdf_joint_names
+                self._missing_urdf_joint_names.update(missing)
+                if new_missing:
+                    logger.warning(
+                        "Skipping %d Pinocchio joint(s) absent from the yourdfpy URDF map: %s",
+                        len(new_missing),
+                        sorted(new_missing),
+                    )
+                cfg = {joint: value for joint, value in cfg.items() if joint in joint_map}
+
+        self.urdf_vis.update_cfg(cfg)
 
     def _update_joint_plots(self, arm_q: np.ndarray) -> None:
         self._joint_time_history[:-1] = self._joint_time_history[1:]

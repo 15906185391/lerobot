@@ -155,6 +155,30 @@ def test_find_cameras(monkeypatch):
     ]
 
 
+def test_find_device_accepts_compatible_orbbec_name(monkeypatch):
+    class FakeDeviceInfoLg(FakeDeviceInfo):
+        def get_serial_number(self):
+            return "CPBHA530004E"
+
+        def get_name(self):
+            return "Orbbec Gemini 335Lg"
+
+    class FakeDeviceLg(FakeDevice):
+        def get_device_info(self):
+            return FakeDeviceInfoLg()
+
+    device = FakeDeviceLg()
+    context = MagicMock()
+    context.query_devices.return_value = FakeDeviceList([device])
+    monkeypatch.setattr(camera_orbbec, "ob", fake_ob_sdk(context=context))
+
+    camera = OrbbecCamera(OrbbecCameraConfig(serial_number_or_name="Orbbec Gemini 335"))
+
+    assert camera._find_device() is device
+    assert camera.serial_number == "CPBHA530004E"
+    assert camera.device_name == "Orbbec Gemini 335Lg"
+
+
 def test_connect_read_and_disconnect(monkeypatch):
     frames, expected = make_rgb_frames()
     pipeline = MagicMock()
@@ -215,3 +239,12 @@ def test_read_before_connect():
 
     with pytest.raises(DeviceNotConnectedError):
         camera.read()
+
+
+def test_read_latest_waits_for_first_background_frame(monkeypatch):
+    expected = np.zeros((3, 4, 3), dtype=np.uint8)
+    camera = OrbbecCamera(OrbbecCameraConfig(serial_number_or_name="SN123"))
+    camera._is_connected = True
+    monkeypatch.setattr(camera, "async_read", lambda timeout_ms: expected)
+
+    np.testing.assert_array_equal(camera.read_latest(), expected)

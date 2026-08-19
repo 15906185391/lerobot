@@ -61,7 +61,9 @@ def _require_orbbec_sdk() -> None:
     if ob is None:
         raise ImportError(
             f"'{PACKAGE_NAME}' is installed but could not be imported as '{IMPORT_NAME}'. "
-            "Check that the Orbbec SDK native libraries match the installed Python wheel."
+            "Check that the Orbbec SDK native libraries match the installed Python wheel. "
+            "If the import works with `env -u LD_LIBRARY_PATH`, remove older Orbbec SDK paths "
+            "from LD_LIBRARY_PATH or put the matching wheel libraries first."
         ) from _pyorbbecsdk_import_error
 
 
@@ -279,6 +281,33 @@ class OrbbecCamera(Camera):
                 f"Please use a unique serial number instead. Found SNs: {serial_numbers}"
             )
 
+        compatible_named_devices = []
+        for device in devices:
+            metadata = self._device_metadata(device)
+            name = str(metadata.get("name"))
+            if name.startswith(self.serial_number_or_name):
+                compatible_named_devices.append((device, metadata))
+
+        if len(compatible_named_devices) == 1:
+            device, metadata = compatible_named_devices[0]
+            self.serial_number = str(metadata.get("id"))
+            self.device_name = str(metadata.get("name"))
+            logger.warning(
+                "Using Orbbec camera '%s' as a compatible match for requested name '%s'. "
+                "Use serial number '%s' for an exact, stable match.",
+                self.device_name,
+                self.serial_number_or_name,
+                self.serial_number,
+            )
+            return device
+
+        if len(compatible_named_devices) > 1:
+            serial_numbers = [str(metadata.get("id")) for _, metadata in compatible_named_devices]
+            raise ValueError(
+                f"Multiple Orbbec cameras have names compatible with '{self.serial_number_or_name}'. "
+                f"Please use a unique serial number instead. Found SNs: {serial_numbers}"
+            )
+
         available = [
             {
                 "serial_number": metadata.get("id"),
@@ -336,7 +365,10 @@ class OrbbecCamera(Camera):
                 start_time = time.time()
                 while time.time() - start_time < self.warmup_s:
                     try:
-                        self.read(timeout_ms=1000)
+                        frame = self.read(timeout_ms=1000)
+                        with self.frame_lock:
+                            self.latest_frame = frame
+                            self.latest_timestamp = time.perf_counter()
                         warmed_up = True
                     except RuntimeError as e:
                         last_error = e
@@ -664,11 +696,13 @@ class OrbbecCamera(Camera):
 
     @check_if_not_connected
     def read_latest(self, max_age_ms: int = 500) -> NDArray[Any]:
-        """Return the most recent color frame captured immediately (peeking).
+        """Return the most recent color frame, waiting briefly if the cache is not ready.
 
-        This method is non-blocking and returns whatever is currently in the memory
-        buffer. The frame may be stale, meaning it could have been captured a while
-        ago (hanging camera scenario, e.g.).
+        This method usually returns the latest frame already captured by the background
+        thread. If the cache has no frame yet, or if the frame is too old, it waits for
+        one fresh background frame before failing. This avoids startup races where the
+        camera pipeline is connected but the async read thread has not populated its
+        first frame yet.
 
         Args:
             max_age_ms: Maximum allowed age of the latest frame in milliseconds.
@@ -689,13 +723,12 @@ class OrbbecCamera(Camera):
             timestamp = self.latest_timestamp
 
         if frame is None or timestamp is None:
-            raise RuntimeError(f"{self} has not captured any frames yet.")
+            return self.async_read(timeout_ms=max(1000, max_age_ms))
 
         age_ms = (time.perf_counter() - timestamp) * 1e3
         if age_ms > max_age_ms:
-            raise TimeoutError(
-                f"{self} latest frame is too old: {age_ms:.1f} ms (max allowed: {max_age_ms} ms)."
-            )
+            self.new_frame_event.clear()
+            return self.async_read(timeout_ms=max(1000, max_age_ms))
 
         return frame
 

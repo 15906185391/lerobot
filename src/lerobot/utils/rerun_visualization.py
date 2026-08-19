@@ -19,6 +19,7 @@ backend at runtime through the dispatch in :mod:`lerobot.utils.visualization_uti
 importing from here directly. Requires the ``viz`` extra (``pip install 'lerobot[viz]'``).
 """
 
+import logging
 import numbers
 import os
 import random
@@ -28,6 +29,8 @@ import time
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 from lerobot.configs import DEPTH_MILLIMETER_UNIT, infer_depth_unit
 from lerobot.lerobot_types import RobotAction, RobotObservation
 
@@ -35,6 +38,7 @@ from .constants import ACTION, ACTION_PREFIX, OBS_PREFIX, OBS_STR
 from .import_utils import require_package
 
 _RERUN_VIEWER_PID: int | None = None
+_RERUN_ENABLED = True
 
 
 def _is_scalar(x):
@@ -58,7 +62,8 @@ def init_rerun(
     require_package("rerun-sdk", extra="viz", import_name="rerun")
     import rerun as rr
 
-    global _RERUN_VIEWER_PID
+    global _RERUN_ENABLED, _RERUN_VIEWER_PID
+    _RERUN_ENABLED = True
     _RERUN_VIEWER_PID = None
     log_rerun_data.blueprint = None  # Reset blueprint cache for new session
 
@@ -76,20 +81,36 @@ def init_rerun(
         # cleans up the spawned Rerun process and frees the port for the next recording.
         detach_process = _env_bool("LEROBOT_RERUN_DETACH_PROCESS", False)
         spawn_viewer = _get_rerun_spawn_viewer()
-        if spawn_viewer is None:
-            rr.spawn(port=rerun_port, memory_limit=memory_limit)
-            return
+        try:
+            if spawn_viewer is None:
+                rr.spawn(port=rerun_port, memory_limit=memory_limit)
+                return
 
-        _RERUN_VIEWER_PID = spawn_viewer(
-            port=rerun_port,
-            memory_limit=memory_limit,
-            detach_process=detach_process,
-        )
-        rr.connect_grpc(f"rerun+http://127.0.0.1:{rerun_port}/proxy")
+            _RERUN_VIEWER_PID = spawn_viewer(
+                port=rerun_port,
+                memory_limit=memory_limit,
+                detach_process=detach_process,
+            )
+            if _viewer_exited_during_startup(_RERUN_VIEWER_PID):
+                _RERUN_ENABLED = False
+                logger.warning(
+                    "Rerun viewer exited during startup; live Rerun visualization is disabled for this run. "
+                    "Use --display_mode=foxglove or --display_data=false on systems without a compatible GPU/driver."
+                )
+                return
+            rr.connect_grpc(f"rerun+http://127.0.0.1:{rerun_port}/proxy")
+        except Exception as exc:
+            _RERUN_ENABLED = False
+            _terminate_spawned_rerun_viewer()
+            logger.warning("Rerun visualization is disabled because startup failed: %s", exc)
 
 
 def shutdown_rerun() -> None:
     """Shuts down the Rerun SDK gracefully."""
+
+    if not _RERUN_ENABLED:
+        _terminate_spawned_rerun_viewer()
+        return
 
     require_package("rerun-sdk", extra="viz", import_name="rerun")
     import rerun as rr
@@ -107,6 +128,25 @@ def _get_rerun_spawn_viewer():
     except Exception:
         return None
     return getattr(_spawn, "_spawn_viewer", None)
+
+
+def _viewer_exited_during_startup(pid: int | None) -> bool:
+    if pid is None:
+        return False
+
+    timeout_s = float(os.getenv("LEROBOT_RERUN_STARTUP_TIMEOUT", "1.0"))
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+    while time.monotonic() < deadline:
+        try:
+            waited_pid, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return False
+        if waited_pid == pid:
+            global _RERUN_VIEWER_PID
+            _RERUN_VIEWER_PID = None
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def _terminate_spawned_rerun_viewer(timeout_s: float = 2.0) -> None:
@@ -238,6 +278,9 @@ def log_rerun_data(
         frame_index: Optional frame index for Rerun's ``frame_index`` timeline.
         timestamp: Optional timestamp in seconds for Rerun's ``timestamp`` timeline.
     """
+
+    if not _RERUN_ENABLED:
+        return
 
     require_package("rerun-sdk", extra="viz", import_name="rerun")
     import rerun as rr

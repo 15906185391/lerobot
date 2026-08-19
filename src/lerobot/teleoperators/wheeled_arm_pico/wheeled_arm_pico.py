@@ -223,24 +223,34 @@ class WheeledArmPico(Teleoperator):
         for task in self._tasks:
             task.set_target_from_configuration(self._configuration)
 
+        WheeledArmPicoVisualizer = None
         if self.config.visualize:
-            from .visualization import WheeledArmPicoVisualizer, require_visualization_dependencies
+            try:
+                from .visualization import WheeledArmPicoVisualizer, require_visualization_dependencies
 
-            require_visualization_dependencies()
+                require_visualization_dependencies()
+            except Exception as exc:
+                logger.warning("Disabling wheeled_arm_pico Viser visualization: %s", exc)
+                self.config.visualize = False
 
         self._solver = select_solver(self._deps.qpsolvers, self.config.solver)
         self._xr_client = MockXrClient() if self.config.mock_xr else self._make_xr_client()
         self._reset_action_filter_from_q(self._configuration.q)
         self._last_action = self._make_action(self._configuration.q, set())
-        if self.config.visualize:
-            self._visualizer = WheeledArmPicoVisualizer(
-                self.config,
-                self._deps,
-                self._robot,
-                self._configuration,
-                self._arm_q_indices,
-                urdf_path,
-            )
+        if self.config.visualize and WheeledArmPicoVisualizer is not None:
+            try:
+                self._visualizer = WheeledArmPicoVisualizer(
+                    self.config,
+                    self._deps,
+                    self._robot,
+                    self._configuration,
+                    self._arm_q_indices,
+                    urdf_path,
+                )
+            except Exception as exc:
+                logger.warning("Disabling wheeled_arm_pico Viser visualization: %s", exc)
+                self._visualizer = None
+                self.config.visualize = False
         self._connected = True
         logger.info("%s connected using IK solver '%s'.", self, self._solver)
 
