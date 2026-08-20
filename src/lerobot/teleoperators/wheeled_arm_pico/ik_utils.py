@@ -95,10 +95,10 @@ def import_runtime_dependencies(require_collision_backend: bool = True) -> Simpl
         from pink import solve_ik
         from pink.barriers import SelfCollisionBarrier
         from pink.exceptions import NoSolutionFound
-        from pink.tasks import FrameTask, PostureTask, Task
+        from pink.tasks import DampingTask, FrameTask, PostureTask, Task
     except ImportError as exc:
         pink = None
-        solve_ik = SelfCollisionBarrier = NoSolutionFound = FrameTask = PostureTask = Task = None
+        solve_ik = SelfCollisionBarrier = NoSolutionFound = DampingTask = FrameTask = PostureTask = Task = None
         missing.append(f"bundled pink IK package: {exc}")
 
     if missing:
@@ -120,6 +120,7 @@ def import_runtime_dependencies(require_collision_backend: bool = True) -> Simpl
         solve_ik=solve_ik,
         SelfCollisionBarrier=SelfCollisionBarrier,
         NoSolutionFound=NoSolutionFound,
+        DampingTask=DampingTask,
         FrameTask=FrameTask,
         PostureTask=PostureTask,
         Task=Task,
@@ -233,14 +234,17 @@ class XrPoseFilter:
 
         filtered = self._pose.copy()
         position_delta = pose[:3] - filtered[:3]
-        if np.linalg.norm(position_delta) > self.position_deadband_m:
-            filtered[:3] = filtered[:3] + self.position_alpha * position_delta
+        position_distance = float(np.linalg.norm(position_delta))
+        if position_distance > self.position_deadband_m:
+            deadband_scale = (position_distance - self.position_deadband_m) / position_distance
+            filtered[:3] = filtered[:3] + self.position_alpha * deadband_scale * position_delta
 
         orientation_delta = _quaternion_angular_distance_rad(filtered[3:], pose[3:])
         if orientation_delta > self.orientation_deadband_rad:
-            filtered[3:] = _slerp_xyzw_quaternion(
-                filtered[3:], pose[3:], self.orientation_alpha
-            )
+            effective_alpha = self.orientation_alpha * (
+                orientation_delta - self.orientation_deadband_rad
+            ) / orientation_delta
+            filtered[3:] = _slerp_xyzw_quaternion(filtered[3:], pose[3:], effective_alpha)
 
         self._pose = filtered
         return filtered.copy()
@@ -689,6 +693,8 @@ def smooth_joint_positions(
         max_step = float(max_velocity_rad_s) * dt
         step = np.clip(step, -max_step, max_step)
 
+    step = alpha * step
+
     if max_acceleration_rad_s2 is not None:
         previous_step = (
             np.zeros_like(step)
@@ -702,5 +708,4 @@ def smooth_joint_positions(
         max_step_delta = float(max_acceleration_rad_s2) * dt * dt
         step = previous_step + np.clip(step - previous_step, -max_step_delta, max_step_delta)
 
-    step = alpha * step
     return current_q + step, step

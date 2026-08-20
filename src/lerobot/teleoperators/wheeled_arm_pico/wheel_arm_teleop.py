@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--activation-threshold", default=0.9, type=float)
     parser.add_argument("--gripper-open-pos", default=0.0, type=float)
     parser.add_argument("--gripper-closed-pos", default=1.0, type=float)
+    parser.add_argument("--gripper-input-deadband", default=0.02, type=float)
+    parser.add_argument("--gripper-position-smoothing-alpha", default=0.35, type=float)
     parser.add_argument("--position-only", action="store_true")
     parser.add_argument("--mock-xr", action="store_true")
     parser.add_argument("--duration-s", default=None, type=float)
@@ -61,6 +63,8 @@ def main() -> None:
         activation_threshold=args.activation_threshold,
         gripper_open_pos=args.gripper_open_pos,
         gripper_closed_pos=args.gripper_closed_pos,
+        gripper_input_deadband=args.gripper_input_deadband,
+        gripper_position_smoothing_alpha=args.gripper_position_smoothing_alpha,
         position_only=args.position_only,
         mock_xr=args.mock_xr,
         solve_frequency_hz=args.solve_frequency_hz,

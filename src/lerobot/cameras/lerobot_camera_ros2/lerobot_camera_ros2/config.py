@@ -21,7 +21,7 @@ class ROS2CameraConfig(CameraConfig):
             namespace="robot",
             fps=30,
             width=640,
-            height=480
+            height=480,
         )
         ```
 
@@ -31,7 +31,9 @@ class ROS2CameraConfig(CameraConfig):
         namespace: ROS 2 namespace (optional, defaults to empty string)
         timeout_ms: Timeout for receiving images in milliseconds
         queue_size: ROS 2 subscription queue size
+        qos_profile: ROS 2 subscription QoS profile ("sensor_data" or "default")
         encoding: Expected image encoding (e.g., "bgr8", "rgb8", "mono8")
+        image_transport: Image transport used by the color topic ("raw" or "compressed")
         warmup_s: Time waiting for a first frame before returning from connect
     """
 
@@ -40,7 +42,9 @@ class ROS2CameraConfig(CameraConfig):
     namespace: str = ""
     timeout_ms: float = 1000.0
     queue_size: int = 10
+    qos_profile: str = "sensor_data"
     encoding: str = "bgr8"
+    image_transport: str = "raw"
     warmup_s: float = 1.0
     depth_topic_name: str | None = None
     depth_encoding: str = "32FC1"

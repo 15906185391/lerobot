@@ -17,7 +17,7 @@
 from dataclasses import dataclass, field
 
 from lerobot.cameras import CameraConfig
-from lerobot.cameras.orbbec.configuration_orbbec import OrbbecCameraConfig
+from lerobot.cameras.lerobot_camera_ros2 import ROS2CameraConfig
 
 from ..config import RobotConfig
 
@@ -44,16 +44,18 @@ WHEELED_ARM_PARTS = (
 WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY = "__wheeled_arm_active_arms"
 
 
-WHEELED_ARM_DEFAULT_ORBBEC_SERIAL_NUMBER_OR_NAME = "Orbbec Gemini 335"
+WHEELED_ARM_DEFAULT_ROS2_CAMERA_TOPIC = "/camera/color/image_raw"
 
 
 def wheeled_arm_cameras_config() -> dict[str, CameraConfig]:
     return {
-        "front": OrbbecCameraConfig(
-            serial_number_or_name=WHEELED_ARM_DEFAULT_ORBBEC_SERIAL_NUMBER_OR_NAME,
+        "front": ROS2CameraConfig(
+            topic_name=WHEELED_ARM_DEFAULT_ROS2_CAMERA_TOPIC,
+            image_transport="compressed",
             width=640,
             height=480,
             fps=30,
+            queue_size=1,
             warmup_s=3,
         )
     }
@@ -62,15 +64,12 @@ def wheeled_arm_cameras_config() -> dict[str, CameraConfig]:
 @RobotConfig.register_subclass("wheeled_arm")
 @dataclass
 class WheeledArmConfig(RobotConfig):
-    cameras: dict[str, CameraConfig] = field(
-        default_factory=wheeled_arm_cameras_config)
+    cameras: dict[str, CameraConfig] = field(default_factory=wheeled_arm_cameras_config)
 
-    joint_names: list[str] = field(
-        default_factory=lambda: WHEELED_ARM_JOINT_NAMES.copy())
+    joint_names: list[str] = field(default_factory=lambda: WHEELED_ARM_JOINT_NAMES.copy())
 
     # Only parts listed here will be commanded through LCM.
-    controlled_parts: list[str] = field(
-        default_factory=lambda: list(WHEELED_ARM_PARTS))
+    controlled_parts: list[str] = field(default_factory=lambda: list(WHEELED_ARM_PARTS))
 
     # Caps target jumps relative to the latest observed joint position. None disables clipping.
     max_relative_target: float | dict[str, float] | None = None
@@ -131,11 +130,9 @@ class WheeledArmConfig(RobotConfig):
                 f"`joint_names` must contain exactly 16 arm/gripper names, got {len(self.joint_names)}."
             )
 
-        duplicate_names = {
-            name for name in self.joint_names if self.joint_names.count(name) > 1}
+        duplicate_names = {name for name in self.joint_names if self.joint_names.count(name) > 1}
         if duplicate_names:
-            raise ValueError(
-                f"`joint_names` must be unique, got duplicates: {sorted(duplicate_names)}.")
+            raise ValueError(f"`joint_names` must be unique, got duplicates: {sorted(duplicate_names)}.")
 
         unknown_parts = set(self.controlled_parts) - set(WHEELED_ARM_PARTS)
         if unknown_parts:

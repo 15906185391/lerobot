@@ -50,19 +50,21 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     urdf_path: Path | None = None
 
     # PICO 手柄位移到末端目标位移的比例。调大更灵敏，调小更稳。
-    scale: float = 0.8
+    scale: float = 1.0
     # grip 输入超过该阈值时，对应手臂才开始跟随手柄。
-    activation_threshold: float = 0.9
+    activation_threshold: float = 0.7
+    # grip 激活迟滞宽度。激活后需要低于 activation_threshold - activation_hysteresis 才释放。
+    activation_hysteresis: float = 0.05
     # True 时只跟踪末端位置，不跟踪手柄姿态；抖动大时可先打开。
     position_only: bool = False
     # PICO 手柄位置输入 EMA 平滑系数，1.0 表示不平滑，越小越稳但延迟越大。
-    pico_position_smoothing_alpha: float = 0.3
+    pico_position_smoothing_alpha: float = 0.8
     # PICO 手柄姿态输入球面插值平滑系数，1.0 表示不平滑。
-    pico_orientation_smoothing_alpha: float = 0.5
+    pico_orientation_smoothing_alpha: float = 0.8
     # PICO 手柄位置死区，单位米。小于该幅度的输入抖动会被忽略。
-    pico_position_deadband_m: float = 0.0015
+    pico_position_deadband_m: float = 0.000
     # PICO 手柄姿态死区，单位弧度。小于该角度的姿态抖动会被忽略。
-    pico_orientation_deadband_rad: float = 0.01
+    pico_orientation_deadband_rad: float = 0.00
 
     # IK 求解频率。通常应与采集 fps 接近，过低会卡顿，过高会增加 CPU/QP 压力。
     solve_frequency_hz: float = 30.0
@@ -73,11 +75,13 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     # solve_ik 全局 Tikhonov damping。调大可改善数值稳定性，但动作会变慢。
     ik_damping: float = 1e-6
     # True 时如果当前 q 超出模型限位会直接报错；False 时只警告并继续。
-    ik_safety_break: bool = False
+    ik_safety_break: bool = True
     # True 时启用模型自带 configuration/velocity limits；调试时可临时关闭。
     enforce_limits: bool = True
     # IK 输出后的关节目标 EMA 平滑系数，1.0 表示不平滑，越小越稳但跟随越慢。
     arm_action_smoothing_alpha: float = 0.3
+    # IK 中的关节速度阻尼项，用来压低高频速度变化，减少顿挫感。
+    damping_task_cost: float = 0.1
     # IK 输出后的关节速度软限幅，单位 rad/s。None 表示不额外限幅。
     max_joint_velocity_rad_s: float | None = 1.5
     # IK 输出后的关节加速度软限幅，单位 rad/s^2。None 表示不额外限幅。
@@ -121,12 +125,16 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     # trigger=0/1 分别映射到 open/closed；实物夹爪单位不同时改这两个值。
     gripper_open_pos: float = 0.0
     gripper_closed_pos: float = 1.0
+    # 夹爪输入的死区，单位是归一化 trigger 比例 [0, 1]。小变化会被忽略。
+    gripper_input_deadband: float = 0.02
+    # 夹爪目标的 EMA 平滑系数。越小越稳但越慢。
+    gripper_position_smoothing_alpha: float = 0.35
 
     # 左右末端 FrameTask 权重。可传标量，也可传 3 维列表分别调 xyz / rpy 三轴。
     position_cost: float | list[float] = 5.0
-    orientation_cost: float | list[float] = 1.0
+    orientation_cost: float | list[float] = 0.5
     # FrameTask 的 Levenberg-Marquardt damping。目标不可达且动作抖时可适当增大。
-    frame_lm_damping: float = 5
+    frame_lm_damping: float = 12
     # FrameTask gain，范围 [0, 1]。调小会低通目标跟踪，动作更慢但更稳。
     task_gain: float = 0.5
     # PostureTask 让手臂保持接近参考姿态，主要用于冗余自由度正则化。
@@ -149,7 +157,7 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     # 在 Rerun 数据窗口中同步显示机器人 IK 骨架、TCP、PICO target 和碰撞状态。
     rerun_visualize_robot: bool = True
     # Rerun 机器人可视化刷新频率。0 表示每帧都更新；降低可减少 Rerun 写入开销。
-    rerun_robot_update_hz: float = 10.0
+    rerun_robot_update_hz: float = 5.0
     # Rerun 机器人可视化实体路径前缀，默认会出现在 Rerun 的 robot 3D view 下。
     rerun_robot_prefix: str = "robot"
     # Rerun 中 TCP/target 坐标轴长度，单位米。
@@ -158,6 +166,9 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     def __post_init__(self) -> None:
         _validate_non_negative("scale", self.scale)
         _validate_gain("activation_threshold", self.activation_threshold)
+        _validate_non_negative("activation_hysteresis", self.activation_hysteresis)
+        if self.activation_hysteresis > self.activation_threshold:
+            raise ValueError("`activation_hysteresis` must be less than or equal to `activation_threshold`.")
         _validate_gain("pico_position_smoothing_alpha", self.pico_position_smoothing_alpha)
         _validate_gain("pico_orientation_smoothing_alpha", self.pico_orientation_smoothing_alpha)
         _validate_non_negative("pico_position_deadband_m", self.pico_position_deadband_m)
@@ -169,6 +180,7 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
             raise ValueError("`solve_frequency_hz` must be positive.")
         _validate_non_negative("ik_damping", self.ik_damping)
         _validate_gain("arm_action_smoothing_alpha", self.arm_action_smoothing_alpha)
+        _validate_non_negative("damping_task_cost", self.damping_task_cost)
         if self.max_joint_velocity_rad_s is not None:
             _validate_non_negative("max_joint_velocity_rad_s", self.max_joint_velocity_rad_s)
         if self.max_joint_acceleration_rad_s2 is not None:
@@ -183,6 +195,8 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
             "self_collision_safe_displacement_gain", self.self_collision_safe_displacement_gain
         )
         _validate_non_negative("collision_warning_distance", self.collision_warning_distance)
+        _validate_non_negative("gripper_input_deadband", self.gripper_input_deadband)
+        _validate_gain("gripper_position_smoothing_alpha", self.gripper_position_smoothing_alpha)
         _validate_cost("position_cost", self.position_cost, expected_len=3)
         _validate_cost("orientation_cost", self.orientation_cost, expected_len=3)
         _validate_non_negative("frame_lm_damping", self.frame_lm_damping)

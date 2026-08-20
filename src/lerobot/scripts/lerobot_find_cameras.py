@@ -29,6 +29,7 @@ lerobot-find-cameras
 
 import argparse
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,9 @@ from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
 from lerobot.utils.utils import init_logging
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_ROS2_CAMERA_TOPIC = "/camera/color/image_raw"
+DEFAULT_ROS2_IMAGE_TRANSPORT = "compressed"
 
 
 def find_all_opencv_cameras() -> list[dict[str, Any]]:
@@ -110,6 +114,21 @@ def find_all_orbbec_cameras() -> list[dict[str, Any]]:
     return all_orbbec_cameras_info
 
 
+def _default_ros2_camera_candidate() -> dict[str, Any]:
+    topic_name = os.getenv("LEROBOT_ROS2_CAMERA_TOPIC", DEFAULT_ROS2_CAMERA_TOPIC)
+    image_transport = os.getenv("LEROBOT_ROS2_IMAGE_TRANSPORT", DEFAULT_ROS2_IMAGE_TRANSPORT)
+    subscription_topic = topic_name if image_transport == "raw" else topic_name.removesuffix("/compressed")
+    topic_parts = subscription_topic.split("/")
+    return {
+        "id": topic_name if image_transport == "raw" else f"{subscription_topic}/compressed",
+        "topic_name": subscription_topic,
+        "image_transport": image_transport,
+        "type": "ROS2",
+        "description": f"Default ROS 2 {image_transport} image topic: {subscription_topic}",
+        "namespace": topic_parts[1] if len(topic_parts) > 2 else "",
+    }
+
+
 def find_all_ros2_cameras() -> list[dict[str, Any]]:
     """
     Finds all available ROS 2 image topics.
@@ -124,6 +143,14 @@ def find_all_ros2_cameras() -> list[dict[str, Any]]:
         for cam_info in ros2_cameras:
             all_ros2_cameras_info.append(cam_info)
         logger.info(f"Found {len(ros2_cameras)} ROS 2 image topics.")
+        if not all_ros2_cameras_info:
+            fallback = _default_ros2_camera_candidate()
+            logger.warning(
+                "No ROS 2 image topics were discovered from the graph; trying default topic %s with %s transport.",
+                fallback["topic_name"],
+                fallback["image_transport"],
+            )
+            all_ros2_cameras_info.append(fallback)
     except ImportError as e:
         logger.warning(f"Skipping ROS 2 camera search: {e}")
     except Exception as e:
@@ -234,6 +261,7 @@ def create_camera_instance(cam_meta: dict[str, Any], *, warmup_s: int = 1) -> di
         elif cam_type == "ROS2":
             ros2_config = ROS2CameraConfig(
                 topic_name=str(cam_meta.get("topic_name", cam_id)),
+                image_transport=str(cam_meta.get("image_transport", "raw")),
                 warmup_s=warmup_s,
             )
             instance = ROS2Camera(ros2_config)

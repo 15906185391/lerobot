@@ -1,0 +1,5 @@
+[08/18 22:48:37.879430][info][10168][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/18 22:48:37.880756][info][10168][LinuxUsbPal.cpp:334] Create PollingDeviceWatcher!
+[08/18 22:48:37.880765][info][10168][DeviceManager.cpp:25] Current found device(s): (0)
+[08/18 22:48:37.880767][info][10168][DeviceManager.cpp:463] Enable net device enumeration: true
+[08/18 22:48:38.891297][info][10168][DeviceManager.cpp:25] Current device(s) list: (0)

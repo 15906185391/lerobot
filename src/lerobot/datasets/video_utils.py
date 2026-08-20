@@ -1134,6 +1134,20 @@ with warnings.catch_warnings():
     register_feature(VideoFrame, "VideoFrame")
 
 
+def _codec_name(stream: Any) -> str | None:
+    codec = getattr(stream, "codec", None)
+    name = getattr(codec, "canonical_name", None) or getattr(codec, "name", None)
+    if name is not None:
+        return str(name)
+
+    codec_context = getattr(stream, "codec_context", None)
+    name = getattr(codec_context, "name", None)
+    if name is not None:
+        return str(name)
+
+    return None
+
+
 def get_audio_info(video_path: Path | str) -> dict:
     # Set logging level
     logging.getLogger("libav").setLevel(av.logging.WARNING)
@@ -1149,7 +1163,7 @@ def get_audio_info(video_path: Path | str) -> dict:
             return {"has_audio": False}
 
         audio_info["audio.channels"] = audio_stream.channels
-        audio_info["audio.codec"] = audio_stream.codec.canonical_name
+        audio_info["audio.codec"] = _codec_name(audio_stream)
         # In an ideal loseless case : bit depth x sample rate x channels = bit rate.
         # In an actual compressed case, the bit rate is set according to the compression level : the lower the bit rate, the more compression is applied.
         audio_info["audio.bit_rate"] = audio_stream.bit_rate
@@ -1200,7 +1214,7 @@ def get_video_info(
 
         video_info["video.height"] = video_stream.height
         video_info["video.width"] = video_stream.width
-        video_info["video.codec"] = video_stream.codec.canonical_name
+        video_info["video.codec"] = _codec_name(video_stream)
         video_info["video.pix_fmt"] = video_stream.pix_fmt
 
         # Calculate fps from r_frame_rate

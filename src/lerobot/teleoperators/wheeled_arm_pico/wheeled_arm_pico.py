@@ -106,11 +106,14 @@ class WheeledArmPico(Teleoperator):
         )
         self._left_mapper = RelativeTeleopTarget()
         self._right_mapper = RelativeTeleopTarget()
+        self._left_active = False
+        self._right_active = False
         self._last_reset_button = False
         self._last_recording_control_buttons: dict[str, bool] = {}
         self._gripper_positions = {
             f"{name}.pos": self.config.gripper_open_pos for name in self.gripper_names
         }
+        self._filtered_gripper_positions = self._gripper_positions.copy()
         self._last_action = dict.fromkeys(self.action_features, 0.0)
 
     @cached_property
@@ -214,13 +217,14 @@ class WheeledArmPico(Teleoperator):
             lm_damping=self.config.frame_lm_damping,
             gain=self.config.task_gain,
         )
+        damping_task = self._deps.DampingTask(cost=self.config.damping_task_cost)
         posture_task = self._deps.PostureTask(
             cost=self.config.posture_cost,
             lm_damping=self.config.posture_lm_damping,
             gain=self.config.posture_gain,
         )
-        self._tasks = [left_task, right_task, posture_task]
-        for task in self._tasks:
+        self._tasks = [left_task, right_task, damping_task, posture_task]
+        for task in (left_task, right_task, posture_task):
             task.set_target_from_configuration(self._configuration)
 
         WheeledArmPicoVisualizer = None
@@ -346,7 +350,9 @@ class WheeledArmPico(Teleoperator):
         for gripper_name in self.gripper_names:
             key = f"{gripper_name}.pos"
             if key in feedback:
-                self._gripper_positions[key] = float(feedback[key])
+                value = float(feedback[key])
+                self._gripper_positions[key] = value
+                self._filtered_gripper_positions[key] = value
 
         arm_q = arm_q_from_feedback(feedback, self.arm_joint_names)
         if arm_q is None:
@@ -395,7 +401,7 @@ class WheeledArmPico(Teleoperator):
         assert self._q_ref is not None
 
         pin = self._deps.pin
-        left_task, right_task, posture_task = self._tasks
+        left_task, right_task, damping_task, posture_task = self._tasks
         current_left = self._configuration.get_transform_frame_to_world(LEFT_TCP).copy()
         current_right = self._configuration.get_transform_frame_to_world(RIGHT_TCP).copy()
         left_target_pose = current_left
@@ -416,8 +422,8 @@ class WheeledArmPico(Teleoperator):
 
             left_grip = float(self._xr_client.get_key_value_by_name(self.config.left_grip_name))
             right_grip = float(self._xr_client.get_key_value_by_name(self.config.right_grip_name))
-            left_active = left_grip >= self.config.activation_threshold
-            right_active = right_grip >= self.config.activation_threshold
+            left_active = self._update_activation_state("left", left_grip)
+            right_active = self._update_activation_state("right", right_grip)
             left_gripper_value = float(
                 self._xr_client.get_key_value_by_name(self.config.left_gripper_input_name)
             )
@@ -527,6 +533,7 @@ class WheeledArmPico(Teleoperator):
             active_tasks.append(left_task)
         if right_active:
             active_tasks.append(right_task)
+        active_tasks.append(damping_task)
         active_tasks.append(posture_task)
 
         try:
@@ -567,6 +574,23 @@ class WheeledArmPico(Teleoperator):
             min_barrier,
         )
         return self._last_action.copy()
+
+    def _update_activation_state(self, side: str, grip: float) -> bool:
+        if side == "left":
+            was_active = self._left_active
+        elif side == "right":
+            was_active = self._right_active
+        else:
+            raise ValueError(f"Unknown arm side: {side}")
+
+        release_threshold = self.config.activation_threshold - self.config.activation_hysteresis
+        is_active = grip >= (release_threshold if was_active else self.config.activation_threshold)
+
+        if side == "left":
+            self._left_active = is_active
+        else:
+            self._right_active = is_active
+        return is_active
 
     def _make_action(self, q: np.ndarray, active_arms: set[str] | None = None) -> RobotAction:
         action = arm_action_from_q(q, self._arm_q_indices, self.arm_joint_names)
@@ -647,10 +671,19 @@ class WheeledArmPico(Teleoperator):
             if raw_value is None:
                 continue
             ratio = float(np.clip(raw_value, 0.0, 1.0))
-            self._gripper_positions[key] = (
+            target_pos = (
                 self.config.gripper_open_pos
                 + ratio * (self.config.gripper_closed_pos - self.config.gripper_open_pos)
             )
+            current_pos = self._filtered_gripper_positions[key]
+            if abs(target_pos - current_pos) <= self.config.gripper_input_deadband:
+                filtered_pos = current_pos
+            else:
+                filtered_pos = current_pos + self.config.gripper_position_smoothing_alpha * (
+                    target_pos - current_pos
+                )
+            self._filtered_gripper_positions[key] = filtered_pos
+            self._gripper_positions[key] = filtered_pos
 
     def _update_visualization(
         self,

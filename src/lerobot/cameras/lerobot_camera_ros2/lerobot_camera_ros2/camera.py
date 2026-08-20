@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
+
 from lerobot.cameras.camera import Camera
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
@@ -22,17 +23,23 @@ if TYPE_CHECKING:
     from cv_bridge import CvBridge
     from rclpy.executors import SingleThreadedExecutor
     from rclpy.node import Node
-    from sensor_msgs.msg import Image
+    from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
+    from sensor_msgs.msg import CompressedImage, Image
 else:
     rclpy = None
     CvBridge = Any
     SingleThreadedExecutor = Any
     Node = Any
+    QoSHistoryPolicy = Any
+    QoSProfile = Any
+    QoSReliabilityPolicy = Any
     Image = Any
+    CompressedImage = Any
 
 
 def _require_ros2_dependencies() -> None:
-    global rclpy, CvBridge, SingleThreadedExecutor, Node, Image
+    global rclpy, CvBridge, SingleThreadedExecutor, Node
+    global QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy, Image, CompressedImage
 
     if rclpy is not None:
         return
@@ -41,7 +48,12 @@ def _require_ros2_dependencies() -> None:
         import rclpy as _rclpy
         from rclpy.executors import SingleThreadedExecutor as _SingleThreadedExecutor
         from rclpy.node import Node as _Node
-        from sensor_msgs.msg import Image as _Image
+        from rclpy.qos import (
+            QoSHistoryPolicy as _QoSHistoryPolicy,
+            QoSProfile as _QoSProfile,
+            QoSReliabilityPolicy as _QoSReliabilityPolicy,
+        )
+        from sensor_msgs.msg import CompressedImage as _CompressedImage, Image as _Image
     except AttributeError as exc:
         if "_ARRAY_API" in str(exc):
             raise ImportError(
@@ -57,15 +69,16 @@ def _require_ros2_dependencies() -> None:
             "available in the current Python environment."
         ) from exc
 
-    _CvBridge = None
+    _cv_bridge_cls = None
     numpy_major = int(np.__version__.split(".", maxsplit=1)[0])
-    should_try_cv_bridge = (
-        os.getenv("LEROBOT_ROS2_DISABLE_CV_BRIDGE", "0") != "1"
-        and (numpy_major < 2 or os.getenv("LEROBOT_ROS2_FORCE_CV_BRIDGE", "0") == "1")
+    should_try_cv_bridge = os.getenv("LEROBOT_ROS2_DISABLE_CV_BRIDGE", "0") != "1" and (
+        numpy_major < 2 or os.getenv("LEROBOT_ROS2_FORCE_CV_BRIDGE", "0") == "1"
     )
     if should_try_cv_bridge:
         try:
-            from cv_bridge import CvBridge as _CvBridge
+            import cv_bridge as _cv_bridge
+
+            _cv_bridge_cls = _cv_bridge.CvBridge
         except AttributeError as exc:
             if "_ARRAY_API" not in str(exc):
                 raise
@@ -83,10 +96,14 @@ def _require_ros2_dependencies() -> None:
         )
 
     rclpy = _rclpy
-    CvBridge = _CvBridge
+    CvBridge = _cv_bridge_cls
     SingleThreadedExecutor = _SingleThreadedExecutor
     Node = _Node
+    QoSHistoryPolicy = _QoSHistoryPolicy
+    QoSProfile = _QoSProfile
+    QoSReliabilityPolicy = _QoSReliabilityPolicy
     Image = _Image
+    CompressedImage = _CompressedImage
 
 
 class ROS2Camera(Camera):
@@ -100,12 +117,7 @@ class ROS2Camera(Camera):
         from lerobot_ros2_devices.cameras import ROS2Camera, ROS2CameraConfig
 
         # Create configuration
-        config = ROS2CameraConfig(
-            topic_name="/camera/color/image_raw",
-            fps=30,
-            width=640,
-            height=480
-        )
+        config = ROS2CameraConfig(topic_name="/camera/color/image_raw", fps=30, width=640, height=480)
 
         # Create and connect camera
         camera = ROS2Camera(config)
@@ -134,7 +146,17 @@ class ROS2Camera(Camera):
         self.namespace = config.namespace
         self.timeout_ms = config.timeout_ms
         self.queue_size = config.queue_size
+        self.qos_profile = (config.qos_profile or "sensor_data").lower().strip()
+        if self.qos_profile not in {"sensor_data", "default"}:
+            raise ValueError(
+                f"ROS2Camera qos_profile must be 'sensor_data' or 'default', got {config.qos_profile!r}"
+            )
         self.encoding = config.encoding
+        self.image_transport = (config.image_transport or "raw").lower().strip()
+        if self.image_transport not in {"raw", "compressed"}:
+            raise ValueError(
+                f"ROS2Camera image_transport must be 'raw' or 'compressed', got {config.image_transport!r}"
+            )
         self.warmup_s = config.warmup_s
         self.depth_topic_name = config.depth_topic_name
         self.depth_encoding = config.depth_encoding
@@ -172,7 +194,7 @@ class ROS2Camera(Camera):
         self._connected = False
 
     def __str__(self) -> str:
-        return f"ROS2Camera(topic={self.topic_name}, node={self.node_name})"
+        return f"ROS2Camera(topic={self.topic_name}, transport={self.image_transport}, node={self.node_name})"
 
     @property
     def is_connected(self) -> bool:
@@ -196,10 +218,10 @@ class ROS2Camera(Camera):
             return None
 
     @staticmethod
-    def find_cameras() -> list[dict[str, Any]]:
+    def find_cameras(discovery_timeout_s: float = 3.0) -> list[dict[str, Any]]:
         """Discover available ROS 2 camera topics.
 
-        This method scans the ROS 2 system for available image topics.
+        This method scans the ROS 2 system for available raw and compressed image topics.
 
         Returns:
             List[Dict[str, Any]]: List of dictionaries containing camera information.
@@ -213,31 +235,64 @@ class ROS2Camera(Camera):
             if not rclpy.ok():
                 rclpy.init()
 
-            # Create temporary node for discovery
             temp_node = Node("ros2_camera_discovery")
+            try:
+                deadline_s = time.monotonic() + max(0.0, discovery_timeout_s)
+                while True:
+                    cameras = ROS2Camera._cameras_from_topic_names_and_types(
+                        temp_node.get_topic_names_and_types()
+                    )
+                    if cameras or time.monotonic() >= deadline_s:
+                        break
+                    rclpy.spin_once(temp_node, timeout_sec=0.1)
+            finally:
+                temp_node.destroy_node()
 
-            # Get all topic names and types
-            topic_names_and_types = temp_node.get_topic_names_and_types()
+        except Exception as e:
+            logger.warning(f"Failed to discover ROS 2 cameras: {e}")
 
-            # Filter for image topics
-            for topic_name, topic_types in topic_names_and_types:
-                if "sensor_msgs/msg/Image" in topic_types:
+        return cameras
+
+    @staticmethod
+    def _cameras_from_topic_names_and_types(
+        topic_names_and_types: list[tuple[str, list[str]]],
+    ) -> list[dict[str, Any]]:
+        cameras: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for topic_name, topic_types in topic_names_and_types:
+            if "sensor_msgs/msg/Image" in topic_types:
+                key = (topic_name, "raw")
+                if key not in seen:
                     topic_parts = topic_name.split("/")
                     cameras.append(
                         {
                             "id": topic_name,
                             "topic_name": topic_name,
+                            "image_transport": "raw",
                             "type": "ROS2",
                             "description": f"ROS 2 Image topic: {topic_name}",
                             "namespace": topic_parts[1] if len(topic_parts) > 2 else "",
                         }
                     )
+                    seen.add(key)
 
-            # Clean up
-            temp_node.destroy_node()
-
-        except Exception as e:
-            logger.warning(f"Failed to discover ROS 2 cameras: {e}")
+            if "sensor_msgs/msg/CompressedImage" in topic_types:
+                base_topic_name = topic_name.removesuffix("/compressed")
+                key = (base_topic_name, "compressed")
+                if key not in seen:
+                    topic_parts = base_topic_name.split("/")
+                    cameras.append(
+                        {
+                            "id": topic_name,
+                            "topic_name": base_topic_name,
+                            "image_transport": "compressed",
+                            "type": "ROS2",
+                            "description": f"ROS 2 CompressedImage topic: {topic_name}",
+                            "namespace": topic_parts[1] if len(topic_parts) > 2 else "",
+                        }
+                    )
+                    seen.add(key)
 
         return cameras
 
@@ -261,25 +316,32 @@ class ROS2Camera(Camera):
             self.ros_node = Node(self.node_name, namespace=self.namespace)
 
             # Create image subscription
+            image_topic_name = self._image_subscription_topic_name()
+            image_msg_type = CompressedImage if self.image_transport == "compressed" else Image
+            image_qos = self._subscription_qos()
+            image_callback = (
+                self._compressed_image_callback
+                if self.image_transport == "compressed"
+                else self._image_callback
+            )
             self.image_subscription = self.ros_node.create_subscription(
-                Image,
-                self.topic_name,
-                self._image_callback,
-                self.queue_size,
+                image_msg_type,
+                image_topic_name,
+                image_callback,
+                image_qos,
             )
             if self.depth_topic_name:
                 self.depth_subscription = self.ros_node.create_subscription(
                     Image,
                     self.depth_topic_name,
                     self._depth_callback,
-                    self.queue_size,
+                    image_qos,
                 )
 
             # Start executor in separate thread
             self.executor = SingleThreadedExecutor()
             self.executor.add_node(self.ros_node)
-            self.executor_thread = threading.Thread(
-                target=self.executor.spin, daemon=True)
+            self.executor_thread = threading.Thread(target=self.executor.spin, daemon=True)
             self.executor_thread.start()
             self._connected = True
 
@@ -291,15 +353,52 @@ class ROS2Camera(Camera):
             if warmup:
                 logger.info(f"Warming up {self}...")
                 if not self.image_received_event.wait(timeout=max(self.warmup_s, self.timeout_ms / 1000.0)):
-                    logger.warning(
-                        f"No image received from {self.topic_name} during warmup")
+                    logger.warning(f"No image received from {self.topic_name} during warmup")
 
-            logger.info(f"Connected to ROS 2 camera: {self.topic_name}")
+            logger.info("Connected to ROS 2 camera: %s", image_topic_name)
 
         except Exception as e:
             logger.error(f"Failed to connect to ROS 2 camera: {e}")
             self.disconnect()
             raise
+
+    def _subscription_qos(self) -> QoSProfile | int:
+        if self.qos_profile == "default":
+            return self.queue_size
+        return QoSProfile(
+            depth=self.queue_size,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+        )
+
+    def _image_subscription_topic_name(self) -> str:
+        if self.image_transport != "compressed":
+            return self.topic_name
+        if self.topic_name.endswith("/compressed"):
+            return self.topic_name
+        return f"{self.topic_name}/compressed"
+
+    def _update_image_dimensions(self, actual_width: int, actual_height: int) -> None:
+        if self._dimensions_initialized:
+            return
+
+        # Set camera dimensions from first received image
+        if self.width is None or self.height is None:
+            self.width = actual_width
+            self.height = actual_height
+            logger.info("Auto-detected image dimensions: %sx%s", actual_width, actual_height)
+        elif self.width != actual_width or self.height != actual_height:
+            logger.warning(
+                "Image dimensions mismatch: configured %sx%s, actual %sx%s. Updating to actual dimensions.",
+                self.width,
+                self.height,
+                actual_width,
+                actual_height,
+            )
+            self.width = actual_width
+            self.height = actual_height
+
+        self._dimensions_initialized = True
 
     def _image_callback(self, msg: Image) -> None:
         """ROS 2 image callback function.
@@ -308,26 +407,7 @@ class ROS2Camera(Camera):
             msg: ROS 2 Image message
         """
         try:
-            # Extract actual image dimensions from the message (only on first image)
-            if not self._dimensions_initialized:
-                actual_width = msg.width
-                actual_height = msg.height
-
-                # Set camera dimensions from first received image
-                if self.width is None or self.height is None:
-                    self.width = actual_width
-                    self.height = actual_height
-                    logger.info(
-                        f"Auto-detected image dimensions: {actual_width}x{actual_height}")
-                elif self.width != actual_width or self.height != actual_height:
-                    logger.warning(
-                        f"Image dimensions mismatch: configured {self.width}x{self.height}, "
-                        f"actual {actual_width}x{actual_height}. Updating to actual dimensions."
-                    )
-                    self.width = actual_width
-                    self.height = actual_height
-
-                self._dimensions_initialized = True
+            self._update_image_dimensions(int(msg.width), int(msg.height))
 
             # Convert ROS image message to OpenCV format
             cv_image = None
@@ -337,8 +417,7 @@ class ROS2Camera(Camera):
                 except Exception as e:
                     now = time.monotonic()
                     if (now - self._last_cv_bridge_error_log_ts) >= self._cv_bridge_error_log_interval_s:
-                        logger.error(
-                            f"Failed to convert ROS image message: {e}")
+                        logger.error(f"Failed to convert ROS image message: {e}")
                         logger.warning(
                             "Disabling cv_bridge for camera '%s' and falling back to manual converter.",
                             self.topic_name,
@@ -375,6 +454,28 @@ class ROS2Camera(Camera):
         except Exception as e:
             logger.error(f"Error processing image: {e}")
 
+    def _compressed_image_callback(self, msg: CompressedImage) -> None:
+        """ROS 2 compressed image callback function."""
+        try:
+            encoded = np.frombuffer(msg.data, dtype=np.uint8)
+            bgr_image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+            if bgr_image is None:
+                logger.error("Failed to decode compressed ROS image from %s", self.topic_name)
+                return
+
+            actual_height, actual_width = bgr_image.shape[:2]
+            self._update_image_dimensions(int(actual_width), int(actual_height))
+
+            rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+
+            with self.image_lock:
+                self.latest_image = rgb_image.copy()
+                self.latest_image_timestamp = time.perf_counter()
+                self.image_received_event.set()
+
+        except Exception as e:
+            logger.error(f"Error processing compressed image: {e}")
+
     def _manual_convert_image_msg(self, msg: Image, encoding: str) -> np.ndarray | None:
         """Fallback conversion path that avoids cv_bridge."""
         try:
@@ -382,8 +483,7 @@ class ROS2Camera(Camera):
             dst = (encoding or src or "bgr8").lower()
             h, w = int(msg.height), int(msg.width)
             if h <= 0 or w <= 0:
-                logger.error(
-                    "Manual conversion got invalid image size: %sx%s", w, h)
+                logger.error("Manual conversion got invalid image size: %sx%s", w, h)
                 return None
 
             raw = np.frombuffer(msg.data, dtype=np.uint8)
@@ -411,10 +511,7 @@ class ROS2Camera(Camera):
                     )
                     return None
                 img = raw[:expected].reshape(h, w, 4)
-                if src == "rgba8":
-                    rgb = img[..., :3]
-                else:
-                    rgb = img[..., [2, 1, 0]]
+                rgb = img[..., :3] if src == "rgba8" else img[..., [2, 1, 0]]
                 if dst == "bgr8":
                     return rgb[..., ::-1].copy()
                 return rgb.copy()
@@ -433,8 +530,7 @@ class ROS2Camera(Camera):
                     return np.repeat(gray[:, :, None], 3, axis=2)
                 return gray.copy()
 
-            logger.error(
-                "Manual conversion unsupported encoding: src=%s dst=%s", src, dst)
+            logger.error("Manual conversion unsupported encoding: src=%s dst=%s", src, dst)
             return None
         except Exception as exc:
             logger.error("Manual conversion exception: %s", exc)
@@ -446,8 +542,7 @@ class ROS2Camera(Camera):
         try:
             cv_depth = self.bridge.imgmsg_to_cv2(msg, self.depth_encoding)
             depth_float = np.array(cv_depth, dtype=np.float32, copy=False)
-            depth_clean = np.nan_to_num(
-                depth_float, nan=0.0, posinf=0.0, neginf=0.0)
+            depth_clean = np.nan_to_num(depth_float, nan=0.0, posinf=0.0, neginf=0.0)
 
             valid_mask = np.isfinite(depth_clean)
             if np.any(valid_mask):
@@ -462,8 +557,7 @@ class ROS2Camera(Camera):
             else:
                 depth_norm = np.zeros_like(depth_clean, dtype=np.float32)
 
-            depth_vis = np.clip(depth_norm * 255.0, 0.0,
-                                255.0).astype(np.uint8)
+            depth_vis = np.clip(depth_norm * 255.0, 0.0, 255.0).astype(np.uint8)
             if depth_vis.ndim == 2:
                 depth_vis = np.repeat(depth_vis[:, :, None], 3, axis=2)
             elif depth_vis.shape[-1] == 1:
@@ -519,8 +613,7 @@ class ROS2Camera(Camera):
         age_ms = (time.perf_counter() - timestamp) * 1e3
         if age_ms > max_age_ms:
             raise TimeoutError(
-                f"{self} latest image is too old: {age_ms:.1f} ms "
-                f"(max allowed: {max_age_ms} ms)."
+                f"{self} latest image is too old: {age_ms:.1f} ms (max allowed: {max_age_ms} ms)."
             )
 
         return rgb_image
@@ -541,8 +634,7 @@ class ROS2Camera(Camera):
         age_ms = (time.perf_counter() - timestamp) * 1e3
         if age_ms > max_age_ms:
             raise TimeoutError(
-                f"{self} latest depth image is too old: {age_ms:.1f} ms "
-                f"(max allowed: {max_age_ms} ms)."
+                f"{self} latest depth image is too old: {age_ms:.1f} ms (max allowed: {max_age_ms} ms)."
             )
 
         return depth_image

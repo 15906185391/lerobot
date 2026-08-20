@@ -261,6 +261,8 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
   - `--teleop.posture_cost=0.0001`
   - `--teleop.posture_gain=1.0`
   - `--teleop.posture_lm_damping=0.0`
+- Joint damping task:
+  - `--teleop.damping_task_cost=0.05`
 - Locked-joints hard constraint:
   - `--teleop.locked_joints_gain=1.0`
   - `--teleop.locked_joints_lm_damping=0.0`
@@ -337,6 +339,7 @@ TypeError: Can't instantiate abstract class LockedJointsTask with abstract metho
 - `arm_action_smoothing_alpha=0.6`：对 IK 输出后的关节目标做 EMA 平滑；1.0 表示不平滑，越小越稳但越慢。
 - `max_joint_velocity_rad_s=1.0`：限制每个控制周期的最大关节目标变化，30Hz 下约等于每帧 0.033 rad。
 - `max_joint_acceleration_rad_s2=6.0`：限制每帧目标增量变化，减少速度突变导致的抖动。
+- `damping_task_cost=0.03`：给关节速度加全局阻尼，优先压掉高频小抖动。若动作还是“硬”，可升到 `0.05` 到 `0.1`；若明显变钝，再降回 `0.01` 左右。
 - `posture_cost=1e-3` / `posture_gain=0.5`：让冗余关节更愿意贴近参考姿态，减少肘部自由漂移。
 - `use_self_collision=true` / `enforce_limits=true`：首次实物测试建议保留自碰撞和关节限位。
 - `self_collision_gain=5.0` / `self_collision_safe_displacement_gain=2.0`：比默认更温和，避免接近 barrier 时动作突然弹开。
