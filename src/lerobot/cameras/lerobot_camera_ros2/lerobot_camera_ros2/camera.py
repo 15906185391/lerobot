@@ -165,6 +165,7 @@ class ROS2Camera(Camera):
         self.ros_node: Node | None = None
         self.executor: SingleThreadedExecutor | None = None
         self.executor_thread: threading.Thread | None = None
+        self._disconnecting = False
         self.image_subscription = None
         self.depth_subscription = None
 
@@ -339,9 +340,10 @@ class ROS2Camera(Camera):
                 )
 
             # Start executor in separate thread
+            self._disconnecting = False
             self.executor = SingleThreadedExecutor()
             self.executor.add_node(self.ros_node)
-            self.executor_thread = threading.Thread(target=self.executor.spin, daemon=True)
+            self.executor_thread = threading.Thread(target=self._spin_executor, daemon=True)
             self.executor_thread.start()
             self._connected = True
 
@@ -570,6 +572,18 @@ class ROS2Camera(Camera):
         except Exception as exc:
             logger.error(f"Failed to process depth image: {exc}")
 
+    def _spin_executor(self) -> None:
+        executor = self.executor
+        if executor is None:
+            return
+        try:
+            executor.spin()
+        except Exception as exc:  # noqa: BLE001 - rclpy raises its own shutdown sentinel from this thread.
+            if self._disconnecting or exc.__class__.__name__ == "ExternalShutdownException":
+                logger.debug("ROS 2 camera executor stopped during shutdown: %s", exc)
+                return
+            logger.exception("ROS 2 camera executor stopped unexpectedly")
+
     def read(self) -> Any:
         return self.async_read(timeout_ms=self.timeout_ms)
 
@@ -642,6 +656,7 @@ class ROS2Camera(Camera):
     def disconnect(self) -> None:
         """Disconnect from the camera and release resources."""
         self._connected = False
+        self._disconnecting = True
 
         # Stop executor
         if self.executor:
@@ -671,4 +686,5 @@ class ROS2Camera(Camera):
             self.latest_depth_timestamp = None
             self.depth_received_event.clear()
 
+        self._disconnecting = False
         logger.info(f"Disconnected from ROS 2 camera: {self.topic_name}")

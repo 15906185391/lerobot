@@ -625,6 +625,7 @@ def record(
     dataset = None
     listener = None
     action_publisher = None
+    events = None
 
     try:
         if cfg.resume:
@@ -810,6 +811,11 @@ def record(
 
                 dataset.save_episode()
                 recorded_episodes += 1
+    except KeyboardInterrupt:
+        logging.info("Recording interrupted by user; stopping gracefully.")
+        if events is not None:
+            events["stop_recording"] = True
+            events["exit_early"] = True
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
 

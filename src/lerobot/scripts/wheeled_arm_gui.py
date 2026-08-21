@@ -376,6 +376,48 @@ def _readable_exit(code: int) -> str:
     return f"退出码 {code}"
 
 
+def _is_expected_stop_line(line: str) -> bool:
+    return any(
+        token in line
+        for token in (
+            "KeyboardInterrupt",
+            "ExternalShutdownException",
+            "Recording interrupted by user",
+            "进程收到信号 2 后结束",
+            "收到信号 2 后结束",
+            "Stop recording",
+        )
+    )
+
+
+def _is_expected_stop_noise(line: str) -> bool:
+    return any(
+        token in line
+        for token in (
+            "Failed to flush previous sink",
+            "Failed to flush gRPC messages during shutdown",
+            "Failed to gracefully shut down message proxy client",
+            "gRPC connection severed",
+            "channel closed",
+            "Write messages call failed: transport error",
+            "action watchdog timed out",
+        )
+    )
+
+
+def _is_traceback_lead(line: str) -> bool:
+    return line.startswith("Exception in thread ") or line.startswith(PYTHON_TRACEBACK_START)
+
+
+def _is_traceback_related_line(line: str) -> bool:
+    return (
+        _is_traceback_lead(line)
+        or line.startswith(("  File ", "    "))
+        or line.strip().startswith("^")
+        or _is_python_exception_summary(line)
+    )
+
+
 def _meta_info_path(root: Path) -> Path:
     return root / "meta" / "info.json"
 
@@ -484,7 +526,7 @@ class RuntimeFailure:
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 PYTHON_TRACEBACK_START = "Traceback (most recent call last):"
 PYTHON_EXCEPTION_RE = re.compile(
-    r"^(?:[A-Za-z_][\w.]*Error|[A-Za-z_][\w.]*Exception|KeyboardInterrupt|SystemExit):\s*.+"
+    r"^(?:[A-Za-z_][\w.]*Error|[A-Za-z_][\w.]*Exception|KeyboardInterrupt|SystemExit)(?::\s*.*)?$"
 )
 RUNTIME_ALERT_RULES: tuple[tuple[str, tuple[str, ...], RuntimeAlert], ...] = (
     (
@@ -683,6 +725,10 @@ class ProcessRunner(QObject):
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env.setdefault("LC_CTYPE", "C.UTF-8")
+        env.setdefault("NO_COLOR", "1")
+        env.setdefault("RUST_LOG_STYLE", "never")
         if env_overrides:
             for key, value in env_overrides.items():
                 if value is None:
@@ -696,6 +742,8 @@ class ProcessRunner(QObject):
             "stderr": subprocess.STDOUT,
             "stdin": subprocess.PIPE,
             "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
             "bufsize": 1,
         }
         if os.name == "nt":
@@ -1648,7 +1696,7 @@ _HELP_RECORDING_HTML = """
   <tr><th>步骤</th><th>要做什么</th><th>确认结果</th></tr>
   <tr><td>1. 检查现场</td><td>确认急停、供电、机器人工作空间、相机节点、PICO 服务和 LCM 网络。</td><td>人员和障碍物离开工作空间。</td></tr>
   <tr><td>2. 填写数据集</td><td>填写 Repo ID、任务描述、集数、单集秒数、FPS 和 LCM URL。</td><td>任务描述与实际演示动作一致。</td></tr>
-  <tr><td>3. 打开可视化</td><td>保持 Rerun 数据窗口、Rerun 机器人 3D 和 viser URDF 窗口开启。</td><td>一个看数据流，一个看机器人模型。</td></tr>
+  <tr><td>3. 打开可视化</td><td>保持 Rerun 数据窗口和 Rerun 机器人 3D 开启；viser URDF 默认关闭，只有排查 IK/URDF 时再手动开启。</td><td>一个看数据流，一个看机器人模型。</td></tr>
 </table>
 
 <h2>采集中</h2>
@@ -1662,7 +1710,7 @@ _HELP_RECORDING_HTML = """
 <h2>一集结束后</h2>
 <table>
   <tr><th>步骤</th><th>要做什么</th><th>确认结果</th></tr>
-  <tr><td>7. 自动复位</td><td>机器人通过 movej 回到默认采集姿态。</td><td>Rerun 和 viser 同步显示复位过程。</td></tr>
+  <tr><td>7. 自动复位</td><td>机器人通过 movej 回到默认采集姿态。</td><td>Rerun 显示复位过程；viser 默认不启动以减少遥操作开销。</td></tr>
   <tr><td>8. 重录或停止</td><td>动作失败按 <span class="kbd">B</span>；结束整次采集按 <span class="kbd">X</span>。复位过程中按住 <span class="kbd">X</span> 会中断 movej 并结束采集。</td><td>失败集不会误保存，或采集流程正常停止。</td></tr>
   <tr><td>9. 查看结果</td><td>到“查看数据集”页点击“使用最近采集”，再点击“打开数据集”。</td><td>确认 episode、图像、状态和动作曲线正常。</td></tr>
 </table>
@@ -1678,7 +1726,7 @@ _HELP_RECORDING_HTML = """
 
 _HELP_TELEOP_HTML = """
 <h1>PICO 遥操作流程</h1>
-<p class="lead">遥操作时请把注意力放在机器人和 Rerun/viser 状态上。按住 grip 才会移动对应机械臂，松开后保持当前位置。</p>
+<p class="lead">遥操作时请把注意力放在机器人和 Rerun 状态上。按住 grip 才会移动对应机械臂，松开后保持当前位置。</p>
 
 <div class="safe">
   <b>启动同步：</b>开始遥操作前，程序会从 LCM 读取当前左右臂关节状态，同步到 PICO IK，并重置 PICO 相对位姿基线。
@@ -1790,9 +1838,9 @@ _HELP_JOINT_JOG_HTML = """
   <tr><th>步骤</th><th>操作</th><th>确认</th></tr>
   <tr><td>1</td><td>进入“关节点动”页，确认 LCM URL 和 URDF 路径。</td><td>命令预览正确。</td></tr>
   <tr><td>2</td><td>点击“打开点动控制台”，在确认框里再次确认安全条件。</td><td>此时还没有连接机器人。</td></tr>
-  <tr><td>3</td><td>在新窗口点击“启动连接”。</td><td>状态显示“反馈新鲜”，viser 显示当前姿态。</td></tr>
+  <tr><td>3</td><td>在新窗口点击“启动连接”。</td><td>状态显示“反馈新鲜”；如手动开启 viser，可同时查看当前姿态。</td></tr>
   <tr><td>4</td><td>点击“同步当前为目标”。</td><td>目标列等于当前反馈。</td></tr>
-  <tr><td>5</td><td>用单关节 +/- 小步点动，或勾选关节后点动到目标。</td><td>观察实物和 URDF 是否一致。</td></tr>
+  <tr><td>5</td><td>用单关节 +/- 小步点动，或勾选关节后点动到目标。</td><td>观察实物、当前反馈和目标值是否一致。</td></tr>
   <tr><td>6</td><td>到达安全姿态后点击“停止发布”和“停止连接”。</td><td>控制台关闭硬件连接。</td></tr>
 </table>
 
@@ -1831,7 +1879,7 @@ HELP_PLAIN_TEXT = """Wheeled Arm PICO 使用说明
 推荐流程:
 1. 检查急停、供电、机器人工作空间、相机节点、PICO 服务和 LCM 网络。
 2. 在“采集”页填写 Repo ID、任务描述、集数、单集秒数、FPS 和 LCM URL。
-3. 初学者建议打开 Rerun 数据窗口、Rerun 机器人 3D 和 viser URDF 窗口。
+3. 实物采集建议保持 Rerun 数据窗口和 Rerun 机器人 3D 开启，viser URDF 窗口默认关闭以降低遥操作开销。
 4. 点击“开始采集”，先看运行日志是否完成 robot、PICO、相机连接。
 5. 默认“等待 PICO 开始每集”开启。先把机器人移动到任务起点，再按 A 开始保存 episode。
 6. 按住左右 grip 控制对应机械臂，trigger 控制夹爪。
@@ -1874,7 +1922,7 @@ Y: 重置 PICO 相对位姿基线，不直接移动机器人。
 
 五、异常姿态救援：关节点动
 - 主 GUI 的“关节点动”页只负责打开独立控制台，平时不会连接机器人；打开前会弹出安全确认。
-- 独立控制台内仍需手动点击“启动连接”，之后才会创建 LCM handler 和 viser URDF 可视化。
+- 独立控制台内仍需手动点击“启动连接”，之后才会创建 LCM handler；viser URDF 可视化默认关闭，勾选后才会启动。
 - 每次发布前检查左右臂新鲜 LCM 反馈，禁止从零位或旧状态发命令。
 - 推荐先点击“同步当前为目标”，再用单关节 +/- 小步点动。
 - 左臂/右臂/双臂默认目标按钮只填入目标并勾选关节，真正移动仍需点击“点动到勾选目标”。
@@ -1907,6 +1955,7 @@ class WheeledArmGui(QMainWindow):
         self._runtime_alerts: dict[str, RuntimeAlert] = {}
         self._runtime_failures: dict[str, RuntimeFailure] = {}
         self._traceback_buffers: dict[str, list[str]] = {}
+        self._stop_traceback_buffers: dict[str, list[str]] = {}
         self._recent_log_lines: list[tuple[str, str]] = []
         self._shown_failure_dialogs: set[str] = set()
         self._stop_requested_sources: set[str] = set()
@@ -2211,7 +2260,7 @@ class WheeledArmGui(QMainWindow):
         self.display_port.setSpecialValueText("默认")
         self.display_compressed_images = QCheckBox("压缩图像流")
         self.viser = QCheckBox("viser URDF 窗口")
-        self.viser.setChecked(True)
+        self.viser.setChecked(False)
         self.rerun_robot = QCheckBox("Rerun 机器人 3D")
         self.rerun_robot.setChecked(True)
         self.mock_robot = QCheckBox("模拟机器人本体（不连接 LCM）")
@@ -2644,7 +2693,7 @@ class WheeledArmGui(QMainWindow):
         self.joint_jog_urdf_path = PathPicker("默认使用 wheeled_arm_pico assets/real_robot.urdf", directory=False)
         self.joint_jog_urdf_path.setText(str(DEFAULT_WHEELED_ARM_URDF))
         self.joint_jog_visualize = QCheckBox("启动 viser URDF 可视化")
-        self.joint_jog_visualize.setChecked(True)
+        self.joint_jog_visualize.setChecked(False)
         self.joint_jog_visualization_host = QLineEdit("0.0.0.0")
         self.joint_jog_visualization_port = self._spin(1, 65535, 8092)
         self.joint_jog_open_browser = QCheckBox("自动打开浏览器")
@@ -2970,7 +3019,7 @@ class WheeledArmGui(QMainWindow):
         self.common_teleop_display_mode = QComboBox()
         self.common_teleop_display_mode.addItems(["rerun", "foxglove"])
         self.common_teleop_viser = QCheckBox("viser URDF 窗口")
-        self.common_teleop_viser.setChecked(True)
+        self.common_teleop_viser.setChecked(False)
         self.common_teleop_rerun_robot = QCheckBox("Rerun 机器人 3D")
         self.common_teleop_rerun_robot.setChecked(True)
         self.common_teleop_mock_robot = QCheckBox("模拟机器人本体（不连接 LCM）")
@@ -3901,6 +3950,7 @@ class WheeledArmGui(QMainWindow):
         self.mock_cameras.setChecked(
             _settings_bool(self.settings.value("record/mock_cameras", self.mock_cameras.isChecked()), False)
         )
+        self.viser.setChecked(_settings_bool(self.settings.value("record/viser", False), False))
         self.camera_override.setChecked(
             _settings_bool(self.settings.value("record/camera_override", self.camera_override.isChecked()), False)
         )
@@ -4033,6 +4083,9 @@ class WheeledArmGui(QMainWindow):
                 False,
             )
         )
+        self.common_teleop_viser.setChecked(
+            _settings_bool(self.settings.value("common/teleop_viser", False), False)
+        )
         self.common_teleop_publish_action_ros2.setChecked(
             _settings_bool(
                 self.settings.value(
@@ -4116,10 +4169,7 @@ class WheeledArmGui(QMainWindow):
             int(self.settings.value("joint_jog/visualization_port", self.joint_jog_visualization_port.value()))
         )
         self.joint_jog_visualize.setChecked(
-            _settings_bool(
-                self.settings.value("joint_jog/visualize", self.joint_jog_visualize.isChecked()),
-                self.joint_jog_visualize.isChecked(),
-            )
+            _settings_bool(self.settings.value("joint_jog/visualize", False), False)
         )
         self.joint_jog_open_browser.setChecked(
             _settings_bool(
@@ -4139,6 +4189,7 @@ class WheeledArmGui(QMainWindow):
         )
         self.settings.setValue("record/mock_robot", self.mock_robot.isChecked())
         self.settings.setValue("record/mock_cameras", self.mock_cameras.isChecked())
+        self.settings.setValue("record/viser", self.viser.isChecked())
         self.settings.setValue("record/camera_override", self.camera_override.isChecked())
         self.settings.setValue(
             "record/camera_serial_number_or_name", self.camera_serial_number_or_name.text()
@@ -4193,6 +4244,7 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("common/pico_usb_remove", self.common_pico_usb_remove.isChecked())
         self.settings.setValue("common/teleop_mock_robot", self.common_teleop_mock_robot.isChecked())
         self.settings.setValue("common/teleop_mock_cameras", self.common_teleop_mock_cameras.isChecked())
+        self.settings.setValue("common/teleop_viser", self.common_teleop_viser.isChecked())
         self.settings.setValue(
             "common/teleop_publish_action_ros2",
             self.common_teleop_publish_action_ros2.isChecked(),
@@ -5526,10 +5578,11 @@ class WheeledArmGui(QMainWindow):
         self.activity_strip.set_state(active=active, alert=alert)
 
     def append_log(self, source: str, line: str) -> None:
-        self._recent_log_lines.append((source, _strip_ansi(line)))
+        clean_line = _strip_ansi(line)
+        self._recent_log_lines.append((source, clean_line))
         if len(self._recent_log_lines) > 600:
             self._recent_log_lines = self._recent_log_lines[-600:]
-        self.log_view.append(f"[{source}] {line}")
+        self.log_view.append(f"[{source}] {clean_line}")
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
     @Slot()
@@ -5541,6 +5594,7 @@ class WheeledArmGui(QMainWindow):
         self._runtime_alerts.clear()
         self._runtime_failures.clear()
         self._traceback_buffers.clear()
+        self._stop_traceback_buffers.clear()
         self._shown_failure_dialogs.clear()
         if hasattr(self, "runtime_alert_label"):
             self.runtime_alert_label.clear()
@@ -5548,13 +5602,55 @@ class WheeledArmGui(QMainWindow):
         self._refresh_visual_state()
 
     def handle_runner_output(self, source: str, line: str) -> None:
-        self.append_log(source, line)
-        self._track_runtime_exception(source, line)
-        alert = _detect_runtime_alert(line)
+        clean_line = _strip_ansi(line).rstrip()
+        if self._consume_expected_stop_output(source, clean_line):
+            return
+
+        self.append_log(source, clean_line)
+        if source in self._stop_requested_sources and _is_expected_stop_line(clean_line):
+            self._traceback_buffers.pop(source, None)
+        else:
+            self._track_runtime_exception(source, clean_line)
+        alert = _detect_runtime_alert(clean_line)
         if alert is None:
             return
 
         self._add_runtime_alert(source, alert)
+
+    def _consume_expected_stop_output(self, source: str, clean_line: str) -> bool:
+        if source not in self._stop_requested_sources:
+            return False
+        if not clean_line:
+            return False
+        if _is_expected_stop_noise(clean_line):
+            return True
+
+        buffer = self._stop_traceback_buffers.get(source)
+        if buffer is not None:
+            if _is_traceback_related_line(clean_line):
+                buffer.append(clean_line)
+                if _is_expected_stop_line(clean_line):
+                    self._stop_traceback_buffers.pop(source, None)
+                    self._traceback_buffers.pop(source, None)
+                    return True
+                if _is_python_exception_summary(clean_line):
+                    for buffered_line in buffer[:-1]:
+                        self.append_log(source, buffered_line)
+                        self._track_runtime_exception(source, buffered_line)
+                    self._stop_traceback_buffers.pop(source, None)
+                    return False
+                if len(buffer) >= 100:
+                    for buffered_line in buffer:
+                        self.append_log(source, buffered_line)
+                        self._track_runtime_exception(source, buffered_line)
+                    self._stop_traceback_buffers.pop(source, None)
+                return True
+            return False
+
+        if _is_traceback_lead(clean_line):
+            self._stop_traceback_buffers[source] = [clean_line]
+            return True
+        return False
 
     def handle_runner_failure(self, source: str, message: str) -> None:
         self.append_log(source, message)
@@ -5582,6 +5678,10 @@ class WheeledArmGui(QMainWindow):
         if not clean_line:
             return
 
+        if source in self._stop_requested_sources and _is_expected_stop_line(clean_line):
+            self._traceback_buffers.pop(source, None)
+            return
+
         if clean_line.startswith(PYTHON_TRACEBACK_START):
             self._traceback_buffers[source] = [clean_line]
             return
@@ -5589,6 +5689,11 @@ class WheeledArmGui(QMainWindow):
         buffer = self._traceback_buffers.get(source)
         if buffer is not None:
             buffer.append(clean_line)
+            if source in self._stop_requested_sources and any(
+                _is_expected_stop_line(item) for item in buffer
+            ):
+                self._traceback_buffers.pop(source, None)
+                return
             if _is_python_exception_summary(clean_line):
                 self._register_runtime_failure(
                     source,
@@ -5648,8 +5753,14 @@ class WheeledArmGui(QMainWindow):
         failure = self._runtime_failures.get(source)
         if failure is None and code == 0:
             return
-        if failure is None and source in self._stop_requested_sources and code in {-2, -15, 130, 143}:
-            return
+        if source in self._stop_requested_sources and code in {-2, -15, 0, 130, 143}:
+            if failure is not None and any(
+                _is_expected_stop_line(line) for line in (failure.summary, failure.details)
+            ):
+                self._runtime_failures.pop(source, None)
+                self._refresh_runtime_alert_label()
+            if source not in self._runtime_failures:
+                return
         if source in self._shown_failure_dialogs:
             return
 
