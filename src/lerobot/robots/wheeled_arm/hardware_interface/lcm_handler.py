@@ -34,6 +34,7 @@ class LCMHandler:
         self.joint_current_speed = np.zeros(23)
         self.left_arm_state_time_s = None
         self.right_arm_state_time_s = None
+        self.head_state_time_s = None
 
         self.motion_mode = 0
         self.com_mode = 1
@@ -159,9 +160,23 @@ class LCMHandler:
             with self.joint_current_pos_lock:
                 for i in range(min(2, len(msg.joints))):
                     self.joint_current_pos[16 + i] = msg.joints[i].posH
+                self.head_state_time_s = time.monotonic()
             self.head_state_updated.set()
         except Exception as exc:
             logger.debug("Failed to decode head state: %s", exc)
+
+    def has_head_state_feedback(self, max_age_s=None, min_time_s=None):
+        with self.joint_current_pos_lock:
+            head_time = self.head_state_time_s
+
+        if head_time is None:
+            return False
+        if min_time_s is not None and head_time < min_time_s:
+            return False
+        if max_age_s is None:
+            return True
+
+        return (time.monotonic() - head_time) <= max_age_s
 
     def manip_waist_state_listener(self, channel, data):
         try:

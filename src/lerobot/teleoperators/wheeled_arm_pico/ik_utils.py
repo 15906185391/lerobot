@@ -190,6 +190,129 @@ def _slerp_xyzw_quaternion(q_a: np.ndarray, q_b: np.ndarray, alpha: float) -> np
     return _normalize_xyzw_quaternion(s0 * q_a + s1 * q_b)
 
 
+def _normalize_wxyz_quaternion(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=float).reshape(4)
+    norm = np.linalg.norm(quat)
+    if norm < 1e-8 or not np.isfinite(norm):
+        raise ValueError(f"Invalid quaternion: {quat}")
+    return quat / norm
+
+
+def _rotation_matrix_to_wxyz_quaternion(rotation: np.ndarray) -> np.ndarray:
+    rotation = np.asarray(rotation, dtype=float).reshape(3, 3)
+    trace = float(np.trace(rotation))
+    if trace > 0.0:
+        s = float(np.sqrt(trace + 1.0)) * 2.0
+        w = 0.25 * s
+        x = (rotation[2, 1] - rotation[1, 2]) / s
+        y = (rotation[0, 2] - rotation[2, 0]) / s
+        z = (rotation[1, 0] - rotation[0, 1]) / s
+    elif rotation[0, 0] > rotation[1, 1] and rotation[0, 0] > rotation[2, 2]:
+        s = float(np.sqrt(1.0 + rotation[0, 0] - rotation[1, 1] - rotation[2, 2])) * 2.0
+        w = (rotation[2, 1] - rotation[1, 2]) / s
+        x = 0.25 * s
+        y = (rotation[0, 1] + rotation[1, 0]) / s
+        z = (rotation[0, 2] + rotation[2, 0]) / s
+    elif rotation[1, 1] > rotation[2, 2]:
+        s = float(np.sqrt(1.0 + rotation[1, 1] - rotation[0, 0] - rotation[2, 2])) * 2.0
+        w = (rotation[0, 2] - rotation[2, 0]) / s
+        x = (rotation[0, 1] + rotation[1, 0]) / s
+        y = 0.25 * s
+        z = (rotation[1, 2] + rotation[2, 1]) / s
+    else:
+        s = float(np.sqrt(1.0 + rotation[2, 2] - rotation[0, 0] - rotation[1, 1])) * 2.0
+        w = (rotation[1, 0] - rotation[0, 1]) / s
+        x = (rotation[0, 2] + rotation[2, 0]) / s
+        y = (rotation[1, 2] + rotation[2, 1]) / s
+        z = 0.25 * s
+    return _normalize_wxyz_quaternion(np.array([w, x, y, z], dtype=float))
+
+
+def _wxyz_quaternion_to_rotation_matrix(quat: np.ndarray) -> np.ndarray:
+    w, x, y, z = _normalize_wxyz_quaternion(quat)
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=float,
+    )
+
+
+def _wxyz_quaternion_conjugate(quat: np.ndarray) -> np.ndarray:
+    w, x, y, z = _normalize_wxyz_quaternion(quat)
+    return np.array([w, -x, -y, -z], dtype=float)
+
+
+def _wxyz_quaternion_multiply(q_a: np.ndarray, q_b: np.ndarray) -> np.ndarray:
+    w1, x1, y1, z1 = _normalize_wxyz_quaternion(q_a)
+    w2, x2, y2, z2 = _normalize_wxyz_quaternion(q_b)
+    return _normalize_wxyz_quaternion(
+        np.array(
+            [
+                w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            ],
+            dtype=float,
+        )
+    )
+
+
+def quaternion_to_angle_axis(quat: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    quat = _normalize_wxyz_quaternion(quat)
+    if quat[0] < 0.0:
+        quat = -quat
+
+    w = float(quat[0])
+    vec_part = quat[1:]
+    angle = 2.0 * float(np.arccos(np.clip(w, -1.0, 1.0)))
+    if angle < eps:
+        return np.zeros(3, dtype=float)
+
+    sin_half_angle = float(np.sin(angle / 2.0))
+    if abs(sin_half_angle) < eps:
+        return np.zeros(3, dtype=float)
+
+    axis = vec_part / sin_half_angle
+    return axis * angle
+
+
+def quat_diff_as_angle_axis(q1: np.ndarray, q2: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    q1_inv = _wxyz_quaternion_conjugate(q1)
+    delta_q = _wxyz_quaternion_multiply(q2, q1_inv)
+    return quaternion_to_angle_axis(delta_q, eps)
+
+
+def apply_delta_pose(
+    source_pos: np.ndarray,
+    source_rot: np.ndarray,
+    delta_pos: np.ndarray,
+    delta_rot: np.ndarray,
+    eps: float = 1.0e-6,
+) -> tuple[np.ndarray, np.ndarray]:
+    source_pos = np.asarray(source_pos, dtype=float).reshape(3)
+    source_rot = _normalize_wxyz_quaternion(source_rot)
+    delta_pos = np.asarray(delta_pos, dtype=float).reshape(3)
+    delta_rot = np.asarray(delta_rot, dtype=float).reshape(3)
+
+    target_pos = source_pos + delta_pos
+    angle = float(np.linalg.norm(delta_rot))
+    if angle > eps:
+        axis = delta_rot / angle
+        rot_delta_quat = np.array(
+            [np.cos(angle / 2.0), *(np.sin(angle / 2.0) * axis)],
+            dtype=float,
+        )
+    else:
+        rot_delta_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+
+    target_rot = _wxyz_quaternion_multiply(rot_delta_quat, source_rot)
+    return target_pos, target_rot
+
+
 class XrPoseFilter:
     """Filter raw PICO pose arrays [x, y, z, qx, qy, qz, qw] before IK mapping."""
 
@@ -267,13 +390,26 @@ class RelativeTeleopTarget:
             self.ref_end_effector = current_end_effector.copy()
             return current_end_effector.copy()
 
-        target = self.ref_end_effector.copy()
-        target.translation = self.ref_end_effector.translation + scale * (
-            controller_pose.translation - self.ref_controller.translation
+        ref_controller_quat = _rotation_matrix_to_wxyz_quaternion(self.ref_controller.rotation)
+        controller_quat = _rotation_matrix_to_wxyz_quaternion(controller_pose.rotation)
+        ref_end_effector_quat = _rotation_matrix_to_wxyz_quaternion(self.ref_end_effector.rotation)
+
+        delta_xyz = scale * (controller_pose.translation - self.ref_controller.translation)
+        delta_rot = (
+            quat_diff_as_angle_axis(ref_controller_quat, controller_quat)
+            if orientation_enabled
+            else np.zeros(3, dtype=float)
         )
-        if orientation_enabled:
-            delta_rotation = controller_pose.rotation @ self.ref_controller.rotation.T
-            target.rotation = delta_rotation @ self.ref_end_effector.rotation
+        target_xyz, target_quat = apply_delta_pose(
+            self.ref_end_effector.translation,
+            ref_end_effector_quat,
+            delta_xyz,
+            delta_rot,
+        )
+
+        target = self.ref_end_effector.copy()
+        target.translation = target_xyz
+        target.rotation = _wxyz_quaternion_to_rotation_matrix(target_quat)
         return target
 
 

@@ -126,9 +126,18 @@ DEFAULT_URDF_PATH = (
 )
 DEFAULT_LCM_URL = "udpm://239.255.76.67:8880?ttl=1"
 DEFAULT_COMMAND_HZ = 100.0
+MAX_COMMAND_HZ = 100.0
 DEFAULT_MAX_SPEED_DEG_S = 8.0
+MAX_SPEED_DEG_S = 20.0
+DEFAULT_MAX_ACCEL_DEG_S2 = 30.0
+MAX_ACCEL_DEG_S2 = 120.0
+DEFAULT_TARGET_TOLERANCE_DEG = 0.03
 ARM_JOINT_NAMES = [f"left_arm_{i}" for i in range(7)] + [f"right_arm_{i}" for i in range(7)]
-JOINT_NAMES = [*ARM_JOINT_NAMES, "left_gripper", "right_gripper"]
+GRIPPER_JOINT_NAMES = ["left_gripper", "right_gripper"]
+HEAD_JOINT_NAMES = ["neck_yaw", "neck_pitch"]
+JOINT_NAMES = [*ARM_JOINT_NAMES, *GRIPPER_JOINT_NAMES, *HEAD_JOINT_NAMES]
+HEAD_JOINT_INDICES = {16, 17}
+GRIPPER_JOINT_INDICES = {14, 15}
 RESET_LEFT_ARM_DEG = np.array([20.0, 70.0, -75.0, 100.0, -25.0, 0.0, 0.0], dtype=np.float32)
 RESET_RIGHT_ARM_DEG = np.array([-20.0, 70.0, 75.0, 100.0, 25.0, 0.0, 0.0], dtype=np.float32)
 
@@ -152,7 +161,11 @@ def _part_for_index(index: int) -> str:
         return "right_arm"
     if index == 14:
         return "left_gripper"
-    return "right_gripper"
+    if index == 15:
+        return "right_gripper"
+    if index in HEAD_JOINT_INDICES:
+        return "head"
+    raise ValueError(f"Unknown joint index for jogging: {index}")
 
 
 def _urdf_joint_name(index: int) -> str | None:
@@ -160,11 +173,15 @@ def _urdf_joint_name(index: int) -> str | None:
         return f"AR5-5_07L-W4C4A2_joint_{index + 1}"
     if index < 14:
         return f"AR5-5_07R-W4C4A2_joint_{index - 6}"
+    if index == 16:
+        return "neck_yaw"
+    if index == 17:
+        return "neck_pitch"
     return None
 
 
-def _read_arm_joint_limits_deg(urdf_path: Path) -> list[tuple[float, float]]:
-    default_limits = [(-180.0, 180.0) for _ in range(14)]
+def _read_joint_limits_deg(urdf_path: Path) -> list[tuple[float, float]]:
+    default_limits = [(-180.0, 180.0) for _ in JOINT_NAMES]
     if not urdf_path.exists():
         return default_limits
     try:
@@ -186,7 +203,7 @@ def _read_arm_joint_limits_deg(urdf_path: Path) -> list[tuple[float, float]]:
         limits_by_name[name] = (lower, upper)
 
     limits = []
-    for index in range(14):
+    for index in range(len(JOINT_NAMES)):
         limits.append(limits_by_name.get(_urdf_joint_name(index) or "", default_limits[index]))
     return limits
 
@@ -224,17 +241,19 @@ class JointJogVisualizer:
 
     def update(self, positions: np.ndarray, mode: str) -> None:
         cfg: dict[str, float] = {}
-        for index in range(14):
+        for index in range(len(JOINT_NAMES)):
             urdf_name = _urdf_joint_name(index)
             if urdf_name is not None:
                 cfg[urdf_name] = float(positions[index])
         self.urdf_vis.update_cfg(cfg)
         left = ", ".join(f"{v:.1f}" for v in np.rad2deg(positions[:7]))
         right = ", ".join(f"{v:.1f}" for v in np.rad2deg(positions[7:14]))
+        head = ", ".join(f"{v:.1f}" for v in np.rad2deg(positions[16:18]))
         self.status_gui.content = (
             f"**关节点动状态**: {mode}\n\n"
             f"左臂 deg: `{left}`\n\n"
-            f"右臂 deg: `{right}`"
+            f"右臂 deg: `{right}`\n\n"
+            f"头部 deg: `{head}`"
         )
 
     def close(self) -> None:
@@ -260,9 +279,13 @@ class JointJogSession(QObject):
         self.target_position = np.zeros(23, dtype=np.float32)
         self.last_feedback = np.zeros(23, dtype=np.float32)
         self.last_command_position = np.zeros(23, dtype=np.float32)
+        self.last_command_velocity = np.zeros(23, dtype=np.float32)
+        self.command_position_initialized = False
         self.feedback_timeout_s = 1.0
         self.command_hz = DEFAULT_COMMAND_HZ
         self.max_speed_rad_s = _deg_to_rad(DEFAULT_MAX_SPEED_DEG_S)
+        self.max_accel_rad_s2 = _deg_to_rad(DEFAULT_MAX_ACCEL_DEG_S2)
+        self.target_tolerance_rad = _deg_to_rad(DEFAULT_TARGET_TOLERANCE_DEG)
         self.command_lock = threading.Lock()
         self.command_stop_event = threading.Event()
         self.command_thread: threading.Thread | None = None
@@ -284,6 +307,7 @@ class JointJogSession(QObject):
         feedback_timeout_s: float,
         command_hz: float,
         max_speed_deg_s: float,
+        max_acceleration_deg_s2: float,
         visualize: bool,
         urdf_path: Path,
         visualization_host: str,
@@ -307,8 +331,11 @@ class JointJogSession(QObject):
         try:
             self.handler = LCMHandler(lcm_url=lcm_url)
             self.feedback_timeout_s = feedback_timeout_s
-            self.command_hz = max(1.0, command_hz)
-            self.max_speed_rad_s = _deg_to_rad(max_speed_deg_s)
+            self.command_hz = _clip(command_hz, 1.0, MAX_COMMAND_HZ)
+            self.max_speed_rad_s = _deg_to_rad(_clip(max_speed_deg_s, 0.1, MAX_SPEED_DEG_S))
+            self.max_accel_rad_s2 = _deg_to_rad(
+                _clip(max_acceleration_deg_s2, 1.0, MAX_ACCEL_DEG_S2)
+            )
             if visualize:
                 self.visualizer = JointJogVisualizer(
                     urdf_path=urdf_path,
@@ -357,9 +384,10 @@ class JointJogSession(QObject):
             return
         with self.handler.joint_current_pos_lock:
             self.last_feedback = np.asarray(self.handler.joint_current_pos, dtype=np.float32).copy()
-        if not np.any(self.last_command_position):
+        if not self.command_position_initialized:
             self.last_command_position = self.last_feedback.copy()
             self.target_position = self.last_feedback.copy()
+            self.command_position_initialized = True
         self.feedback.emit(self.last_feedback.copy())
         mode = "反馈新鲜" if self.has_fresh_feedback() else "等待反馈/反馈超时"
         now = time.monotonic()
@@ -377,18 +405,21 @@ class JointJogSession(QObject):
         self.poll_feedback()
         self.target_position = self.last_feedback.copy()
         self.last_command_position = self.last_feedback.copy()
+        self.last_command_velocity = np.zeros_like(self.last_command_velocity)
+        self.command_position_initialized = True
         self._stop_command_thread()
         self._emit_status("已将目标同步到当前 LCM 反馈。", force=True)
 
     def jog_to(self, index: int, target_value: float) -> None:
-        if not self._can_publish():
+        moving_indices = {index}
+        if not self._can_publish(moving_indices):
             return
         target = self.last_feedback.copy()
         target[index] = target_value
-        self._start_target(target, {index})
+        self._start_target(target, moving_indices)
 
     def move_to_target(self, target_position: np.ndarray, moving_indices: set[int]) -> None:
-        if not self._can_publish():
+        if not self._can_publish(moving_indices):
             return
         if not moving_indices:
             self._emit_status("没有选择要移动的关节。", force=True)
@@ -402,34 +433,74 @@ class JointJogSession(QObject):
         self._stop_command_thread()
         self._emit_status("已停止继续发布关节命令。", force=True)
 
-    def _can_publish(self) -> bool:
+    def _can_publish(self, moving_indices: set[int]) -> bool:
         if self.handler is None or not self.connected:
             self.error.emit("请先启动关节点动连接。")
             return False
         self.poll_feedback()
-        if not self.has_fresh_feedback():
-            self.error.emit("没有新鲜左右臂 LCM 反馈，禁止发送关节命令。")
+        ok, message = self._has_required_feedback(moving_indices)
+        if not ok:
+            self.error.emit(message)
             return False
         return True
 
+    def _has_required_feedback(self, moving_indices: set[int]) -> tuple[bool, str]:
+        if not self.has_fresh_feedback():
+            return False, "没有新鲜左右臂 LCM 反馈，禁止发送关节命令。"
+        if moving_indices & HEAD_JOINT_INDICES and not self.has_fresh_head_feedback():
+            return False, "没有新鲜头部 LCM 反馈，禁止发送头部点动命令。"
+        return True, ""
+
+    def has_fresh_head_feedback(self) -> bool:
+        if self.handler is None:
+            return False
+        has_head_state_feedback = getattr(self.handler, "has_head_state_feedback", None)
+        if callable(has_head_state_feedback):
+            try:
+                return bool(has_head_state_feedback(self.feedback_timeout_s))
+            except TypeError:
+                return bool(has_head_state_feedback())
+        head_state_updated = getattr(self.handler, "head_state_updated", None)
+        return bool(head_state_updated and head_state_updated.is_set())
+
     def _start_target(self, target: np.ndarray, moving_indices: set[int]) -> None:
-        self._stop_command_thread(clear_target=False)
+        moving_indices = set(moving_indices)
+        if not moving_indices:
+            return
+
+        start_thread = False
         with self.command_lock:
-            self.command_generation += 1
-            generation = self.command_generation
-            self.active_target = JointCommand(
-                target=target.astype(np.float32, copy=True), moving_indices=set(moving_indices)
-            )
-            self.last_command_position = self.last_feedback.copy()
-            self.last_command_time = time.perf_counter()
+            target = target.astype(np.float32, copy=True)
+            if self.active_target is None:
+                merged_target = self.last_command_position.copy()
+                if not self.command_position_initialized:
+                    merged_target = self.last_feedback.copy()
+                    self.last_command_position = self.last_feedback.copy()
+                    self.command_position_initialized = True
+                merged_indices = set(moving_indices)
+                self.last_command_velocity = np.zeros_like(self.last_command_velocity)
+            else:
+                merged_target = self.active_target.target.copy()
+                merged_indices = set(self.active_target.moving_indices) | moving_indices
+
+            for index in moving_indices:
+                merged_target[index] = target[index]
+
+            self.active_target = JointCommand(target=merged_target, moving_indices=merged_indices)
+            if self.last_command_time <= 0.0:
+                self.last_command_time = time.perf_counter()
             self.command_stop_event.clear()
-        self.command_thread = threading.Thread(
-            target=self._command_loop,
-            args=(generation,),
-            name="wheeled-arm-joint-jog-command",
-            daemon=True,
-        )
-        self.command_thread.start()
+            start_thread = self.command_thread is None or not self.command_thread.is_alive()
+
+        if start_thread:
+            self.command_thread = threading.Thread(
+                target=self._command_loop,
+                name="wheeled-arm-joint-jog-command",
+                daemon=True,
+            )
+            self.command_thread.start()
+        else:
+            self._emit_status(f"已更新点动目标，关节数：{len(moving_indices)}。", min_interval_s=0.25)
 
     def _stop_command_thread(self, *, clear_target: bool = True) -> None:
         self.command_stop_event.set()
@@ -441,47 +512,80 @@ class JointJogSession(QObject):
             self.command_generation += 1
             if clear_target:
                 self.active_target = None
+            self.last_command_velocity = np.zeros_like(self.last_command_velocity)
             self.last_command_time = 0.0
         self._set_moving_flags(set())
 
-    def _command_loop(self, generation: int) -> None:
+    def _command_loop(self) -> None:
         period_s = 1.0 / self.command_hz
-        while not self.command_stop_event.is_set():
-            loop_start = time.perf_counter()
-            if not self.has_fresh_feedback():
+        try:
+            while not self.command_stop_event.is_set():
+                loop_start = time.perf_counter()
                 with self.command_lock:
-                    if generation == self.command_generation:
+                    moving_indices = (
+                        set()
+                        if self.active_target is None
+                        else self.active_target.moving_indices.copy()
+                    )
+                ok, message = self._has_required_feedback(moving_indices)
+                if not ok:
+                    with self.command_lock:
                         self.active_target = None
-                self._set_moving_flags(set())
-                self.error.emit("反馈超时，已停止关节点动发布。")
-                return
+                        self.last_command_velocity = np.zeros_like(self.last_command_velocity)
+                    self._set_moving_flags(set())
+                    self.error.emit(f"反馈超时，已停止关节点动发布：{message}")
+                    return
 
-            done = self._command_step(time.perf_counter(), generation)
-            if done:
-                return
+                done = self._command_step(time.perf_counter())
+                if done:
+                    return
 
-            elapsed_s = time.perf_counter() - loop_start
-            self.command_stop_event.wait(max(period_s - elapsed_s, 0.0))
+                elapsed_s = time.perf_counter() - loop_start
+                self.command_stop_event.wait(max(period_s - elapsed_s, 0.0))
+        finally:
+            with self.command_lock:
+                if threading.current_thread() is self.command_thread:
+                    self.command_thread = None
 
-    def _command_step(self, now: float, generation: int) -> bool:
+    def _command_step(self, now: float) -> bool:
         with self.command_lock:
-            if self.handler is None or self.active_target is None or generation != self.command_generation:
+            if self.handler is None or self.active_target is None:
                 return True
 
-            dt = max(0.001, now - self.last_command_time)
-            max_delta = self.max_speed_rad_s * dt
+            dt = max(0.001, min(now - self.last_command_time, 0.1))
             package = self.last_command_position.copy()
+            velocity = self.last_command_velocity.copy()
             moving_indices = self.active_target.moving_indices.copy()
+            target = self.active_target.target.copy()
             done = True
+            max_speed = self.max_speed_rad_s
+            max_accel_delta = self.max_accel_rad_s2 * dt
+
             for index in moving_indices:
-                delta = float(self.active_target.target[index] - package[index])
-                if abs(delta) > max_delta:
-                    package[index] += np.sign(delta) * max_delta
-                    done = False
+                delta = float(target[index] - package[index])
+                if abs(delta) <= self.target_tolerance_rad:
+                    package[index] = target[index]
+                    velocity[index] = 0.0
+                    continue
+
+                desired_velocity = float(np.clip(delta / dt, -max_speed, max_speed))
+                velocity[index] = float(
+                    np.clip(
+                        desired_velocity,
+                        velocity[index] - max_accel_delta,
+                        velocity[index] + max_accel_delta,
+                    )
+                )
+                step = velocity[index] * dt
+                if abs(step) >= abs(delta):
+                    package[index] = target[index]
+                    velocity[index] = 0.0
                 else:
-                    package[index] = self.active_target.target[index]
+                    package[index] += step
+                    done = False
 
             self.last_command_position = package.copy()
+            self.last_command_velocity = velocity.copy()
             self.last_command_time = now
             handler = self.handler
 
@@ -491,11 +595,20 @@ class JointJogSession(QObject):
 
         if done:
             with self.command_lock:
-                if generation == self.command_generation:
+                target_unchanged = self.active_target is not None and np.allclose(
+                    self.active_target.target, target
+                )
+                if target_unchanged:
                     self.active_target = None
-            self._set_moving_flags(set())
-            self._emit_status(f"点动完成，关节数：{len(moving_indices)}。", force=True)
-            return True
+                    self.last_command_velocity = np.zeros_like(self.last_command_velocity)
+                    self.last_command_time = 0.0
+                else:
+                    self.last_command_time = now
+            if target_unchanged:
+                self._set_moving_flags(set())
+                self._emit_status(f"点动完成，关节数：{len(moving_indices)}。", force=True)
+                return True
+            return False
         return False
 
     def _emit_status(self, text: str, *, min_interval_s: float = 0.0, force: bool = False) -> None:
@@ -534,6 +647,7 @@ class JointRow(QWidget):
         self.upper = upper
         self.is_gripper = is_gripper
         self.current_value = 0.0
+        self.target_initialized = False
         self.setMinimumHeight(44)
 
         layout = QGridLayout(self)
@@ -571,13 +685,20 @@ class JointRow(QWidget):
     def set_current(self, raw_value: float) -> None:
         self.current_value = float(raw_value if self.is_gripper else _rad_to_deg(raw_value))
         suffix = "" if self.is_gripper else " deg"
-        self.current_label.setText(f"{self.current_value:.3f}{suffix}" if self.is_gripper else f"{self.current_value:.2f}{suffix}")
+        self.current_label.setText(
+            f"{self.current_value:.3f}{suffix}"
+            if self.is_gripper
+            else f"{self.current_value:.2f}{suffix}"
+        )
+        if not self.target_initialized:
+            self.sync_target()
 
     def sync_target(self) -> None:
         value = _clip(self.current_value, self.lower, self.upper)
         self.target.blockSignals(True)
         self.target.setValue(value)
         self.target.blockSignals(False)
+        self.target_initialized = True
 
     def raw_target(self) -> float:
         value = _clip(float(self.target.value()), self.lower, self.upper)
@@ -590,8 +711,9 @@ class JointRow(QWidget):
             jog_step = float(step(self.is_gripper))
         else:
             jog_step = 0.02 if self.is_gripper else 1.0
-        target = _clip(self.current_value + direction * jog_step, self.lower, self.upper)
+        target = _clip(float(self.target.value()) + direction * jog_step, self.lower, self.upper)
         self.target.setValue(target)
+        self.target_initialized = True
         self.jogRequested.emit(self.index, target if self.is_gripper else _deg_to_rad(target))
 
 
@@ -679,13 +801,17 @@ class JointJogWindow(QMainWindow):
         self.feedback_timeout.setValue(1.0)
         self.feedback_timeout.setSuffix(" s")
         self.command_hz = QDoubleSpinBox()
-        self.command_hz.setRange(1.0, 250.0)
+        self.command_hz.setRange(1.0, MAX_COMMAND_HZ)
         self.command_hz.setValue(DEFAULT_COMMAND_HZ)
         self.command_hz.setSuffix(" Hz")
         self.max_speed = QDoubleSpinBox()
-        self.max_speed.setRange(0.1, 60.0)
+        self.max_speed.setRange(0.1, MAX_SPEED_DEG_S)
         self.max_speed.setValue(DEFAULT_MAX_SPEED_DEG_S)
         self.max_speed.setSuffix(" deg/s")
+        self.max_accel = QDoubleSpinBox()
+        self.max_accel.setRange(1.0, MAX_ACCEL_DEG_S2)
+        self.max_accel.setValue(DEFAULT_MAX_ACCEL_DEG_S2)
+        self.max_accel.setSuffix(" deg/s²")
         self.jog_step_deg = QDoubleSpinBox()
         self.jog_step_deg.setRange(0.05, 10.0)
         self.jog_step_deg.setValue(1.0)
@@ -702,6 +828,7 @@ class JointJogWindow(QMainWindow):
         form.addRow("反馈超时", self.feedback_timeout)
         form.addRow("发布频率", self.command_hz)
         form.addRow("最大速度", self.max_speed)
+        form.addRow("最大加速度", self.max_accel)
         form.addRow("点动步长", self.jog_step_deg)
         form.addRow("夹爪步长", self.jog_step_gripper)
         layout.addWidget(settings, 1, 0)
@@ -744,15 +871,19 @@ class JointJogWindow(QMainWindow):
         self.reset_left_btn = QPushButton("左臂默认目标")
         self.reset_right_btn = QPushButton("右臂默认目标")
         self.reset_both_btn = QPushButton("双臂默认目标")
+        self.reset_head_btn = QPushButton("头部默认目标")
         self.select_left_btn = QPushButton("勾选左臂")
         self.select_right_btn = QPushButton("勾选右臂")
+        self.select_head_btn = QPushButton("勾选头部")
         self.clear_selection_btn = QPushButton("取消勾选")
         preset_buttons = (
             self.reset_left_btn,
             self.reset_right_btn,
             self.reset_both_btn,
+            self.reset_head_btn,
             self.select_left_btn,
             self.select_right_btn,
+            self.select_head_btn,
             self.clear_selection_btn,
         )
         for index, button in enumerate(preset_buttons):
@@ -770,7 +901,7 @@ class JointJogWindow(QMainWindow):
 
         joints = QGroupBox("关节")
         joints_layout = QVBoxLayout(joints)
-        header = QLabel("勾选关节后可批量点动到目标；单行 +/- 会按当前反馈做小步点动。角度单位为 degree。")
+        header = QLabel("勾选关节后可批量点动到目标；单行 +/- 会按当前反馈做小步点动。手臂和头部角度单位为 degree。")
         header.setObjectName("Hint")
         header.setWordWrap(True)
         joints_layout.addWidget(header)
@@ -804,8 +935,10 @@ class JointJogWindow(QMainWindow):
         self.reset_left_btn.clicked.connect(lambda: self.set_reset_targets("left"))
         self.reset_right_btn.clicked.connect(lambda: self.set_reset_targets("right"))
         self.reset_both_btn.clicked.connect(lambda: self.set_reset_targets("both"))
+        self.reset_head_btn.clicked.connect(lambda: self.set_reset_targets("head"))
         self.select_left_btn.clicked.connect(lambda: self.select_arm("left"))
         self.select_right_btn.clicked.connect(lambda: self.select_arm("right"))
+        self.select_head_btn.clicked.connect(lambda: self.select_arm("head"))
         self.clear_selection_btn.clicked.connect(lambda: self.select_arm("none"))
         self.urdf_path.changed.connect(self._rebuild_joint_rows)
 
@@ -824,15 +957,16 @@ class JointJogWindow(QMainWindow):
         self.open_browser.setChecked(self.args.open_browser)
         self.command_hz.setValue(self.args.command_hz)
         self.max_speed.setValue(self.args.max_speed_deg_s)
+        self.max_accel.setValue(self.args.max_acceleration_deg_s2)
 
     def _rebuild_joint_rows(self) -> None:
         for row in self.joint_rows:
             row.setParent(None)
         self.joint_rows = []
 
-        limits = _read_arm_joint_limits_deg(Path(self.urdf_path.text() or DEFAULT_URDF_PATH).expanduser())
+        limits = _read_joint_limits_deg(Path(self.urdf_path.text() or DEFAULT_URDF_PATH).expanduser())
         for index, name in enumerate(JOINT_NAMES):
-            is_gripper = index >= 14
+            is_gripper = index in GRIPPER_JOINT_INDICES
             lower, upper = (0.0, 1.0) if is_gripper else limits[index]
             row = JointRow(index, name, lower, upper, is_gripper=is_gripper)
             row.jogRequested.connect(self.session.jog_to)
@@ -853,6 +987,7 @@ class JointJogWindow(QMainWindow):
             feedback_timeout_s=self.feedback_timeout.value(),
             command_hz=self.command_hz.value(),
             max_speed_deg_s=self.max_speed.value(),
+            max_acceleration_deg_s2=self.max_accel.value(),
             visualize=self.visualize.isChecked(),
             urdf_path=Path(self.urdf_path.text()).expanduser(),
             visualization_host=self.visualization_host.text().strip() or "0.0.0.0",
@@ -871,8 +1006,10 @@ class JointJogWindow(QMainWindow):
             self.reset_left_btn,
             self.reset_right_btn,
             self.reset_both_btn,
+            self.reset_head_btn,
             self.select_left_btn,
             self.select_right_btn,
+            self.select_head_btn,
             self.clear_selection_btn,
         ):
             button.setEnabled(connected)
@@ -922,10 +1059,18 @@ class JointJogWindow(QMainWindow):
             for i, value in enumerate(RESET_RIGHT_ARM_DEG, start=7):
                 self.joint_rows[i].target.setValue(float(value))
                 self.joint_rows[i].enable.setChecked(True)
+        if side == "head":
+            for i in sorted(HEAD_JOINT_INDICES):
+                self.joint_rows[i].target.setValue(0.0)
+                self.joint_rows[i].enable.setChecked(True)
 
     def select_arm(self, side: str) -> None:
         for row in self.joint_rows:
-            checked = (side == "left" and row.index < 7) or (side == "right" and 7 <= row.index < 14)
+            checked = (
+                (side == "left" and row.index < 7)
+                or (side == "right" and 7 <= row.index < 14)
+                or (side == "head" and row.index in HEAD_JOINT_INDICES)
+            )
             row.enable.setChecked(checked)
         if side == "none":
             for row in self.joint_rows:
@@ -1103,6 +1248,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--open-browser", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--command-hz", type=float, default=DEFAULT_COMMAND_HZ)
     parser.add_argument("--max-speed-deg-s", type=float, default=DEFAULT_MAX_SPEED_DEG_S)
+    parser.add_argument("--max-acceleration-deg-s2", type=float, default=DEFAULT_MAX_ACCEL_DEG_S2)
     return parser.parse_args()
 
 

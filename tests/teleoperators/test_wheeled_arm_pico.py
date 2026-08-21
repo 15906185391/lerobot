@@ -25,6 +25,7 @@ from lerobot.teleoperators.wheeled_arm_pico import WheeledArmPico, WheeledArmPic
 from lerobot.teleoperators.wheeled_arm_pico.ik_utils import (
     LEFT_TCP,
     RIGHT_TCP,
+    RelativeTeleopTarget,
     XrPoseFilter,
     arm_q_from_feedback,
     make_locked_joints_task_class,
@@ -109,6 +110,50 @@ def test_action_features_match_wheeled_arm_arm_and_gripper_joints():
         "left_gripper.pos",
         "right_gripper.pos",
     ]
+
+
+def test_relative_teleop_target_uses_reference_end_effector_baseline():
+    class FakeSE3:
+        def __init__(self, translation, rotation=None):
+            self.translation = np.asarray(translation, dtype=float).copy()
+            self.rotation = (
+                np.eye(3, dtype=float)
+                if rotation is None
+                else np.asarray(rotation, dtype=float).copy()
+            )
+
+        def copy(self):
+            return FakeSE3(self.translation.copy(), self.rotation.copy())
+
+    def rotz(theta: float) -> np.ndarray:
+        c = np.cos(theta)
+        s = np.sin(theta)
+        return np.array(
+            [
+                [c, -s, 0.0],
+                [s, c, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=float,
+        )
+
+    mapper = RelativeTeleopTarget()
+    current = FakeSE3([1.0, 2.0, 3.0], np.eye(3))
+    controller_ref = FakeSE3([0.0, 0.0, 0.0], np.eye(3))
+    controller_next = FakeSE3([0.2, -0.1, 0.05], rotz(np.pi / 2.0))
+
+    first_target = mapper.update(controller_ref, current, 2.0, orientation_enabled=True)
+    np.testing.assert_allclose(first_target.translation, current.translation)
+    np.testing.assert_allclose(first_target.rotation, current.rotation)
+
+    target = mapper.update(controller_next, current, 2.0, orientation_enabled=True)
+    np.testing.assert_allclose(target.translation, [1.4, 1.8, 3.1])
+    np.testing.assert_allclose(target.rotation, rotz(np.pi / 2.0), atol=1e-7)
+
+    mapper.reset()
+    reset_target = mapper.update(controller_next, current, 2.0, orientation_enabled=True)
+    np.testing.assert_allclose(reset_target.translation, current.translation)
+    np.testing.assert_allclose(reset_target.rotation, current.rotation)
 
 
 def test_wheeled_arm_pico_connect_includes_damping_task(tmp_path, monkeypatch):
