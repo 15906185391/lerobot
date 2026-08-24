@@ -33,8 +33,12 @@ from lerobot.teleoperators.wheeled_arm_pico.ik_utils import (
     RelativeTeleopTarget,
     XrPoseFilter,
     arm_q_from_feedback,
+    default_g01_urdf_path,
     make_locked_joints_task_class,
+    urdf_joint_name_for_index,
+    urdf_joint_names_from_file,
     smooth_joint_positions,
+    uses_g01_arm_joint_names,
 )
 
 
@@ -112,6 +116,19 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
     assert cfg.rerun_robot_update_hz == 5.0
     assert cfg.rerun_robot_prefix == "ik_robot"
     assert cfg.rerun_robot_axis_length == 0.2
+
+
+def test_g01_default_urdf_path_and_joint_mapping():
+    urdf_path = default_g01_urdf_path()
+    joint_names = urdf_joint_names_from_file(urdf_path)
+
+    assert urdf_path.name == "G01.urdf"
+    assert urdf_path.exists()
+    assert uses_g01_arm_joint_names(joint_names) is True
+    assert urdf_joint_name_for_index(0, uses_g01_arms=True) == "L_joint1"
+    assert urdf_joint_name_for_index(7, uses_g01_arms=True) == "R_joint1"
+    assert urdf_joint_name_for_index(16, uses_g01_arms=True) == "neck_yaw"
+    assert urdf_joint_name_for_index(14, uses_g01_arms=True) is None
 
 
 def test_action_features_match_wheeled_arm_arm_and_gripper_joints():

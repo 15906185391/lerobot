@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib
 import sys
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -865,10 +866,56 @@ G01_URDF_FILENAME = "G01.urdf"
 G01_TCP_OFFSET = np.array([0.0, 0.0, 0.16], dtype=float)
 G01_HIP_YAW_JOINT_NAMES = ("hip_yaw",)
 G01_WAIST_JOINT_NAMES = ("hip_pitch", "hip_roll", "hip_yaw")
+WHEELED_ARM_LEFT_URDF_JOINT_NAMES = tuple(
+    f"AR5-5_07L-W4C4A2_joint_{idx}" for idx in range(1, 8)
+)
+WHEELED_ARM_RIGHT_URDF_JOINT_NAMES = tuple(
+    f"AR5-5_07R-W4C4A2_joint_{idx}" for idx in range(1, 8)
+)
+G01_LEFT_URDF_JOINT_NAMES = tuple(f"L_joint{idx}" for idx in range(1, 8))
+G01_RIGHT_URDF_JOINT_NAMES = tuple(f"R_joint{idx}" for idx in range(1, 8))
 
 
 def default_g01_urdf_path() -> Path:
     return (Path(__file__).parent / "assets" / G01_PACKAGE_NAME / "urdf" / G01_URDF_FILENAME).resolve()
+
+
+def urdf_joint_names_from_file(urdf_path: Path) -> set[str]:
+    if not urdf_path.exists():
+        return set()
+    try:
+        root = ET.parse(urdf_path).getroot()
+    except ET.ParseError:
+        return set()
+    return {
+        joint.attrib["name"]
+        for joint in root.findall("joint")
+        if joint.attrib.get("name")
+    }
+
+
+def uses_g01_arm_joint_names(joint_names: set[str]) -> bool:
+    return "L_joint1" in joint_names and "R_joint1" in joint_names
+
+
+def urdf_joint_name_for_index(index: int, *, uses_g01_arms: bool) -> str | None:
+    if index < 7:
+        return (
+            G01_LEFT_URDF_JOINT_NAMES[index]
+            if uses_g01_arms
+            else WHEELED_ARM_LEFT_URDF_JOINT_NAMES[index]
+        )
+    if index < 14:
+        return (
+            G01_RIGHT_URDF_JOINT_NAMES[index - 7]
+            if uses_g01_arms
+            else WHEELED_ARM_RIGHT_URDF_JOINT_NAMES[index - 7]
+        )
+    if index == 16:
+        return "neck_yaw"
+    if index == 17:
+        return "neck_pitch"
+    return None
 
 
 def joint_indices(model, joint_names: list[str] | tuple[str, ...]) -> tuple[np.ndarray, np.ndarray]:

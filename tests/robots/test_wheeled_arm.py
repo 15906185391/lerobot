@@ -431,6 +431,15 @@ def test_send_action_can_command_hip_yaw_when_waist_is_configured():
     assert handler.right_arm_moving is False
 
 
+def test_send_action_in_mock_mode_accepts_hip_yaw_package_joint():
+    robot, handler = _make_robot()
+
+    returned = robot.send_action({"hip_yaw.pos": -0.25})
+
+    assert returned == {"hip_yaw.pos": -0.25}
+    assert handler.last_package[20] == -0.25
+
+
 def test_send_action_respects_disabled_parts_and_relative_limit():
     robot, handler = _make_robot(
         controlled_parts=["left_arm", "left_gripper"], max_relative_target=2.0)

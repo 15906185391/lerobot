@@ -38,6 +38,7 @@ from .config_wheeled_arm import (
     WHEELED_ARM_HEAD_JOINT_NAMES,
     WHEELED_ARM_JOINT_PACKAGE_INDICES,
     WHEELED_ARM_LEG_JOINT_NAMES,
+    WHEELED_ARM_PACKAGE_JOINT_NAMES,
     WHEELED_ARM_WAIST_JOINT_NAMES,
     WheeledArmConfig,
 )
@@ -139,7 +140,7 @@ class WheeledArm(Robot):
 
         self._joint_index_by_action_key = {
             f"{joint_name}.pos": WHEELED_ARM_JOINT_PACKAGE_INDICES[joint_name]
-            for joint_name in self.config.joint_names
+            for joint_name in WHEELED_ARM_PACKAGE_JOINT_NAMES
         }
 
     @property
@@ -689,7 +690,7 @@ class WheeledArm(Robot):
         logger.info(f"{self} disconnected.")
 
     def _default_mock_joint_pos(self) -> np.ndarray:
-        joint_pos = np.zeros(23, dtype=np.float32)
+        joint_pos = np.zeros(len(WHEELED_ARM_PACKAGE_JOINT_NAMES), dtype=np.float32)
         joint_pos[_PART_SLICES["left_arm"]] = _RESET_LEFT_ARM_RAD
         joint_pos[_PART_SLICES["right_arm"]] = _RESET_RIGHT_ARM_RAD
         return joint_pos
@@ -716,7 +717,10 @@ class WheeledArm(Robot):
             key: value for key, value in action.items() if key != WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY
         }
 
-        unknown_keys = set(hardware_action) - set(self.action_features)
+        allowed_keys = {
+            f"{joint_name}.pos" for joint_name in WHEELED_ARM_PACKAGE_JOINT_NAMES
+        }
+        unknown_keys = set(hardware_action) - allowed_keys
         if unknown_keys:
             raise ValueError(f"Unknown wheeled_arm action keys: {sorted(unknown_keys)}")
 

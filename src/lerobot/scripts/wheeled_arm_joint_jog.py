@@ -32,6 +32,13 @@ from pathlib import Path
 
 import numpy as np
 
+from lerobot.teleoperators.wheeled_arm_pico.ik_utils import (
+    default_g01_urdf_path,
+    urdf_joint_name_for_index,
+    urdf_joint_names_from_file,
+    uses_g01_arm_joint_names,
+)
+
 
 QT_XCB_INSTALL_HINT = (
     "sudo apt-get update && sudo apt-get install -y "
@@ -124,11 +131,7 @@ except ImportError:  # pragma: no cover - optional embedded browser dependency.
     QWebEngineView = None
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_URDF_PATH = (
-    PROJECT_ROOT
-    / "src/lerobot/teleoperators/wheeled_arm_pico/assets/wheeled_robot_sim/urdf/real_robot.urdf"
-)
+DEFAULT_URDF_PATH = default_g01_urdf_path()
 DEFAULT_LCM_URL = "udpm://239.255.76.67:8880?ttl=1"
 DEFAULT_COMMAND_HZ = 100.0
 MAX_COMMAND_HZ = 100.0
@@ -191,18 +194,6 @@ def _part_for_index(index: int) -> str:
     raise ValueError(f"Unknown joint index for jogging: {index}")
 
 
-def _urdf_joint_name(index: int) -> str | None:
-    if index < 7:
-        return f"AR5-5_07L-W4C4A2_joint_{index + 1}"
-    if index < 14:
-        return f"AR5-5_07R-W4C4A2_joint_{index - 6}"
-    if index == 16:
-        return "neck_yaw"
-    if index == 17:
-        return "neck_pitch"
-    return None
-
-
 def _read_joint_limits_deg(urdf_path: Path) -> list[tuple[float, float]]:
     default_limits = [(-180.0, 180.0) for _ in JOINT_NAMES]
     if not urdf_path.exists():
@@ -225,9 +216,16 @@ def _read_joint_limits_deg(urdf_path: Path) -> list[tuple[float, float]]:
             continue
         limits_by_name[name] = (lower, upper)
 
+    joint_names = {
+        joint.attrib["name"]
+        for joint in root.findall("joint")
+        if joint.attrib.get("name")
+    }
+    uses_g01_arms = uses_g01_arm_joint_names(joint_names)
     limits = []
     for index in range(len(JOINT_NAMES)):
-        limits.append(limits_by_name.get(_urdf_joint_name(index) or "", default_limits[index]))
+        joint_name = urdf_joint_name_for_index(index, uses_g01_arms=uses_g01_arms)
+        limits.append(limits_by_name.get(joint_name or "", default_limits[index]))
     return limits
 
 
@@ -259,6 +257,8 @@ class JointJogVisualizer:
             filename_handler=resolve_package_uri(urdf_path),
         )
         self.urdf_vis = ViserUrdf(self.server, urdf, root_node_name="/joint_jog_robot")
+        joint_names = urdf_joint_names_from_file(urdf_path)
+        self._uses_g01_arms = uses_g01_arm_joint_names(joint_names)
         self.status_gui = self.server.gui.add_markdown("等待 LCM 反馈...")
         if open_browser:
             QTimer.singleShot(500, lambda: webbrowser.open(self.url))
@@ -266,7 +266,7 @@ class JointJogVisualizer:
     def update(self, positions: np.ndarray, mode: str) -> None:
         cfg: dict[str, float] = {}
         for index in range(len(JOINT_NAMES)):
-            urdf_name = _urdf_joint_name(index)
+            urdf_name = urdf_joint_name_for_index(index, uses_g01_arms=self._uses_g01_arms)
             if urdf_name is not None:
                 cfg[urdf_name] = float(positions[index])
         self.urdf_vis.update_cfg(cfg)
@@ -815,7 +815,7 @@ class JointJogWindow(QMainWindow):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.setVerticalSpacing(10)
         self.lcm_url = QLineEdit(DEFAULT_LCM_URL)
-        self.urdf_path = PathPicker("real_robot.urdf")
+        self.urdf_path = PathPicker("G01.urdf")
         self.urdf_path.setText(str(DEFAULT_URDF_PATH))
         self.visualize = QCheckBox("启动 viser URDF 可视化")
         self.visualize.setChecked(True)

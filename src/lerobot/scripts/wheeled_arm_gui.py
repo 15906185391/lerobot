@@ -38,6 +38,7 @@ from typing import Any
 
 import numpy as np
 
+from lerobot.teleoperators.wheeled_arm_pico.ik_utils import default_g01_urdf_path
 from lerobot.utils.constants import HF_LEROBOT_HOME
 
 QT_XCB_INSTALL_HINT = (
@@ -312,10 +313,8 @@ COMMON_SCRIPT_MODULES = {
     "convert_dcp": "lerobot.scripts.lerobot_convert_dcp",
     "train_tokenizer": "lerobot.scripts.lerobot_train_tokenizer",
 }
-DEFAULT_WHEELED_ARM_URDF = (
-    PROJECT_ROOT
-    / "src/lerobot/teleoperators/wheeled_arm_pico/assets/wheeled_robot_sim/urdf/real_robot.urdf"
-)
+DEFAULT_WHEELED_ARM_URDF = default_g01_urdf_path()
+WHEELED_ARM_TELEOP_TYPES = ("wheeled_arm_pico", "wheeled_arm_pico_add_hip_yaw")
 
 
 def _bool_arg(value: bool) -> str:
@@ -2554,6 +2553,7 @@ class WheeledArmGui(QMainWindow):
         self.display_data.setChecked(True)
         self.display_mode = QComboBox()
         self.display_mode.addItems(["rerun", "foxglove"])
+        self.record_teleop_type = self._teleop_type_combo("wheeled_arm_pico")
         self.display_ip = QLineEdit()
         self.display_ip.setPlaceholderText("远程可视化时填写，通常留空")
         self.display_port = self._spin(0, 65535, 0)
@@ -2607,6 +2607,7 @@ class WheeledArmGui(QMainWindow):
         robot_form.addRow("", self.mock_robot)
         robot_form.addRow("", self.mock_cameras)
         robot_form.addRow("", self.mock_xr)
+        robot_form.addRow("teleop.type", self.record_teleop_type)
         robot_form.addRow("LCM URL", self.lcm_url)
         robot_form.addRow("", self.publish_action_ros2)
         robot_form.addRow("Action topic", self.action_ros2_topic)
@@ -2990,7 +2991,10 @@ class WheeledArmGui(QMainWindow):
         form = QFormLayout(config_box)
         self._setup_form_layout(form)
         self.joint_jog_lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
-        self.joint_jog_urdf_path = PathPicker("默认使用 wheeled_arm_pico assets/real_robot.urdf", directory=False)
+        self.joint_jog_urdf_path = PathPicker(
+            "默认使用 wheeled_arm_pico assets/G01_sim/urdf/G01.urdf",
+            directory=False,
+        )
         self.joint_jog_urdf_path.setText(str(DEFAULT_WHEELED_ARM_URDF))
         self.joint_jog_visualize = QCheckBox("启动 viser URDF 可视化")
         self.joint_jog_visualize.setChecked(False)
@@ -3315,6 +3319,7 @@ class WheeledArmGui(QMainWindow):
         self.common_teleop_fps = self._spin(1, 240, 30)
         self.common_teleop_time_s = self._spin(0, 36000, 0)
         self.common_teleop_time_s.setSpecialValueText("不限时")
+        self.common_teleop_type = self._teleop_type_combo("wheeled_arm_pico")
         self.common_teleop_display_data = QCheckBox("显示 Rerun/Foxglove 数据")
         self.common_teleop_display_mode = QComboBox()
         self.common_teleop_display_mode.addItems(["rerun", "foxglove"])
@@ -3362,6 +3367,7 @@ class WheeledArmGui(QMainWindow):
         )
         form.addRow("FPS", self.common_teleop_fps)
         form.addRow("运行秒数", self.common_teleop_time_s)
+        form.addRow("teleop.type", self.common_teleop_type)
         form.addRow("", self.common_teleop_display_data)
         form.addRow("显示后端", self.common_teleop_display_mode)
         form.addRow("", self.common_teleop_viser)
@@ -3408,7 +3414,7 @@ class WheeledArmGui(QMainWindow):
         self.common_calibrate_target = QComboBox()
         self.common_calibrate_target.addItems(["robot", "teleop"])
         self.common_calibrate_robot_type = QLineEdit("wheeled_arm")
-        self.common_calibrate_teleop_type = QLineEdit("wheeled_arm_pico")
+        self.common_calibrate_teleop_type = self._teleop_type_combo("wheeled_arm_pico")
         form.addRow("目标", self.common_calibrate_target)
         form.addRow("robot.type", self.common_calibrate_robot_type)
         form.addRow("teleop.type", self.common_calibrate_teleop_type)
@@ -3421,7 +3427,7 @@ class WheeledArmGui(QMainWindow):
         self.common_setup_motors_target = QComboBox()
         self.common_setup_motors_target.addItems(["robot", "teleop"])
         self.common_setup_motors_robot_type = QLineEdit("wheeled_arm")
-        self.common_setup_motors_teleop_type = QLineEdit("wheeled_arm_pico")
+        self.common_setup_motors_teleop_type = self._teleop_type_combo("wheeled_arm_pico")
         form.addRow("目标", self.common_setup_motors_target)
         form.addRow("robot.type", self.common_setup_motors_robot_type)
         form.addRow("teleop.type", self.common_setup_motors_teleop_type)
@@ -3431,15 +3437,17 @@ class WheeledArmGui(QMainWindow):
         box = QGroupBox("查关节限位")
         form = QFormLayout(box)
         self._setup_form_layout(form)
-        self.common_joint_urdf_path = PathPicker("real_robot.urdf", directory=False)
+        self.common_joint_urdf_path = PathPicker("G01.urdf", directory=False)
         self.common_joint_urdf_path.setText(str(DEFAULT_WHEELED_ARM_URDF))
         self.common_joint_target_frame = QLineEdit("gripper")
+        self.common_joint_teleop_type = self._teleop_type_combo("wheeled_arm_pico_add_hip_yaw")
         self.common_joint_teleop_time = self._spin(1, 36000, 30)
         self.common_joint_warmup_time = self._spin(0, 36000, 5)
         self.common_joint_fps = self._spin(1, 240, 30)
         self.common_joint_lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
         form.addRow("URDF", self.common_joint_urdf_path)
         form.addRow("目标 frame", self.common_joint_target_frame)
+        form.addRow("teleop.type", self.common_joint_teleop_type)
         form.addRow("采样秒数", self.common_joint_teleop_time)
         form.addRow("预热秒数", self.common_joint_warmup_time)
         form.addRow("FPS", self.common_joint_fps)
@@ -3549,7 +3557,7 @@ class WheeledArmGui(QMainWindow):
         self.common_rollout_policy_path = QLineEdit()
         self.common_rollout_policy_path.setPlaceholderText("Hub repo 或 pretrained_model 路径")
         self.common_rollout_robot_type = QLineEdit("wheeled_arm")
-        self.common_rollout_teleop_type = QLineEdit("wheeled_arm_pico")
+        self.common_rollout_teleop_type = self._teleop_type_combo("wheeled_arm_pico")
         self.common_rollout_dataset_repo_id = QLineEdit()
         self.common_rollout_dataset_repo_id.setPlaceholderText("记录 rollout 数据时填写，例如 user/rollout_data")
         self.common_rollout_task = QLineEdit("PICO rollout wheeled arm")
@@ -3923,6 +3931,18 @@ class WheeledArmGui(QMainWindow):
         spin.setValue(value)
         return spin
 
+    def _teleop_type_combo(self, default: str) -> QComboBox:
+        combo = QComboBox()
+        combo.addItems(list(WHEELED_ARM_TELEOP_TYPES))
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        combo.setCurrentText(default)
+        return combo
+
+    def _teleop_type_value(self, combo: QComboBox) -> str:
+        value = combo.currentText().strip()
+        return value or WHEELED_ARM_TELEOP_TYPES[0]
+
     def _setup_form_layout(self, form: QFormLayout) -> None:
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
@@ -3944,6 +3964,7 @@ class WheeledArmGui(QMainWindow):
         return (
             self.repo_id,
             self.task,
+            self.record_teleop_type,
             self.num_episodes,
             self.episode_time_s,
             self.reset_time_s,
@@ -4086,6 +4107,7 @@ class WheeledArmGui(QMainWindow):
             self.common_camera_warmup,
             self.common_teleop_fps,
             self.common_teleop_time_s,
+            self.common_teleop_type,
             self.common_teleop_display_data,
             self.common_teleop_display_mode,
             self.common_teleop_viser,
@@ -4115,6 +4137,7 @@ class WheeledArmGui(QMainWindow):
             self.common_setup_motors_robot_type,
             self.common_setup_motors_teleop_type,
             self.common_joint_target_frame,
+            self.common_joint_teleop_type,
             self.common_joint_teleop_time,
             self.common_joint_warmup_time,
             self.common_joint_fps,
@@ -4195,6 +4218,10 @@ class WheeledArmGui(QMainWindow):
             widget.toggled.connect(callback)
         elif isinstance(widget, QComboBox):
             widget.currentIndexChanged.connect(callback)
+            widget.currentTextChanged.connect(callback)
+            line_edit = widget.lineEdit()
+            if line_edit is not None:
+                line_edit.textChanged.connect(callback)
         elif isinstance(widget, QPlainTextEdit):
             widget.textChanged.connect(callback)
 
@@ -4232,6 +4259,11 @@ class WheeledArmGui(QMainWindow):
     def _load_settings(self) -> None:
         self.repo_id.setText(self.settings.value("record/repo_id", self.repo_id.text()))
         self.task.setText(self.settings.value("record/task", self.task.text()))
+        self.record_teleop_type.setCurrentText(
+            self.settings.value(
+                "record/teleop_type", self._teleop_type_value(self.record_teleop_type)
+            )
+        )
         self.dataset_root.setText(self.settings.value("record/root", ""))
         self.lcm_url.setText(self.settings.value("record/lcm_url", self.lcm_url.text()))
         self.advanced_args.setPlainText(self.settings.value("record/advanced_args", ""))
@@ -4382,6 +4414,9 @@ class WheeledArmGui(QMainWindow):
                 False,
             )
         )
+        self.common_teleop_type.setCurrentText(
+            self.settings.value("common/teleop_type", self._teleop_type_value(self.common_teleop_type))
+        )
         self.common_teleop_viser.setChecked(
             _settings_bool(self.settings.value("common/teleop_viser", False), False)
         )
@@ -4455,6 +4490,29 @@ class WheeledArmGui(QMainWindow):
                 )
             )
         )
+        self.common_calibrate_teleop_type.setCurrentText(
+            self.settings.value(
+                "common/calibrate_teleop_type",
+                self._teleop_type_value(self.common_calibrate_teleop_type),
+            )
+        )
+        self.common_setup_motors_teleop_type.setCurrentText(
+            self.settings.value(
+                "common/setup_motors_teleop_type",
+                self._teleop_type_value(self.common_setup_motors_teleop_type),
+            )
+        )
+        self.common_joint_teleop_type.setCurrentText(
+            self.settings.value(
+                "common/joint_teleop_type", self._teleop_type_value(self.common_joint_teleop_type)
+            )
+        )
+        self.common_rollout_teleop_type.setCurrentText(
+            self.settings.value(
+                "common/rollout_teleop_type",
+                self._teleop_type_value(self.common_rollout_teleop_type),
+            )
+        )
         self.joint_jog_lcm_url.setText(
             self.settings.value("joint_jog/lcm_url", self.joint_jog_lcm_url.text())
         )
@@ -4480,6 +4538,7 @@ class WheeledArmGui(QMainWindow):
     def _save_settings(self) -> None:
         self.settings.setValue("record/repo_id", self.repo_id.text())
         self.settings.setValue("record/task", self.task.text())
+        self.settings.setValue("record/teleop_type", self.record_teleop_type.currentText())
         self.settings.setValue("record/root", self.dataset_root.text())
         self.settings.setValue("record/lcm_url", self.lcm_url.text())
         self.settings.setValue("record/advanced_args", self.advanced_args.toPlainText())
@@ -4543,6 +4602,7 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("common/pico_usb_remove", self.common_pico_usb_remove.isChecked())
         self.settings.setValue("common/teleop_mock_robot", self.common_teleop_mock_robot.isChecked())
         self.settings.setValue("common/teleop_mock_cameras", self.common_teleop_mock_cameras.isChecked())
+        self.settings.setValue("common/teleop_type", self.common_teleop_type.currentText())
         self.settings.setValue("common/teleop_viser", self.common_teleop_viser.isChecked())
         self.settings.setValue(
             "common/teleop_publish_action_ros2",
@@ -4579,6 +4639,12 @@ class WheeledArmGui(QMainWindow):
             "common/teleop_ik_max_joint_acceleration",
             self.common_teleop_ik_max_joint_acceleration.value(),
         )
+        self.settings.setValue("common/calibrate_teleop_type", self.common_calibrate_teleop_type.currentText())
+        self.settings.setValue(
+            "common/setup_motors_teleop_type", self.common_setup_motors_teleop_type.currentText()
+        )
+        self.settings.setValue("common/joint_teleop_type", self.common_joint_teleop_type.currentText())
+        self.settings.setValue("common/rollout_teleop_type", self.common_rollout_teleop_type.currentText())
         self.settings.setValue("joint_jog/lcm_url", self.joint_jog_lcm_url.text())
         self.settings.setValue("joint_jog/urdf_path", self.joint_jog_urdf_path.text())
         self.settings.setValue("joint_jog/visualization_host", self.joint_jog_visualization_host.text())
@@ -4591,7 +4657,7 @@ class WheeledArmGui(QMainWindow):
         command.extend(
             [
                 "--robot.type=wheeled_arm",
-                "--teleop.type=wheeled_arm_pico",
+                f"--teleop.type={self._teleop_type_value(self.record_teleop_type)}",
                 f"--dataset.repo_id={self.repo_id.text().strip()}",
                 f"--dataset.single_task={self.task.text().strip()}",
                 f"--dataset.num_episodes={self.num_episodes.value()}",
@@ -4933,7 +4999,7 @@ class WheeledArmGui(QMainWindow):
             command.extend(
                 [
                     "--robot.type=wheeled_arm",
-                    "--teleop.type=wheeled_arm_pico",
+                    f"--teleop.type={self._teleop_type_value(self.common_teleop_type)}",
                     f"--fps={self.common_teleop_fps.value()}",
                     f"--display_data={_bool_arg(self.common_teleop_display_data.isChecked())}",
                     f"--display_mode={self.common_teleop_display_mode.currentText()}",
@@ -5005,17 +5071,21 @@ class WheeledArmGui(QMainWindow):
             if self.common_calibrate_target.currentText() == "robot":
                 command.append(f"--robot.type={self.common_calibrate_robot_type.text().strip()}")
             else:
-                command.append(f"--teleop.type={self.common_calibrate_teleop_type.text().strip()}")
+                command.append(
+                    f"--teleop.type={self._teleop_type_value(self.common_calibrate_teleop_type)}"
+                )
         elif command_type == "setup_motors":
             if self.common_setup_motors_target.currentText() == "robot":
                 command.append(f"--robot.type={self.common_setup_motors_robot_type.text().strip()}")
             else:
-                command.append(f"--teleop.type={self.common_setup_motors_teleop_type.text().strip()}")
+                command.append(
+                    f"--teleop.type={self._teleop_type_value(self.common_setup_motors_teleop_type)}"
+                )
         elif command_type == "find_joint_limits":
             command.extend(
                 [
                     "--robot.type=wheeled_arm",
-                    "--teleop.type=wheeled_arm_pico",
+                    f"--teleop.type={self._teleop_type_value(self.common_joint_teleop_type)}",
                     f"--urdf_path={self.common_joint_urdf_path.text()}",
                     f"--target_frame_name={self.common_joint_target_frame.text().strip()}",
                     f"--teleop_time_s={self.common_joint_teleop_time.value()}",
@@ -5094,8 +5164,7 @@ class WheeledArmGui(QMainWindow):
                     f"--display_mode={self.common_rollout_display_mode.currentText()}",
                 ]
             )
-            if self.common_rollout_teleop_type.text().strip():
-                command.append(f"--teleop.type={self.common_rollout_teleop_type.text().strip()}")
+            command.append(f"--teleop.type={self._teleop_type_value(self.common_rollout_teleop_type)}")
             if self.common_rollout_dataset_repo_id.text().strip():
                 command.extend(
                     [
