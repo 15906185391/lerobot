@@ -123,8 +123,8 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     # 复位 movej 执行期间按住该按钮会立即停止继续发布复位轨迹。
     emergency_stop_button: str = "X"
     # trigger=0/1 分别映射到 open/closed；实物夹爪单位不同时改这两个值。
-    gripper_open_pos: float = 0.0
-    gripper_closed_pos: float = 1.0
+    gripper_open_pos: float = 130.0
+    gripper_closed_pos: float = 0.0
     # 夹爪输入的死区，单位是归一化 trigger 比例 [0, 1]。小变化会被忽略。
     gripper_input_deadband: float = 0.02
     # 夹爪目标的 EMA 平滑系数。越小越稳但越慢。

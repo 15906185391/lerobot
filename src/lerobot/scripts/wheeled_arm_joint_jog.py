@@ -90,7 +90,7 @@ def _prepare_linux_qt_platform() -> None:
 _prepare_linux_qt_platform()
 
 try:
-    from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal, Slot
+    from PySide6.QtCore import QObject, QSize, Qt, QTimer, QUrl, Signal, Slot
     from PySide6.QtGui import QFont
     from PySide6.QtWidgets import (
         QApplication,
@@ -117,6 +117,11 @@ except ImportError as exc:  # pragma: no cover - optional GUI dependency.
         "wheeled_arm_joint_jog requires PySide6. "
         "Run: bash scripts/setup_wheeled_arm_pico_conda.bash --env xr"
     ) from exc
+
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+except ImportError:  # pragma: no cover - optional embedded browser dependency.
+    QWebEngineView = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -152,6 +157,24 @@ def _rad_to_deg(value: float) -> float:
 
 def _deg_to_rad(value: float) -> float:
     return float(np.deg2rad(value))
+
+
+def _viser_url(host: str, port: int) -> str:
+    browser_host = "localhost" if host.strip() in {"", "0.0.0.0", "::"} else host.strip()
+    if ":" in browser_host and not browser_host.startswith("["):
+        browser_host = f"[{browser_host}]"
+    return f"http://{browser_host}:{port}"
+
+
+def _embedded_viser_placeholder_html() -> str:
+    return """
+    <html>
+      <body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;
+                   font-family:sans-serif;color:#526174;background:#f8fafc;">
+        <div>等待 viser 启动...</div>
+      </body>
+    </html>
+    """
 
 
 def _part_for_index(index: int) -> str:
@@ -216,6 +239,7 @@ class JointCommand:
 
 class JointJogVisualizer:
     def __init__(self, urdf_path: Path, host: str, port: int, open_browser: bool) -> None:
+        self.url = _viser_url(host, port)
         try:
             import viser
             import yourdfpy
@@ -237,7 +261,7 @@ class JointJogVisualizer:
         self.urdf_vis = ViserUrdf(self.server, urdf, root_node_name="/joint_jog_robot")
         self.status_gui = self.server.gui.add_markdown("等待 LCM 反馈...")
         if open_browser:
-            QTimer.singleShot(500, lambda: webbrowser.open(f"http://localhost:{port}"))
+            QTimer.singleShot(500, lambda: webbrowser.open(self.url))
 
     def update(self, positions: np.ndarray, mode: str) -> None:
         cfg: dict[str, float] = {}
@@ -269,6 +293,7 @@ class JointJogSession(QObject):
     status = Signal(str)
     error = Signal(str)
     connectedChanged = Signal(bool)
+    visualizationUrlChanged = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -343,6 +368,9 @@ class JointJogSession(QObject):
                     port=visualization_port,
                     open_browser=visualization_open_browser,
                 )
+                self.visualizationUrlChanged.emit(self.visualizer.url)
+            else:
+                self.visualizationUrlChanged.emit("")
         except Exception as exc:  # noqa: BLE001 - surface hardware/optional dependency failures in GUI.
             self.error.emit(f"启动关节点动失败：{exc}")
             self.stop()
@@ -360,6 +388,7 @@ class JointJogSession(QObject):
         if self.visualizer is not None:
             self.visualizer.close()
             self.visualizer = None
+        self.visualizationUrlChanged.emit("")
         if self.handler is not None:
             stop = getattr(self.handler, "stop", None)
             if callable(stop):
@@ -795,7 +824,7 @@ class JointJogWindow(QMainWindow):
         self.visualization_port.setRange(1, 65535)
         self.visualization_port.setValue(8092)
         self.open_browser = QCheckBox("自动打开浏览器")
-        self.open_browser.setChecked(True)
+        self.open_browser.setChecked(False)
         self.feedback_timeout = QDoubleSpinBox()
         self.feedback_timeout.setRange(0.1, 30.0)
         self.feedback_timeout.setValue(1.0)
@@ -900,11 +929,16 @@ class JointJogWindow(QMainWindow):
         layout.addWidget(status_box, 1, 1)
 
         joints = QGroupBox("关节")
-        joints_layout = QVBoxLayout(joints)
-        header = QLabel("勾选关节后可批量点动到目标；单行 +/- 会按当前反馈做小步点动。手臂和头部角度单位为 degree。")
+        joints_layout = QGridLayout(joints)
+        joints_layout.setHorizontalSpacing(14)
+        joints_layout.setVerticalSpacing(10)
+        header = QLabel(
+            "勾选关节后可批量点动到目标；单行 +/- 会按当前反馈做小步点动。"
+            "手臂和头部角度单位为 degree。"
+        )
         header.setObjectName("Hint")
         header.setWordWrap(True)
-        joints_layout.addWidget(header)
+        joints_layout.addWidget(header, 0, 0, 1, 2)
 
         self.joint_container = QWidget()
         self.joint_layout = QGridLayout(self.joint_container)
@@ -914,7 +948,51 @@ class JointJogWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setMinimumHeight(360)
         scroll.setWidget(self.joint_container)
-        joints_layout.addWidget(scroll, 1)
+        joints_layout.addWidget(scroll, 1, 0)
+
+        self.visualization_url = ""
+        self.visualization_panel = QWidget()
+        self.visualization_panel.setObjectName("ViserPanel")
+        visualization_layout = QVBoxLayout(self.visualization_panel)
+        visualization_layout.setContentsMargins(10, 10, 10, 10)
+        visualization_layout.setSpacing(8)
+
+        visualization_header = QHBoxLayout()
+        self.visualization_title = QLabel("viser 可视化")
+        self.visualization_title.setObjectName("PanelTitle")
+        self.open_visualization_btn = QPushButton("外部打开")
+        self.open_visualization_btn.setEnabled(False)
+        self.open_visualization_btn.clicked.connect(self.open_visualization_browser)
+        visualization_header.addWidget(self.visualization_title)
+        visualization_header.addStretch(1)
+        visualization_header.addWidget(self.open_visualization_btn)
+        visualization_layout.addLayout(visualization_header)
+
+        self.visualization_url_label = QLabel("未启动")
+        self.visualization_url_label.setObjectName("Hint")
+        self.visualization_url_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.visualization_url_label.setOpenExternalLinks(True)
+        visualization_layout.addWidget(self.visualization_url_label)
+
+        if QWebEngineView is not None:
+            self.visualization_view = QWebEngineView()
+            self.visualization_view.setMinimumSize(420, 360)
+            self.visualization_view.setHtml(_embedded_viser_placeholder_html())
+            visualization_layout.addWidget(self.visualization_view, 1)
+        else:
+            self.visualization_view = None
+            self.visualization_placeholder = QLabel(
+                "当前 PySide6 环境缺少 QtWebEngine，启动 viser 后可在此处打开本地页面。"
+            )
+            self.visualization_placeholder.setObjectName("Hint")
+            self.visualization_placeholder.setWordWrap(True)
+            self.visualization_placeholder.setMinimumHeight(360)
+            self.visualization_placeholder.setAlignment(Qt.AlignCenter)
+            visualization_layout.addWidget(self.visualization_placeholder, 1)
+
+        joints_layout.addWidget(self.visualization_panel, 1, 1)
+        joints_layout.setColumnStretch(0, 3)
+        joints_layout.setColumnStretch(1, 4)
         layout.addWidget(joints, 2, 0, 1, 2)
         layout.setColumnStretch(0, 2)
         layout.setColumnStretch(1, 3)
@@ -947,6 +1025,7 @@ class JointJogWindow(QMainWindow):
         self.session.status.connect(self.set_status)
         self.session.error.connect(self.show_error)
         self.session.connectedChanged.connect(self.set_connected)
+        self.session.visualizationUrlChanged.connect(self.update_visualization_url)
 
     def _load_args(self) -> None:
         self.lcm_url.setText(self.args.lcm_url)
@@ -1081,6 +1160,24 @@ class JointJogWindow(QMainWindow):
         self.log.append(f"[{timestamp}] {text}")
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
+    @Slot(str)
+    def update_visualization_url(self, url: str) -> None:
+        self.visualization_url = url
+        self.open_visualization_btn.setEnabled(bool(url))
+        if not url:
+            self.visualization_url_label.setText("未启动")
+            if self.visualization_view is not None:
+                self.visualization_view.setHtml(_embedded_viser_placeholder_html())
+            return
+
+        self.visualization_url_label.setText(f'<a href="{url}">{url}</a>')
+        if self.visualization_view is not None:
+            self.visualization_view.load(QUrl(url))
+
+    def open_visualization_browser(self) -> None:
+        if self.visualization_url:
+            webbrowser.open(self.visualization_url)
+
     def closeEvent(self, event) -> None:  # noqa: N802
         self.session.stop()
         super().closeEvent(event)
@@ -1175,6 +1272,15 @@ QPushButton:disabled {
     border: 1px solid #223147;
     border-radius: 8px;
 }
+#ViserPanel {
+    background: #f8fafc;
+    border: 1px solid #d7e1ec;
+    border-radius: 8px;
+}
+#PanelTitle {
+    color: #253247;
+    font-weight: 800;
+}
 QScrollArea {
     background: transparent;
     border: none;
@@ -1245,7 +1351,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visualize", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visualization-host", default="0.0.0.0")
     parser.add_argument("--visualization-port", type=int, default=8092)
-    parser.add_argument("--open-browser", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--open-browser", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--command-hz", type=float, default=DEFAULT_COMMAND_HZ)
     parser.add_argument("--max-speed-deg-s", type=float, default=DEFAULT_MAX_SPEED_DEG_S)
     parser.add_argument("--max-acceleration-deg-s2", type=float, default=DEFAULT_MAX_ACCEL_DEG_S2)

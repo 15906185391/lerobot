@@ -18,16 +18,19 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import random
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import threading
+import time
 from ctypes.util import find_library
 from dataclasses import dataclass
 from pathlib import Path
@@ -452,6 +455,64 @@ def describe_local_dataset(repo_id: str, root: str | None) -> tuple[Path, int, i
     return dataset_root, total_episodes, total_frames
 
 
+def _record_dataset_candidates(repo_id: str, root: str | None, no_stamp: bool, resume: bool) -> list[Path]:
+    repo_id = repo_id.strip()
+    if not repo_id:
+        return []
+
+    if root:
+        return [Path(root).expanduser()]
+
+    exact = HF_LEROBOT_HOME / repo_id
+    candidates: list[Path] = []
+    if no_stamp or resume:
+        candidates.append(exact)
+
+    if "/" not in repo_id:
+        candidates_root = HF_LEROBOT_HOME
+        prefix = f"{repo_id}_"
+    else:
+        namespace, name = repo_id.split("/", 1)
+        candidates_root = HF_LEROBOT_HOME / namespace
+        prefix = f"{name}_"
+
+    if candidates_root.exists():
+        candidates.extend(
+            path
+            for path in candidates_root.iterdir()
+            if path.is_dir() and path.name.startswith(prefix) and _meta_info_path(path).exists()
+        )
+    if exact.exists() and exact not in candidates:
+        candidates.append(exact)
+    return candidates
+
+
+def find_empty_record_dataset(
+    repo_id: str,
+    root: str | None,
+    no_stamp: bool,
+    resume: bool,
+    started_at_s: float,
+) -> tuple[Path, int, int] | None:
+    candidates = []
+    for path in _record_dataset_candidates(repo_id, root, no_stamp, resume):
+        counts = _read_dataset_counts(path)
+        if counts is None or counts != (0, 0):
+            continue
+        try:
+            modified_s = max(path.stat().st_mtime, _meta_info_path(path).stat().st_mtime)
+        except OSError:
+            continue
+        if started_at_s > 0 and modified_s + 1.0 < started_at_s:
+            continue
+        candidates.append((path, *counts, modified_s))
+
+    if not candidates:
+        return None
+    path, total_episodes, total_frames, _modified_s = max(candidates, key=lambda item: item[3])
+    return path, total_episodes, total_frames
+
+
 def find_latest_local_dataset(repo_id: str, root: str | None, no_stamp: bool, resume: bool) -> str | None:
     """Return the most likely repo_id to visualize after a recording run."""
     repo_id = repo_id.strip()
@@ -524,6 +585,7 @@ class RuntimeFailure:
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 PYTHON_TRACEBACK_START = "Traceback (most recent call last):"
 PYTHON_EXCEPTION_RE = re.compile(
     r"^(?:[A-Za-z_][\w.]*Error|[A-Za-z_][\w.]*Exception|KeyboardInterrupt|SystemExit)(?::\s*.*)?$"
@@ -657,6 +719,239 @@ def _strip_ansi(text: str) -> str:
     return ANSI_ESCAPE_RE.sub("", text)
 
 
+LOG_SOURCE_COLORS = {
+    "采集": "#7dd3fc",
+    "查看": "#c4b5fd",
+    "编辑": "#f9a8d4",
+    "转换": "#fdba74",
+    "常用": "#93c5fd",
+    "点动": "#86efac",
+}
+LOG_NORMAL_COLOR = "#d8e7f3"
+LOG_MUTED_COLOR = "#94a3b8"
+LOG_COMMAND_COLOR = "#e2e8f0"
+LOG_INFO_COLOR = "#7dd3fc"
+LOG_SUCCESS_COLOR = "#86efac"
+LOG_WARNING_COLOR = "#fde68a"
+LOG_ERROR_COLOR = "#fca5a5"
+ANSI_STANDARD_COLORS = {
+    30: "#111827",
+    31: "#f87171",
+    32: "#86efac",
+    33: "#fde68a",
+    34: "#93c5fd",
+    35: "#d8b4fe",
+    36: "#67e8f9",
+    37: "#e5e7eb",
+}
+ANSI_BRIGHT_COLORS = {
+    90: "#94a3b8",
+    91: "#fca5a5",
+    92: "#bbf7d0",
+    93: "#fef08a",
+    94: "#bfdbfe",
+    95: "#e9d5ff",
+    96: "#a5f3fc",
+    97: "#f8fafc",
+}
+
+
+def _html_escape_preserve_spaces(text: str) -> str:
+    return html.escape(text, quote=False).replace(" ", "&nbsp;")
+
+
+def _log_line_level(clean_line: str) -> str:
+    lowered = clean_line.lower()
+    if clean_line.startswith("$ "):
+        return "command"
+    if _is_python_exception_summary(clean_line) or _is_traceback_related_line(clean_line):
+        return "error"
+    if any(
+        token in lowered
+        for token in (
+            "error",
+            "exception",
+            "traceback",
+            "failed",
+            "failure",
+            "fatal",
+            "critical",
+            "segmentation fault",
+            "core dumped",
+            "aborted",
+            "permission denied",
+            "no such file",
+        )
+    ) or any(
+        token in clean_line
+        for token in ("错误", "异常", "失败", "报错", "崩溃", "无响应", "退出码")
+    ):
+        return "error"
+    if any(token in lowered for token in ("warning", "warn", "deprecated")) or any(
+        token in clean_line for token in ("警告", "提醒", "注意", "超时", "等待", "收到信号")
+    ):
+        return "warning"
+    if any(
+        token in lowered
+        for token in ("success", "succeeded", "complete", "completed", "connected", "ready")
+    ) or any(token in clean_line for token in ("成功", "完成", "已正常结束", "已连接", "就绪")):
+        return "success"
+    if any(token in lowered for token in ("start", "starting", "running", "loading")) or any(
+        token in clean_line for token in ("已启动", "运行中", "正在", "启动")
+    ):
+        return "info"
+    return "normal"
+
+
+def _log_level_color(level: str) -> str:
+    return {
+        "command": LOG_COMMAND_COLOR,
+        "info": LOG_INFO_COLOR,
+        "success": LOG_SUCCESS_COLOR,
+        "warning": LOG_WARNING_COLOR,
+        "error": LOG_ERROR_COLOR,
+    }.get(level, LOG_NORMAL_COLOR)
+
+
+def _ansi_style_css(fg: str | None, bold: bool, fallback_color: str) -> str:
+    style = f"color: {fg or fallback_color};"
+    if bold:
+        style += " font-weight: 700;"
+    return style
+
+
+def _ansi_to_html(text: str, fallback_color: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    fg: str | None = None
+    bold = False
+
+    for match in ANSI_SGR_RE.finditer(text):
+        segment = ANSI_ESCAPE_RE.sub("", text[cursor : match.start()])
+        if segment:
+            escaped = _html_escape_preserve_spaces(segment)
+            parts.append(
+                f'<span style="{_ansi_style_css(fg, bold, fallback_color)}">{escaped}</span>'
+            )
+
+        raw_codes = match.group(1)
+        codes = [0] if raw_codes == "" else [int(code) for code in raw_codes.split(";") if code]
+        index = 0
+        while index < len(codes):
+            code = codes[index]
+            if code == 0:
+                fg = None
+                bold = False
+            elif code == 1:
+                bold = True
+            elif code == 22:
+                bold = False
+            elif code == 39:
+                fg = None
+            elif code in ANSI_STANDARD_COLORS:
+                fg = ANSI_STANDARD_COLORS[code]
+            elif code in ANSI_BRIGHT_COLORS:
+                fg = ANSI_BRIGHT_COLORS[code]
+            elif code == 38 and index + 4 < len(codes) and codes[index + 1] == 2:
+                red, green, blue = codes[index + 2 : index + 5]
+                fg = f"#{red:02x}{green:02x}{blue:02x}"
+                index += 4
+            elif code == 38 and index + 2 < len(codes) and codes[index + 1] == 5:
+                color_index = codes[index + 2]
+                fg = ANSI_BRIGHT_COLORS.get(90 + color_index % 8, fallback_color)
+                index += 2
+            index += 1
+        cursor = match.end()
+
+    tail = ANSI_ESCAPE_RE.sub("", text[cursor:])
+    if tail:
+        escaped = _html_escape_preserve_spaces(tail)
+        parts.append(
+            f'<span style="{_ansi_style_css(fg, bold, fallback_color)}">{escaped}</span>'
+        )
+    return "".join(parts)
+
+
+def _format_log_html(source: str, line: str) -> str:
+    clean_line = _strip_ansi(line)
+    level = _log_line_level(clean_line)
+    color = _log_level_color(level)
+    source_color = LOG_SOURCE_COLORS.get(source, "#cbd5e1")
+    prefix = _html_escape_preserve_spaces(f"[{source}]")
+
+    if level == "command" and clean_line.startswith("$ "):
+        body = (
+            '<span style="color:#86efac;font-weight:700;">$</span>'
+            '<span style="color:#94a3b8;">&nbsp;</span>'
+            f'<span style="color:{LOG_COMMAND_COLOR};">'
+            f'{_html_escape_preserve_spaces(clean_line[2:])}</span>'
+        )
+    else:
+        body = _ansi_to_html(line, color)
+
+    return (
+        '<span style="font-family: monospace; color:'
+        f'{LOG_MUTED_COLOR};">'
+        f'<span style="color:{source_color};font-weight:700;">{prefix}</span>&nbsp;{body}'
+        "</span>"
+    )
+
+
+COMMAND_PREVIEW_BG = "#111a27"
+COMMAND_PREVIEW_TEXT = "#d8e7f3"
+COMMAND_PREVIEW_COMMAND = "#86efac"
+COMMAND_PREVIEW_OPTION = "#7dd3fc"
+COMMAND_PREVIEW_VALUE = "#fde68a"
+COMMAND_PREVIEW_PATH = "#f9a8d4"
+COMMAND_PREVIEW_LITERAL = "#c4b5fd"
+COMMAND_PREVIEW_ERROR = "#fca5a5"
+SHELL_TOKEN_RE = re.compile(r"\s+|'(?:'\\''|[^'])*'|\"(?:\\.|[^\"])*\"|\S+")
+
+
+def _command_preview_token_html(token: str, is_command: bool) -> str:
+    escaped = html.escape(token, quote=False)
+    if is_command:
+        return f'<span style="color:{COMMAND_PREVIEW_COMMAND};font-weight:700;">{escaped}</span>'
+    if token.startswith("--") and "=" in token:
+        option, value = token.split("=", 1)
+        return (
+            f'<span style="color:{COMMAND_PREVIEW_OPTION};">{html.escape(option, quote=False)}</span>'
+            f'<span style="color:{COMMAND_PREVIEW_TEXT};">=</span>'
+            f'<span style="color:{COMMAND_PREVIEW_VALUE};">{html.escape(value, quote=False)}</span>'
+        )
+    if token.startswith("-"):
+        return f'<span style="color:{COMMAND_PREVIEW_OPTION};">{escaped}</span>'
+    if token.startswith(("'", '"')) and token.endswith(("'", '"')):
+        return f'<span style="color:{COMMAND_PREVIEW_VALUE};">{escaped}</span>'
+    lowered = token.lower()
+    if lowered in {"true", "false", "none", "null"} or re.fullmatch(r"[-+]?\d+(?:\.\d+)?", token):
+        return f'<span style="color:{COMMAND_PREVIEW_LITERAL};">{escaped}</span>'
+    if "/" in token or token.startswith(("~", ".")):
+        return f'<span style="color:{COMMAND_PREVIEW_PATH};">{escaped}</span>'
+    return f'<span style="color:{COMMAND_PREVIEW_TEXT};">{escaped}</span>'
+
+
+def _format_command_preview_html(command: str) -> str:
+    if "解析失败" in command:
+        body = f'<span style="color:{COMMAND_PREVIEW_ERROR};font-weight:700;">{html.escape(command)}</span>'
+    else:
+        parts: list[str] = []
+        saw_command = False
+        for match in SHELL_TOKEN_RE.finditer(command):
+            token = match.group(0)
+            if token.isspace():
+                parts.append(html.escape(token))
+                continue
+            parts.append(_command_preview_token_html(token, not saw_command))
+            saw_command = True
+        body = "".join(parts)
+
+    return (
+        f'<pre style="margin:0;white-space:pre-wrap;font-family:monospace;color:{COMMAND_PREVIEW_TEXT};'
+        f'background:{COMMAND_PREVIEW_BG};">{body}</pre>'
+    )
+
+
 def _detect_runtime_alert(line: str) -> RuntimeAlert | None:
     clean_line = _strip_ansi(line)
     for match_mode, tokens, alert in RUNTIME_ALERT_RULES:
@@ -727,8 +1022,12 @@ class ProcessRunner(QObject):
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         env.setdefault("LC_CTYPE", "C.UTF-8")
-        env.setdefault("NO_COLOR", "1")
-        env.setdefault("RUST_LOG_STYLE", "never")
+        env.pop("NO_COLOR", None)
+        env.setdefault("TERM", "xterm-256color")
+        env.setdefault("CLICOLOR_FORCE", "1")
+        env.setdefault("FORCE_COLOR", "1")
+        env.setdefault("PY_COLORS", "1")
+        env.setdefault("RUST_LOG_STYLE", "always")
         if env_overrides:
             for key, value in env_overrides.items():
                 if value is None:
@@ -1952,6 +2251,7 @@ class WheeledArmGui(QMainWindow):
         self._last_record_root = ""
         self._last_record_no_stamp = False
         self._last_record_resume = False
+        self._last_record_started_at_s = 0.0
         self._runtime_alerts: dict[str, RuntimeAlert] = {}
         self._runtime_failures: dict[str, RuntimeFailure] = {}
         self._traceback_buffers: dict[str, list[str]] = {}
@@ -3553,17 +3853,17 @@ class WheeledArmGui(QMainWindow):
         preview_box = QGroupBox("命令预览")
         preview_layout = QVBoxLayout(preview_box)
         self.preview_tabs = QTabWidget()
-        self.record_command_preview = QPlainTextEdit()
+        self.record_command_preview = QTextEdit()
         self.record_command_preview.setReadOnly(True)
-        self.viewer_command_preview = QPlainTextEdit()
+        self.viewer_command_preview = QTextEdit()
         self.viewer_command_preview.setReadOnly(True)
-        self.edit_command_preview = QPlainTextEdit()
+        self.edit_command_preview = QTextEdit()
         self.edit_command_preview.setReadOnly(True)
-        self.conversion_command_preview = QPlainTextEdit()
+        self.conversion_command_preview = QTextEdit()
         self.conversion_command_preview.setReadOnly(True)
-        self.common_command_preview = QPlainTextEdit()
+        self.common_command_preview = QTextEdit()
         self.common_command_preview.setReadOnly(True)
-        self.joint_jog_command_preview = QPlainTextEdit()
+        self.joint_jog_command_preview = QTextEdit()
         self.joint_jog_command_preview.setReadOnly(True)
         for edit in (
             self.record_command_preview,
@@ -3575,7 +3875,6 @@ class WheeledArmGui(QMainWindow):
         ):
             edit.setObjectName("CommandPreview")
             edit.setFont(QFont("monospace", 10))
-            edit.setMaximumBlockCount(1000)
         self.preview_tabs.addTab(self.record_command_preview, "采集")
         self.preview_tabs.addTab(self.viewer_command_preview, "查看")
         self.preview_tabs.addTab(self.edit_command_preview, "编辑")
@@ -4897,17 +5196,23 @@ class WheeledArmGui(QMainWindow):
         command.append("--open-browser" if self.joint_jog_open_browser.isChecked() else "--no-open-browser")
         return command
 
+    def _set_command_preview(self, preview: QTextEdit, command: str) -> None:
+        scrollbar = preview.verticalScrollBar()
+        scroll_value = scrollbar.value()
+        preview.setHtml(_format_command_preview_html(command))
+        scrollbar.setValue(min(scroll_value, scrollbar.maximum()))
+
     @Slot()
     def update_record_preview(self, *_args) -> None:
         try:
             text = _format_command(self.build_record_command())
         except ValueError as exc:
             text = f"高级参数解析失败：{exc}"
-        self.record_command_preview.setPlainText(text)
+        self._set_command_preview(self.record_command_preview, text)
 
     @Slot()
     def update_viewer_preview(self, *_args) -> None:
-        self.viewer_command_preview.setPlainText(_format_command(self.build_viewer_command()))
+        self._set_command_preview(self.viewer_command_preview, _format_command(self.build_viewer_command()))
 
     @Slot()
     def update_edit_preview(self, *_args) -> None:
@@ -4915,7 +5220,7 @@ class WheeledArmGui(QMainWindow):
             text = _format_command(self.build_edit_command())
         except (ValueError, json.JSONDecodeError) as exc:
             text = f"编辑参数解析失败：{exc}"
-        self.edit_command_preview.setPlainText(text)
+        self._set_command_preview(self.edit_command_preview, text)
         if hasattr(self, "edit_dataset_preview"):
             self.edit_dataset_preview.set_source(self.edit_repo_id.text(), self.edit_root.text())
 
@@ -4929,7 +5234,7 @@ class WheeledArmGui(QMainWindow):
             text = _format_command(self.build_conversion_command())
         except ValueError as exc:
             text = f"转换参数解析失败：{exc}"
-        self.conversion_command_preview.setPlainText(text)
+        self._set_command_preview(self.conversion_command_preview, text)
 
     @Slot()
     def _on_conversion_type_changed(self, *_args) -> None:
@@ -4943,11 +5248,11 @@ class WheeledArmGui(QMainWindow):
             text = _format_command(self.build_common_command())
         except (ValueError, json.JSONDecodeError) as exc:
             text = f"常用命令参数解析失败：{exc}"
-        self.common_command_preview.setPlainText(text)
+        self._set_command_preview(self.common_command_preview, text)
 
     @Slot()
     def update_joint_jog_preview(self, *_args) -> None:
-        self.joint_jog_command_preview.setPlainText(_format_command(self.build_joint_jog_command()))
+        self._set_command_preview(self.joint_jog_command_preview, _format_command(self.build_joint_jog_command()))
 
     def validate_record_form(self) -> bool:
         if not self.repo_id.text().strip():
@@ -5274,7 +5579,9 @@ class WheeledArmGui(QMainWindow):
         self._last_record_root = self.dataset_root.text()
         self._last_record_no_stamp = self.no_stamp.isChecked()
         self._last_record_resume = self.resume.isChecked()
+        record_started_at_s = time.time()
         if self.record_runner.start(command):
+            self._last_record_started_at_s = record_started_at_s
             self.start_record_btn.setEnabled(False)
             self.stop_record_btn.setEnabled(True)
             self.status_label.setText("采集中")
@@ -5477,12 +5784,51 @@ class WheeledArmGui(QMainWindow):
             self.dataset_hint.setText(f"最近数据集：{latest}")
         elif self._last_record_base_repo_id:
             self.dataset_hint.setText("最近采集没有找到已保存 episode 的数据集。")
+        self._offer_empty_record_dataset_cleanup()
         self.status_label.setText(self._current_status_text())
         self.statusBar().showMessage(f"采集{_readable_exit(code)}")
         self.append_log("采集", f"进程{_readable_exit(code)}")
         self._maybe_show_failure_dialog("采集", code)
         self._stop_requested_sources.discard("采集")
         self._refresh_visual_state()
+
+    def _offer_empty_record_dataset_cleanup(self) -> None:
+        empty_dataset = find_empty_record_dataset(
+            self._last_record_base_repo_id,
+            self._last_record_root or None,
+            self._last_record_no_stamp,
+            self._last_record_resume,
+            self._last_record_started_at_s,
+        )
+        if empty_dataset is None:
+            return
+
+        dataset_root, total_episodes, total_frames = empty_dataset
+        answer = QMessageBox.question(
+            self,
+            "删除空数据集？",
+            "本次采集没有保存任何 episode，检测到一个空数据集目录：\n\n"
+            f"{dataset_root}\n\n"
+            f"total_episodes={total_episodes}, total_frames={total_frames}\n\n"
+            "是否删除这个空数据目录？\n\n"
+            "默认不删除；只有确认这是本次无效采集产生的目录时再删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.append_log("采集", f"保留空数据集目录：{dataset_root}")
+            return
+
+        try:
+            shutil.rmtree(dataset_root)
+        except OSError as exc:
+            message = f"删除空数据集失败：{exc}"
+            self.append_log("采集", message)
+            QMessageBox.warning(self, "删除失败", message)
+            return
+
+        self.dataset_hint.setText("本次没有保存 episode，空数据集目录已删除。")
+        self.append_log("采集", f"已删除空数据集目录：{dataset_root}")
 
     @Slot(int)
     def _on_viewer_finished(self, code: int) -> None:
@@ -5582,7 +5928,7 @@ class WheeledArmGui(QMainWindow):
         self._recent_log_lines.append((source, clean_line))
         if len(self._recent_log_lines) > 600:
             self._recent_log_lines = self._recent_log_lines[-600:]
-        self.log_view.append(f"[{source}] {clean_line}")
+        self.log_view.append(_format_log_html(source, line))
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
     @Slot()
@@ -5606,7 +5952,7 @@ class WheeledArmGui(QMainWindow):
         if self._consume_expected_stop_output(source, clean_line):
             return
 
-        self.append_log(source, clean_line)
+        self.append_log(source, line.rstrip())
         if source in self._stop_requested_sources and _is_expected_stop_line(clean_line):
             self._traceback_buffers.pop(source, None)
         else:
@@ -5800,7 +6146,7 @@ class WheeledArmGui(QMainWindow):
     @Slot()
     def copy_active_command(self) -> None:
         active = self.preview_tabs.currentWidget()
-        if isinstance(active, QPlainTextEdit):
+        if isinstance(active, (QPlainTextEdit, QTextEdit)):
             self.copy_command(active.toPlainText())
 
     def copy_command(self, text: str) -> None:
