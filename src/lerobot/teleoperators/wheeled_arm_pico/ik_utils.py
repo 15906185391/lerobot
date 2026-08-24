@@ -98,7 +98,13 @@ def import_runtime_dependencies(require_collision_backend: bool = True) -> Simpl
         from pink.tasks import DampingTask, FrameTask, PostureTask, Task
     except ImportError as exc:
         pink = None
-        solve_ik = SelfCollisionBarrier = NoSolutionFound = DampingTask = FrameTask = PostureTask = Task = None
+        solve_ik = None
+        SelfCollisionBarrier = None  # noqa: N806
+        NoSolutionFound = None  # noqa: N806
+        DampingTask = None  # noqa: N806
+        FrameTask = None  # noqa: N806
+        PostureTask = None  # noqa: N806
+        Task = None  # noqa: N806
         missing.append(f"bundled pink IK package: {exc}")
 
     if missing:
@@ -431,7 +437,7 @@ def xr_pose_to_world_se3(xr_pose: np.ndarray, pin):
 
 def initial_configuration(model, pin) -> np.ndarray:
     q_ref = pin.neutral(model)
-    for i, (lower, upper) in enumerate(zip(model.lowerPositionLimit, model.upperPositionLimit)):
+    for i, (lower, upper) in enumerate(zip(model.lowerPositionLimit, model.upperPositionLimit, strict=True)):
         if np.isfinite(lower) and np.isfinite(upper):
             q_ref[i] = np.clip(q_ref[i], lower, upper)
 
@@ -679,9 +685,10 @@ def configure_self_collision(robot, q_ref: np.ndarray, initial_ignore_distance: 
         geom_a = collision_model.geometryObjects[int(pair.first)]
         geom_b = collision_model.geometryObjects[int(pair.second)]
         initial_distance = collision_data.distanceResults[k].min_distance
-        if are_adjacent_joints(robot.model, geom_a.parentJoint, geom_b.parentJoint):
-            pairs_to_remove.append(pin.CollisionPair(pair.first, pair.second))
-        elif initial_distance <= initial_ignore_distance:
+        if (
+            are_adjacent_joints(robot.model, geom_a.parentJoint, geom_b.parentJoint)
+            or initial_distance <= initial_ignore_distance
+        ):
             pairs_to_remove.append(pin.CollisionPair(pair.first, pair.second))
 
     for pair in pairs_to_remove:
@@ -705,7 +712,11 @@ def select_solver(qpsolvers, requested: str | None) -> str:
 
 
 def package_dirs_for_urdf(urdf_path: Path) -> list[str]:
-    return [str(urdf_path.parents[2])]
+    return [
+        str(urdf_path.parent),
+        str(urdf_path.parents[1]),
+        str(urdf_path.parents[2]),
+    ]
 
 
 def resolve_package_uri(urdf_path: Path):
@@ -845,3 +856,139 @@ def smooth_joint_positions(
         step = previous_step + np.clip(step - previous_step, -max_step_delta, max_step_delta)
 
     return current_q + step, step
+
+
+G01_LEFT_TCP = "L_tcp"
+G01_RIGHT_TCP = "R_tcp"
+G01_PACKAGE_NAME = "G01_sim"
+G01_URDF_FILENAME = "G01.urdf"
+G01_TCP_OFFSET = np.array([0.0, 0.0, 0.16], dtype=float)
+G01_HIP_YAW_JOINT_NAMES = ("hip_yaw",)
+G01_WAIST_JOINT_NAMES = ("hip_pitch", "hip_roll", "hip_yaw")
+
+
+def default_g01_urdf_path() -> Path:
+    return (Path(__file__).parent / "assets" / G01_PACKAGE_NAME / "urdf" / G01_URDF_FILENAME).resolve()
+
+
+def joint_indices(model, joint_names: list[str] | tuple[str, ...]) -> tuple[np.ndarray, np.ndarray]:
+    q_indices = []
+    v_indices = []
+    for joint_name in joint_names:
+        joint_id = model.getJointId(joint_name)
+        if joint_id == 0:
+            raise ValueError(f"Cannot find joint: {joint_name}")
+        joint = model.joints[joint_id]
+        q_indices.extend(range(joint.idx_q, joint.idx_q + joint.nq))
+        v_indices.extend(range(joint.idx_v, joint.idx_v + joint.nv))
+    return np.array(q_indices, dtype=int), np.array(v_indices, dtype=int)
+
+
+def g01_arm_model_joint_names() -> list[str]:
+    return [f"{side}_joint{idx}" for side in ("L", "R") for idx in range(1, 8)]
+
+
+def g01_arm_joint_indices(model) -> tuple[np.ndarray, np.ndarray]:
+    return joint_indices(model, g01_arm_model_joint_names())
+
+
+def g01_hip_yaw_joint_indices(model) -> tuple[np.ndarray, np.ndarray]:
+    return joint_indices(model, G01_HIP_YAW_JOINT_NAMES)
+
+
+def locked_joint_indices_except(model, controlled_joint_names: list[str] | tuple[str, ...]) -> tuple[np.ndarray, np.ndarray]:
+    controlled_q_indices, controlled_v_indices = joint_indices(model, controlled_joint_names)
+    q_mask = np.ones(model.nq, dtype=bool)
+    v_mask = np.ones(model.nv, dtype=bool)
+    q_mask[controlled_q_indices] = False
+    v_mask[controlled_v_indices] = False
+    return np.flatnonzero(q_mask), np.flatnonzero(v_mask)
+
+
+def g01_locked_joint_indices(model) -> tuple[np.ndarray, np.ndarray]:
+    return locked_joint_indices_except(model, [*G01_HIP_YAW_JOINT_NAMES, *g01_arm_model_joint_names()])
+
+
+def g01_initial_configuration(model, pin) -> np.ndarray:
+    q_ref = pin.neutral(model)
+    for i, (lower, upper) in enumerate(zip(model.lowerPositionLimit, model.upperPositionLimit, strict=True)):
+        if np.isfinite(lower) and np.isfinite(upper):
+            q_ref[i] = np.clip(q_ref[i], lower, upper)
+
+    arm_initial_positions = {
+        "L_joint": np.deg2rad(LEFT_ARM_INITIAL_DEG),
+        "R_joint": np.deg2rad(RIGHT_ARM_INITIAL_DEG),
+    }
+    for joint_prefix, joint_values in arm_initial_positions.items():
+        for i, joint_value in enumerate(joint_values, start=1):
+            joint_name = f"{joint_prefix}{i}"
+            joint_id = model.getJointId(joint_name)
+            if joint_id == 0:
+                raise ValueError(f"Cannot find joint: {joint_name}")
+            q_ref[model.joints[joint_id].idx_q] = joint_value
+    return q_ref
+
+
+def require_frame(model, frame_name: str) -> int:
+    frame_id = model.getFrameId(frame_name)
+    if frame_id == model.nframes:
+        raise ValueError(f"Cannot find frame: {frame_name}")
+    return frame_id
+
+
+def ensure_g01_tcp_frames(model, pin) -> None:
+    for tcp_name, wrist_frame_name in ((G01_LEFT_TCP, "L_link7"), (G01_RIGHT_TCP, "R_link7")):
+        if model.getFrameId(tcp_name) != model.nframes:
+            continue
+        wrist_frame_id = require_frame(model, wrist_frame_name)
+        wrist_frame = model.frames[wrist_frame_id]
+        tcp_placement = wrist_frame.placement * pin.SE3(np.eye(3), G01_TCP_OFFSET)
+        model.addFrame(
+            pin.Frame(
+                tcp_name,
+                wrist_frame.parentJoint,
+                wrist_frame_id,
+                tcp_placement,
+                pin.FrameType.OP_FRAME,
+            )
+        )
+
+
+def _add_geometry_on_frame(collision_model, model, name: str, frame_name: str, geometry, xyz, pin) -> None:
+    frame = model.frames[require_frame(model, frame_name)]
+    placement = frame.placement * pin.SE3(np.eye(3), np.array(xyz, dtype=float))
+    collision_model.addGeometryObject(pin.GeometryObject(name, frame.parentJoint, placement, geometry))
+
+
+def _add_box_on_frame(collision_model, model, name: str, frame_name: str, size, xyz, pin, fcl) -> None:
+    _add_geometry_on_frame(collision_model, model, name, frame_name, fcl.Box(*size), xyz, pin)
+
+
+def _add_sphere_on_frame(collision_model, model, name: str, frame_name: str, radius: float, xyz, pin, fcl) -> None:
+    _add_geometry_on_frame(collision_model, model, name, frame_name, fcl.Sphere(radius), xyz, pin)
+
+
+def _add_capsule_on_frame(collision_model, model, name: str, frame_name: str, radius: float, half_length: float, xyz, pin, fcl) -> None:
+    _add_geometry_on_frame(collision_model, model, name, frame_name, fcl.Capsule(radius, half_length), xyz, pin)
+
+
+def build_g01_primitive_collision_model(model, pin, fcl):
+    collision_model = pin.GeometryModel()
+    _add_box_on_frame(collision_model, model, "ankle_pitch_box", "ankle_pitch_link", (0.22, 0.22, 0.16), (-0.06, -0.08, 0.00), pin, fcl)
+    _add_capsule_on_frame(collision_model, model, "knee_pitch_capsule", "knee_pitch_link", 0.075, 0.22, (0.0, -0.08, -0.18), pin, fcl)
+    _add_capsule_on_frame(collision_model, model, "thigh_capsule", "thigh", 0.08, 0.22, (0.0, 0.03, -0.20), pin, fcl)
+    _add_box_on_frame(collision_model, model, "pelvis_box", "pelvis", (0.24, 0.22, 0.20), (-0.02, 0.0, -0.08), pin, fcl)
+    _add_box_on_frame(collision_model, model, "torso_box", "torso", (0.30, 0.30, 0.24), (0.10, 0.0, 0.00), pin, fcl)
+    _add_box_on_frame(collision_model, model, "head_box", "head", (0.18, 0.18, 0.16), (0.03, 0.03, 0.06), pin, fcl)
+
+    for side in ("L", "R"):
+        _add_sphere_on_frame(collision_model, model, f"{side}_base_sphere", f"{side}_base", 0.085, (0.0, 0.0, 0.04), pin, fcl)
+        _add_capsule_on_frame(collision_model, model, f"{side}_link1_capsule", f"{side}_link1", 0.060, 0.095, (0.0, 0.0, 0.08), pin, fcl)
+        _add_capsule_on_frame(collision_model, model, f"{side}_link2_capsule", f"{side}_link2", 0.055, 0.120, (0.0, 0.0, 0.11), pin, fcl)
+        _add_capsule_on_frame(collision_model, model, f"{side}_link3_capsule", f"{side}_link3", 0.052, 0.105, (0.0, 0.0, 0.09), pin, fcl)
+        _add_capsule_on_frame(collision_model, model, f"{side}_link4_capsule", f"{side}_link4", 0.050, 0.095, (0.0, 0.0, 0.08), pin, fcl)
+        _add_sphere_on_frame(collision_model, model, f"{side}_link5_sphere", f"{side}_link5", 0.055, (0.0, 0.0, 0.05), pin, fcl)
+        _add_sphere_on_frame(collision_model, model, f"{side}_link6_sphere", f"{side}_link6", 0.052, (0.0, 0.0, 0.0), pin, fcl)
+        _add_capsule_on_frame(collision_model, model, f"{side}_link7_capsule", f"{side}_link7", 0.045, 0.120, (0.0, 0.0, 0.12), pin, fcl)
+
+    return collision_model

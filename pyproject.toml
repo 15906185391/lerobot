@@ -387,6 +387,8 @@ lerobot = [
     "annotations/steerable_pipeline/prompts/*.txt",
     "teleoperators/wheeled_arm_pico/assets/wheeled_robot_sim/urdf/*.urdf",
     "teleoperators/wheeled_arm_pico/assets/wheeled_robot_sim/meshes/*.stl",
+    "teleoperators/wheeled_arm_pico/assets/G01_sim/urdf/*.urdf",
+    "teleoperators/wheeled_arm_pico/assets/G01_sim/meshes/*.STL",
 ]
 
 [tool.setuptools.packages.find]

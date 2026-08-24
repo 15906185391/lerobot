@@ -21,7 +21,12 @@ import numpy as np
 from lerobot.robots.wheeled_arm.config_wheeled_arm import WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY
 from lerobot.teleoperators.config import TeleoperatorConfig
 from lerobot.teleoperators.utils import make_teleoperator_from_config
-from lerobot.teleoperators.wheeled_arm_pico import WheeledArmPico, WheeledArmPicoConfig
+from lerobot.teleoperators.wheeled_arm_pico import (
+    WheeledArmPico,
+    WheeledArmPicoAddHipYaw,
+    WheeledArmPicoAddHipYawConfig,
+    WheeledArmPicoConfig,
+)
 from lerobot.teleoperators.wheeled_arm_pico.ik_utils import (
     LEFT_TCP,
     RIGHT_TCP,
@@ -36,6 +41,14 @@ from lerobot.teleoperators.wheeled_arm_pico.ik_utils import (
 def test_wheeled_arm_pico_config_is_registered():
     assert "wheeled_arm_pico" in TeleoperatorConfig.get_known_choices()
     assert isinstance(make_teleoperator_from_config(WheeledArmPicoConfig()), WheeledArmPico)
+
+
+def test_wheeled_arm_pico_add_hip_yaw_config_is_registered():
+    assert "wheeled_arm_pico_add_hip_yaw" in TeleoperatorConfig.get_known_choices()
+    assert isinstance(
+        make_teleoperator_from_config(WheeledArmPicoAddHipYawConfig()),
+        WheeledArmPicoAddHipYaw,
+    )
 
 
 def test_wheeled_arm_pico_config_exposes_ik_parameters():
@@ -112,6 +125,30 @@ def test_action_features_match_wheeled_arm_arm_and_gripper_joints():
     ]
 
 
+def test_add_hip_yaw_action_features_include_waist_yaw():
+    teleop = WheeledArmPicoAddHipYaw(WheeledArmPicoAddHipYawConfig())
+
+    assert list(teleop.action_features) == [
+        *(f"left_arm_{idx}.pos" for idx in range(7)),
+        *(f"right_arm_{idx}.pos" for idx in range(7)),
+        "left_gripper.pos",
+        "right_gripper.pos",
+        "hip_yaw.pos",
+    ]
+
+
+def test_add_hip_yaw_make_action_marks_waist_active_with_arm_motion():
+    teleop = WheeledArmPicoAddHipYaw(WheeledArmPicoAddHipYawConfig())
+    teleop._arm_q_indices = np.arange(14)
+    teleop._extra_q_indices = np.array([14])
+    q = np.arange(15, dtype=float)
+
+    action = teleop._make_action(q, teleop._active_arm_names(left_active=True, right_active=False))
+
+    assert action["hip_yaw.pos"] == 14.0
+    assert action[WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY] == ("left_arm", "waist")
+
+
 def test_relative_teleop_target_uses_reference_end_effector_baseline():
     class FakeSE3:
         def __init__(self, translation, rotation=None):
@@ -178,7 +215,7 @@ def test_wheeled_arm_pico_connect_includes_damping_task(tmp_path, monkeypatch):
 
     class FakeRobotWrapper:
         @staticmethod
-        def BuildFromURDF(**kwargs):
+        def BuildFromURDF(**kwargs):  # noqa: N802
             return SimpleNamespace(model=object(), data=object(), collision_model=None, collision_data=None)
 
     fake_q = np.arange(18, dtype=float)
@@ -280,7 +317,7 @@ def test_wheeled_arm_pico_get_action_includes_damping_task(tmp_path, monkeypatch
 
     class FakeRobotWrapper:
         @staticmethod
-        def BuildFromURDF(**kwargs):
+        def BuildFromURDF(**kwargs):  # noqa: N802
             return SimpleNamespace(model=object(), data=object(), collision_model=None, collision_data=None)
 
     fake_q = np.arange(18, dtype=float)
@@ -599,9 +636,9 @@ def test_locked_joints_task_uses_configured_gain_and_lm_damping():
             self.gain = gain
             self.lm_damping = lm_damping
 
-    LockedJointsTask = make_locked_joints_task_class(BaseTask)
+    locked_joints_task_cls = make_locked_joints_task_class(BaseTask)
 
-    task = LockedJointsTask(
+    task = locked_joints_task_cls(
         q_indices=np.array([0, 1]),
         v_indices=np.array([0, 1]),
         target_q=np.array([1.0, 2.0]),

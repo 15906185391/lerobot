@@ -44,7 +44,7 @@ def make_robot_from_config(config: RobotConfig) -> Robot:
         from .lekiwi import LeKiwi
 
         return LeKiwi(config)
-    elif config.type == "wheeled_arm":
+    elif config.type in {"wheeled_arm", "wheeled_arm_with_hip_yaw"}:
         from .wheeled_arm import WheeledArm
 
         return WheeledArm(config)

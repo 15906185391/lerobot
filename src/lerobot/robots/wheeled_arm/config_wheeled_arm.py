@@ -29,16 +29,42 @@ WHEELED_ARM_GRIPPER_NAMES = [
     "left_gripper",
     "right_gripper",
 ]
+WHEELED_ARM_HEAD_JOINT_NAMES = [
+    "neck_yaw",
+    "neck_pitch",
+]
+WHEELED_ARM_WAIST_JOINT_NAMES = [
+    "hip_pitch",
+    "hip_roll",
+    "hip_yaw",
+]
+WHEELED_ARM_LEG_JOINT_NAMES = [
+    "ankle_pitch",
+    "knee_pitch",
+]
 WHEELED_ARM_JOINT_NAMES = [
     *WHEELED_ARM_ARM_JOINT_NAMES,
     *WHEELED_ARM_GRIPPER_NAMES,
 ]
+WHEELED_ARM_PACKAGE_JOINT_NAMES = [
+    *WHEELED_ARM_ARM_JOINT_NAMES,
+    *WHEELED_ARM_GRIPPER_NAMES,
+    *WHEELED_ARM_HEAD_JOINT_NAMES,
+    *WHEELED_ARM_WAIST_JOINT_NAMES,
+    *WHEELED_ARM_LEG_JOINT_NAMES,
+]
+WHEELED_ARM_JOINT_PACKAGE_INDICES = {
+    joint_name: idx for idx, joint_name in enumerate(WHEELED_ARM_PACKAGE_JOINT_NAMES)
+}
 
 WHEELED_ARM_PARTS = (
     "left_arm",
     "right_arm",
     "left_gripper",
     "right_gripper",
+    "head",
+    "waist",
+    "leg",
 )
 
 WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY = "__wheeled_arm_active_arms"
@@ -125,14 +151,21 @@ class WheeledArmConfig(RobotConfig):
     def __post_init__(self) -> None:
         super().__post_init__()
 
-        if len(self.joint_names) != 16:
+        if len(self.joint_names) < 16:
             raise ValueError(
-                f"`joint_names` must contain exactly 16 arm/gripper names, got {len(self.joint_names)}."
+                f"`joint_names` must contain at least 16 arm/gripper names, got {len(self.joint_names)}."
             )
 
         duplicate_names = {name for name in self.joint_names if self.joint_names.count(name) > 1}
         if duplicate_names:
             raise ValueError(f"`joint_names` must be unique, got duplicates: {sorted(duplicate_names)}.")
+
+        unknown_joints = set(self.joint_names) - set(WHEELED_ARM_JOINT_PACKAGE_INDICES)
+        if unknown_joints:
+            raise ValueError(
+                f"`joint_names` contains unknown wheeled_arm package joints {sorted(unknown_joints)}. "
+                f"Known joints are {WHEELED_ARM_PACKAGE_JOINT_NAMES}."
+            )
 
         unknown_parts = set(self.controlled_parts) - set(WHEELED_ARM_PARTS)
         if unknown_parts:
@@ -158,3 +191,9 @@ class WheeledArmConfig(RobotConfig):
             )
         if self.action_watchdog_timeout_s is not None and self.action_watchdog_timeout_s <= 0:
             raise ValueError("`action_watchdog_timeout_s` must be positive or None.")
+
+
+@RobotConfig.register_subclass("wheeled_arm_with_hip_yaw")
+@dataclass
+class WheeledArmWithHipYawConfig(WheeledArmConfig):
+    joint_names: list[str] = field(default_factory=lambda: [*WHEELED_ARM_JOINT_NAMES, "hip_yaw"])

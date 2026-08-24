@@ -24,8 +24,6 @@ from pathlib import Path
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
-
 from .config_wheeled_arm_pico import WheeledArmPicoConfig
 from .ik_utils import (
     JOINT_COLORS,
@@ -35,6 +33,8 @@ from .ik_utils import (
     resolve_package_uri,
     se3_to_position_wxyz,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def require_visualization_dependencies() -> None:
@@ -61,6 +61,9 @@ class WheeledArmPicoVisualizer:
         configuration,
         arm_q_indices: np.ndarray,
         urdf_path: Path,
+        *,
+        left_tcp: str,
+        right_tcp: str,
     ) -> None:
         require_visualization_dependencies()
         try:
@@ -77,6 +80,8 @@ class WheeledArmPicoVisualizer:
         self.robot = robot
         self.configuration = configuration
         self.arm_q_indices = arm_q_indices
+        self.left_tcp = left_tcp
+        self.right_tcp = right_tcp
         self._last_update_t = 0.0
         self._update_period_s = (
             1.0 / config.visualization_update_hz if config.visualization_update_hz > 0 else 0.0
@@ -143,11 +148,11 @@ class WheeledArmPicoVisualizer:
         )
 
         left_pos, left_wxyz = se3_to_position_wxyz(
-            configuration.get_transform_frame_to_world("AR5-5_07L-W4C4A2_tcp"),
+            configuration.get_transform_frame_to_world(self.left_tcp),
             deps.pin,
         )
         right_pos, right_wxyz = se3_to_position_wxyz(
-            configuration.get_transform_frame_to_world("AR5-5_07R-W4C4A2_tcp"),
+            configuration.get_transform_frame_to_world(self.right_tcp),
             deps.pin,
         )
         self.left_target = self.server.scene.add_transform_controls(
@@ -162,8 +167,8 @@ class WheeledArmPicoVisualizer:
         self._missing_urdf_joint_names: set[str] = set()
 
         self.update(
-            left_target_pose=configuration.get_transform_frame_to_world("AR5-5_07L-W4C4A2_tcp"),
-            right_target_pose=configuration.get_transform_frame_to_world("AR5-5_07R-W4C4A2_tcp"),
+            left_target_pose=configuration.get_transform_frame_to_world(self.left_tcp),
+            right_target_pose=configuration.get_transform_frame_to_world(self.right_tcp),
             xr_ok=False,
             left_active=False,
             right_active=False,

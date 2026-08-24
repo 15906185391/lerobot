@@ -1,0 +1,752 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# /// script
+# dependencies = ["daqp", "loop-rate-limiters", "pin-pink", "qpsolvers",
+# "viser", "yourdfpy"]
+# ///
+
+"""PICO teleoperation for the wheel-arm robot using Pink IK."""
+
+from pathlib import Path
+import argparse
+import sys
+import time
+import webbrowser
+
+import numpy as np
+import pinocchio as pin
+import qpsolvers
+import viser
+import yourdfpy
+from loop_rate_limiters import RateLimiter
+from viser.extras import ViserUrdf
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+import pink  # noqa: E402
+from pink import solve_ik  # noqa: E402
+from pink.barriers import SelfCollisionBarrier  # noqa: E402
+from pink.exceptions import NoSolutionFound  # noqa: E402
+from pink.tasks import FrameTask, PostureTask  # noqa: E402
+
+from wheel_arm_self_collision import (  # noqa: E402
+    JOINT_COLORS,
+    JOINT_PLOT_ASPECT,
+    JOINT_PLOT_UPDATE_HZ,
+    JOINT_PLOT_WINDOW_S,
+    JOINT_PRIMARY_PLOT_HEIGHT,
+    JOINT_WRIST_PLOT_HEIGHT,
+    LEFT_TCP,
+    PACKAGE_NAME,
+    RIGHT_TCP,
+    URDF_FILENAME,
+    SOLVE_FREQUENCY_HZ,
+    LockedJointsTask,
+    arm_joint_indices,
+    arm_joint_names,
+    build_primitive_collision_model,
+    configure_self_collision,
+    format_joint_table,
+    ensure_tcp_frames,
+    initial_configuration,
+    locked_joint_indices,
+    package_dirs_for_urdf,
+    torso_joint_indices,
+    pinocchio_to_yourdfpy_cfg,
+    require_frame,
+    resolve_package_uri,
+    se3_to_viser_pose,
+    select_solver,
+)
+from xrobotoolkit_teleop.common.xr_client import XrClient  # noqa: E402
+
+
+R_HEADSET_TO_WORLD = np.array(
+    [
+        [0, 0, -1],
+        [-1, 0, 0],
+        [0, 1, 0],
+    ]
+)
+
+
+class MockXrClient:
+    """Tiny XR source for testing the program without a PICO device."""
+
+    def __init__(self) -> None:
+        self.start_time = time.monotonic()
+
+    def get_pose_by_name(self, name: str) -> np.ndarray:
+        t = time.monotonic() - self.start_time
+        y = 0.25 if name == "left_controller" else -0.25
+        return np.array([0.05 * np.sin(t), y, 0.02 * np.cos(t), 0, 0, 0, 1])
+
+    def get_key_value_by_name(self, name: str) -> float:
+        return 1.0 if name in ("left_grip", "right_grip") else 0.0
+
+    def get_button_state_by_name(self, name: str) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+
+class RelativeTeleopTarget:
+    """Map relative XR controller motion to a robot end-effector target."""
+
+    def __init__(self) -> None:
+        self.ref_controller: pin.SE3 | None = None
+        self.ref_end_effector: pin.SE3 | None = None
+
+    def reset(self) -> None:
+        self.ref_controller = None
+        self.ref_end_effector = None
+
+    @property
+    def active(self) -> bool:
+        return self.ref_controller is not None and self.ref_end_effector is not None
+
+    def update(
+        self,
+        controller_pose: pin.SE3,
+        current_end_effector: pin.SE3,
+        scale: float,
+        orientation_enabled: bool,
+    ) -> pin.SE3:
+        if self.ref_controller is None or self.ref_end_effector is None:
+            self.ref_controller = controller_pose.copy()
+            self.ref_end_effector = current_end_effector.copy()
+            return current_end_effector.copy()
+
+        target = self.ref_end_effector.copy()
+        target.translation = (
+            self.ref_end_effector.translation
+            + scale * (controller_pose.translation -
+                       self.ref_controller.translation)
+        )
+        if orientation_enabled:
+            delta_rotation = controller_pose.rotation @ self.ref_controller.rotation.T
+            target.rotation = delta_rotation @ self.ref_end_effector.rotation
+        return target
+
+
+def xr_pose_to_world_se3(xr_pose: np.ndarray) -> pin.SE3:
+    """Convert [x, y, z, qx, qy, qz, qw] XR pose to robot-world SE3."""
+    pose = np.asarray(xr_pose, dtype=float).reshape(-1)
+    if pose.shape[0] != 7 or not np.all(np.isfinite(pose)):
+        raise ValueError(f"Invalid XR pose: {xr_pose}")
+
+    qx, qy, qz, qw = pose[3], pose[4], pose[5], pose[6]
+    quat = pin.Quaternion(qw, qx, qy, qz)
+    if quat.norm() < 1e-8:
+        raise ValueError(f"Invalid XR quaternion: {xr_pose[3:7]}")
+    quat.normalize()
+
+    rotation = R_HEADSET_TO_WORLD @ quat.matrix() @ R_HEADSET_TO_WORLD.T
+    translation = R_HEADSET_TO_WORLD @ pose[:3]
+    return pin.SE3(rotation, translation)
+
+
+def set_transform_handle_from_se3(handle, transform: pin.SE3) -> None:
+    position, wxyz = se3_to_viser_pose(transform)
+    handle.position = position
+    handle.wxyz = wxyz
+
+
+def format_teleop_status(
+    enabled: bool,
+    xr_ok: bool,
+    left_active: bool,
+    right_active: bool,
+    scale: float,
+    status: str,
+    min_barrier: float,
+) -> str:
+    return "\n".join(
+        [
+            "### PICO Teleop",
+            "",
+            f"- Enabled: `{enabled}`",
+            f"- XR data: `{'ok' if xr_ok else 'waiting/error'}`",
+            f"- Left grip active: `{left_active}`",
+            f"- Right grip active: `{right_active}`",
+            f"- Scale: `{scale:.2f}`",
+            f"- Collision: `{status}` (`{min_barrier:.4f}`)",
+            "",
+            "Hold left/right grip to drive each arm. Press `Y` or Reset Baseline to re-align.",
+        ]
+    )
+
+
+def create_joint_plots(server: viser.ViserServer, joint_count: int):
+    max_plot_samples = int(JOINT_PLOT_WINDOW_S * SOLVE_FREQUENCY_HZ)
+    joint_time_history = np.full(max_plot_samples, np.nan)
+    joint_position_history = np.full((joint_count, max_plot_samples), np.nan)
+    joint_time_axis = np.linspace(-JOINT_PLOT_WINDOW_S, 0.0, max_plot_samples)
+    joint_plot_axes = (
+        {"label": "Time (s)"},
+        {"label": "Joint angle (deg)"},
+    )
+    joint_plot_scales = {"x": {"time": False}, "y": {"range": (-180.0, 180.0)}}
+
+    left_primary_plot = server.gui.add_uplot(
+        (joint_time_axis, *joint_position_history[0:4]),
+        (
+            {"label": "time"},
+            *(
+                {"label": f"L{i}", "stroke": JOINT_COLORS[i - 1], "width": 2.0}
+                for i in range(1, 5)
+            ),
+        ),
+        title="Left Arm J1-J4",
+        axes=joint_plot_axes,
+        scales=joint_plot_scales,
+        aspect=JOINT_PLOT_ASPECT,
+        height=JOINT_PRIMARY_PLOT_HEIGHT,
+    )
+    left_wrist_plot = server.gui.add_uplot(
+        (joint_time_axis, *joint_position_history[4:7]),
+        (
+            {"label": "time"},
+            *(
+                {"label": f"L{i}", "stroke": JOINT_COLORS[i - 1], "width": 2.0}
+                for i in range(5, 8)
+            ),
+        ),
+        title="Left Arm J5-J7",
+        axes=joint_plot_axes,
+        scales=joint_plot_scales,
+        aspect=JOINT_PLOT_ASPECT,
+        height=JOINT_WRIST_PLOT_HEIGHT,
+    )
+    right_primary_plot = server.gui.add_uplot(
+        (joint_time_axis, *joint_position_history[7:11]),
+        (
+            {"label": "time"},
+            *(
+                {"label": f"R{i}", "stroke": JOINT_COLORS[i - 1], "width": 2.0}
+                for i in range(1, 5)
+            ),
+        ),
+        title="Right Arm J1-J4",
+        axes=joint_plot_axes,
+        scales=joint_plot_scales,
+        aspect=JOINT_PLOT_ASPECT,
+        height=JOINT_PRIMARY_PLOT_HEIGHT,
+    )
+    right_wrist_plot = server.gui.add_uplot(
+        (joint_time_axis, *joint_position_history[11:14]),
+        (
+            {"label": "time"},
+            *(
+                {"label": f"R{i}", "stroke": JOINT_COLORS[i - 1], "width": 2.0}
+                for i in range(5, 8)
+            ),
+        ),
+        title="Right Arm J5-J7",
+        axes=joint_plot_axes,
+        scales=joint_plot_scales,
+        aspect=JOINT_PLOT_ASPECT,
+        height=JOINT_WRIST_PLOT_HEIGHT,
+    )
+    plots = (left_primary_plot, left_wrist_plot,
+             right_primary_plot, right_wrist_plot)
+    return joint_time_history, joint_position_history, plots
+
+
+def update_joint_plots(
+    plots,
+    joint_time_history: np.ndarray,
+    joint_position_history: np.ndarray,
+    t: float,
+) -> None:
+    valid_times = joint_time_history[np.isfinite(joint_time_history)]
+    if valid_times.size == 0:
+        return
+    plot_time = joint_time_history - valid_times[-1]
+    left_primary_plot, left_wrist_plot, right_primary_plot, right_wrist_plot = plots
+    left_primary_plot.data = (plot_time, *joint_position_history[0:4])
+    left_wrist_plot.data = (plot_time, *joint_position_history[4:7])
+    right_primary_plot.data = (plot_time, *joint_position_history[7:11])
+    right_wrist_plot.data = (plot_time, *joint_position_history[11:14])
+
+
+def select_teleop_solver() -> str:
+    if "daqp" in qpsolvers.available_solvers:
+        return "daqp"
+    return select_solver()
+
+
+def create_hardware_interface():
+    from hardware_interface.lcm_handler import LCMHandler
+
+    handler = LCMHandler()
+    handler.left_arm_moving = False
+    handler.right_arm_moving = False
+    handler.waist_moving = False
+    handler.head_moving = False
+    handler.leg_moving = False
+    handler.left_gripper_moving = False
+    handler.right_gripper_moving = False
+    return handler
+
+
+def fill_model_positions_from_hardware(
+    model: pin.Model, q_seed: np.ndarray, package: np.ndarray
+) -> np.ndarray:
+    """Map the 23-element hardware package into G01 Pinocchio model order."""
+    q = q_seed.copy()
+    hardware_joint_values = {
+        **{f"L_joint{i + 1}": package[i] for i in range(7)},
+        **{f"R_joint{i + 1}": package[7 + i] for i in range(7)},
+        "neck_yaw": package[16],
+        "neck_pitch": package[17],
+        "hip_pitch": package[18],
+        "hip_roll": package[19],
+        "hip_yaw": package[20],
+        "ankle_pitch": package[21],
+        "knee_pitch": package[22],
+    }
+    for joint_name, joint_value in hardware_joint_values.items():
+        joint_id = model.getJointId(joint_name)
+        if joint_id == 0:
+            raise ValueError(f"Cannot find joint: {joint_name}")
+        q[model.joints[joint_id].idx_q] = joint_value
+    return q
+
+
+def read_hardware_model_positions(
+    handler, model: pin.Model, q_seed: np.ndarray
+) -> np.ndarray:
+    with handler.joint_current_pos_lock:
+        package = np.asarray(handler.joint_current_pos, dtype=float).copy()
+    return fill_model_positions_from_hardware(model, q_seed, package)
+
+
+def wait_for_hardware_model_state(
+    handler, model: pin.Model, q_seed: np.ndarray, timeout_s: float
+) -> np.ndarray:
+    deadline = time.monotonic() + timeout_s
+    state_events = {
+        "MANIP_LEFT_ARM_STATE": getattr(handler, "left_arm_state_updated", None),
+        "MANIP_RIGHT_ARM_STATE": getattr(handler, "right_arm_state_updated", None),
+        "MANIP_HEAD_STATE": getattr(handler, "head_state_updated", None),
+        "MANIP_WAIST_STATE": getattr(handler, "waist_state_updated", None),
+        "MANIP_LEG_STATE": getattr(handler, "leg_state_updated", None),
+    }
+
+    print("Waiting for hardware joint state from LCM...")
+    while time.monotonic() < deadline:
+        ready = [
+            event.is_set()
+            for event in state_events.values()
+            if event is not None
+        ]
+        model_q = read_hardware_model_positions(handler, model, q_seed)
+        if all(ready) and np.all(np.isfinite(model_q)):
+            return model_q
+        time.sleep(0.01)
+
+    missing = [
+        name
+        for name, event in state_events.items()
+        if event is not None and not event.is_set()
+    ]
+    raise TimeoutError(
+        "Timed out waiting for hardware state topics: " + ", ".join(missing)
+    )
+
+
+def send_hardware_upper_body_command(
+    handler, arm_q: np.ndarray, hip_yaw_q: np.ndarray, enabled: bool
+) -> None:
+    handler.left_arm_moving = enabled
+    handler.right_arm_moving = enabled
+    handler.waist_moving = enabled
+    if not enabled:
+        return
+
+    with handler.joint_current_pos_lock:
+        package = np.asarray(handler.joint_current_pos, dtype=float).copy()
+    package[:14] = np.asarray(arm_q, dtype=float)
+    package[20] = float(np.asarray(hip_yaw_q, dtype=float).reshape(-1)[0])
+    handler.upper_body_data_publisher(package)
+
+
+def stop_hardware_upper_body_command(handler) -> None:
+    if handler is None:
+        return
+    handler.left_arm_moving = False
+    handler.right_arm_moving = False
+    handler.waist_moving = False
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", default=8082, type=int)
+    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--scale", default=1.0, type=float)
+    parser.add_argument("--activation-threshold", default=0.9, type=float)
+    parser.add_argument("--position-only", action="store_true")
+    parser.add_argument("--mock-xr", action="store_true")
+    parser.add_argument(
+        "--hardware",
+        action="store_true",
+        help=(
+            "Send left/right arm and hip_yaw commands through "
+            "hardware_interface LCM."
+        ),
+    )
+    parser.add_argument(
+        "--hardware-state-timeout",
+        default=5.0,
+        type=float,
+        help="Seconds to wait for initial hardware left/right arm state.",
+    )
+    parser.add_argument("--d-min", default=0.03, type=float)
+    parser.add_argument("--initial-ignore-distance", default=None, type=float)
+    parser.add_argument(
+        "--collision-geometry",
+        choices=("primitive", "stl"),
+        default="primitive",
+        help="Geometry used by the self-collision barrier.",
+    )
+    parser.add_argument(
+        "--unlock-non-arm",
+        action="store_true",
+        help="Allow every model joint to move during IK.",
+    )
+    args = parser.parse_args()
+    if args.initial_ignore_distance is None:
+        args.initial_ignore_distance = args.d_min
+
+    urdf_path = (
+        Path(__file__).parent.parent / "assets" / PACKAGE_NAME / "urdf" / URDF_FILENAME
+    ).resolve()
+    package_dirs = package_dirs_for_urdf(urdf_path)
+
+    urdf = yourdfpy.URDF.load(
+        str(urdf_path),
+        build_collision_scene_graph=True,
+        load_meshes=True,
+        filename_handler=resolve_package_uri(urdf_path),
+    )
+    robot = pin.RobotWrapper.BuildFromURDF(
+        filename=str(urdf_path),
+        package_dirs=package_dirs,
+        root_joint=None,
+    )
+    ensure_tcp_frames(robot.model)
+    robot.data = robot.model.createData()
+    if args.collision_geometry == "primitive":
+        robot.collision_model = build_primitive_collision_model(robot.model)
+
+    q_ref = initial_configuration(robot.model)
+    locked_q_indices, locked_v_indices = locked_joint_indices(robot.model)
+    arm_q_indices, _ = arm_joint_indices(robot.model)
+    hip_yaw_q_indices, _ = torso_joint_indices(robot.model)
+    joint_names = arm_joint_names()
+    hardware_interface = None
+    if args.hardware:
+        hardware_interface = create_hardware_interface()
+        hardware_model_q = wait_for_hardware_model_state(
+            hardware_interface,
+            robot.model,
+            q_ref,
+            args.hardware_state_timeout,
+        )
+        if hardware_model_q.shape != q_ref.shape:
+            raise ValueError(
+                "Hardware state shape does not match model q shape: "
+                f"{hardware_model_q.shape} != {q_ref.shape}"
+            )
+        q_ref = hardware_model_q
+        print(
+            "Initialized model joints from hardware state (rad): "
+            f"{np.array2string(q_ref, precision=4)}"
+        )
+
+    left_frame_id = require_frame(robot.model, LEFT_TCP)
+    right_frame_id = require_frame(robot.model, RIGHT_TCP)
+    robot.collision_data = configure_self_collision(
+        robot, q_ref, args.initial_ignore_distance
+    )
+
+    print(f"URDF: {urdf_path}")
+    print(
+        f"nq={robot.model.nq}, collision pairs={len(robot.collision_model.collisionPairs)}")
+    if args.unlock_non_arm:
+        constraints = []
+        print("Controlled joints: full model")
+    else:
+        constraints = [LockedJointsTask(
+            locked_q_indices, locked_v_indices, q_ref)]
+        print(
+            "Controlled joints: hip_yaw + left/right arms "
+            f"({robot.model.nv - len(locked_v_indices)} moving, "
+            f"{len(locked_v_indices)} locked)"
+        )
+
+    configuration = pink.Configuration(
+        robot.model,
+        robot.data,
+        q_ref,
+        collision_model=robot.collision_model,
+        collision_data=robot.collision_data,
+    )
+
+    left_task = FrameTask(LEFT_TCP, position_cost=5.0,
+                          orientation_cost=1.0, lm_damping=10, gain=0.5)
+    right_task = FrameTask(RIGHT_TCP, position_cost=5.0,
+                           orientation_cost=1.0, gain=0.5)
+    posture_task = PostureTask(cost=1e-4)
+    tasks = [left_task, right_task, posture_task]
+    for task in tasks:
+        task.set_target_from_configuration(configuration)
+
+    collision_barrier = SelfCollisionBarrier(
+        n_collision_pairs=len(robot.collision_model.collisionPairs),
+        gain=10.0,
+        safe_displacement_gain=5.0,
+        d_min=args.d_min,
+    )
+    barriers = [collision_barrier]
+
+    xr_client = MockXrClient() if args.mock_xr else XrClient()
+    solver = select_teleop_solver()
+    rate = RateLimiter(frequency=SOLVE_FREQUENCY_HZ, warn=False)
+    dt = rate.period
+
+    server = viser.ViserServer(host=args.host, port=args.port)
+    server.gui.configure_theme(control_layout="fixed", control_width="large")
+    if not args.no_browser:
+        time.sleep(0.5)
+        webbrowser.open(f"http://localhost:{args.port}")
+
+    server.scene.add_grid("/ground", width=2, height=2)
+    enable_teleop_gui = server.gui.add_checkbox("Enable teleop", not args.hardware)
+    scale_gui = server.gui.add_slider(
+        "Position scale",
+        min=0.1,
+        max=2.0,
+        step=0.05,
+        initial_value=args.scale,
+    )
+    server.gui.add_number("Solve frequency (Hz)",
+                          SOLVE_FREQUENCY_HZ, disabled=True)
+    ik_time_gui = server.gui.add_number("IK time (ms)", 0.0, disabled=True)
+    status_gui = server.gui.add_markdown(
+        format_teleop_status(True, False, False, False,
+                             args.scale, "unknown", 0.0)
+    )
+    reset_button = server.gui.add_button("Reset Baseline")
+    reset_state = {"requested": False}
+
+    @reset_button.on_click
+    def _(_) -> None:
+        reset_state["requested"] = True
+
+    joint_angles_deg = np.rad2deg(configuration.q[arm_q_indices])
+    joint_values_gui = server.gui.add_markdown(
+        format_joint_table(joint_angles_deg))
+    joint_time_history, joint_position_history, joint_plots = create_joint_plots(
+        server, len(joint_names)
+    )
+
+    urdf_vis = ViserUrdf(server, urdf, root_node_name="/G01")
+    urdf_vis.update_cfg(pinocchio_to_yourdfpy_cfg(
+        robot.model, configuration.q))
+
+    left_pos, left_wxyz = se3_to_viser_pose(
+        configuration.data.oMf[left_frame_id])
+    right_pos, right_wxyz = se3_to_viser_pose(
+        configuration.data.oMf[right_frame_id])
+    left_target_handle = server.scene.add_transform_controls(
+        "/pico_target_l", scale=0.16, fixed=True, position=left_pos, wxyz=left_wxyz
+    )
+    right_target_handle = server.scene.add_transform_controls(
+        "/pico_target_r", scale=0.16, fixed=True, position=right_pos, wxyz=right_wxyz
+    )
+    server.scene.add_icosphere(
+        "/collision_status", radius=0.04, color=(0, 255, 0))
+
+    print(f"Open http://localhost:{args.port}")
+    print("PICO control: hold left/right grip to move each arm; press Y to reset baseline.")
+    print(f"Left TCP:  position={left_pos}, wxyz={left_wxyz}")
+    print(f"Right TCP: position={right_pos}, wxyz={right_wxyz}")
+
+    left_mapper = RelativeTeleopTarget()
+    right_mapper = RelativeTeleopTarget()
+    last_y_button = False
+    last_status = None
+    last_print_time = 0.0
+    last_plot_update_time = 0.0
+    t = 0.0
+
+    try:
+        while True:
+            current_left = configuration.get_transform_frame_to_world(
+                LEFT_TCP).copy()
+            current_right = configuration.get_transform_frame_to_world(
+                RIGHT_TCP).copy()
+            teleop_enabled = bool(enable_teleop_gui.value)
+            scale = float(scale_gui.value)
+            xr_ok = False
+            left_active = False
+            right_active = False
+
+            try:
+                y_button = bool(xr_client.get_button_state_by_name("Y"))
+                reset_from_pico = y_button and not last_y_button
+                last_y_button = y_button
+                if reset_state["requested"] or reset_from_pico:
+                    left_mapper.reset()
+                    right_mapper.reset()
+                    reset_state["requested"] = False
+                    print("Teleop baseline reset.")
+
+                left_grip = float(xr_client.get_key_value_by_name("left_grip"))
+                right_grip = float(
+                    xr_client.get_key_value_by_name("right_grip"))
+                left_active = teleop_enabled and left_grip >= args.activation_threshold
+                right_active = teleop_enabled and right_grip >= args.activation_threshold
+
+                left_controller_pose = xr_pose_to_world_se3(
+                    xr_client.get_pose_by_name("left_controller")
+                )
+                right_controller_pose = xr_pose_to_world_se3(
+                    xr_client.get_pose_by_name("right_controller")
+                )
+                xr_ok = True
+            except Exception as exc:
+                left_active = False
+                right_active = False
+                left_controller_pose = None
+                right_controller_pose = None
+                if time.monotonic() - last_print_time > 1.0:
+                    print(f"Waiting for XR data: {exc}")
+                    last_print_time = time.monotonic()
+
+            if left_active and left_controller_pose is not None:
+                left_target_pose = left_mapper.update(
+                    left_controller_pose,
+                    current_left,
+                    scale,
+                    orientation_enabled=not args.position_only,
+                )
+            else:
+                left_mapper.reset()
+                left_target_pose = current_left
+
+            if right_active and right_controller_pose is not None:
+                right_target_pose = right_mapper.update(
+                    right_controller_pose,
+                    current_right,
+                    scale,
+                    orientation_enabled=not args.position_only,
+                )
+            else:
+                right_mapper.reset()
+                right_target_pose = current_right
+
+            left_task.transform_target_to_world = left_target_pose
+            right_task.transform_target_to_world = right_target_pose
+            set_transform_handle_from_se3(left_target_handle, left_target_pose)
+            set_transform_handle_from_se3(
+                right_target_handle, right_target_pose)
+
+            h = collision_barrier.compute_barrier(configuration)
+            min_barrier = float(np.min(h))
+            if min_barrier <= 0.0:
+                status = "collision"
+                color = (255, 0, 0)
+            elif min_barrier < 0.01:
+                status = "warning"
+                color = (255, 255, 0)
+            else:
+                status = "safe"
+                color = (0, 255, 0)
+
+            now = time.monotonic()
+            if status != last_status:
+                server.scene.add_icosphere(
+                    "/collision_status", radius=0.04, color=color)
+            if status != last_status or now - last_print_time > 1.0:
+                print(
+                    f"collision status={status}, min barrier={min_barrier:.4f}")
+                last_status = status
+                last_print_time = now
+
+            ik_start = time.perf_counter()
+            try:
+                velocity = solve_ik(
+                    configuration,
+                    tasks,
+                    dt,
+                    solver=solver,
+                    barriers=barriers,
+                    constraints=constraints,
+                    safety_break=False,
+                )
+            except NoSolutionFound as exc:
+                print(f"IK solver failed: {exc}")
+                velocity = np.zeros(robot.model.nv)
+            ik_time_gui.value = round(
+                (time.perf_counter() - ik_start) * 1000.0, 3)
+
+            configuration.integrate_inplace(velocity, dt)
+            if not args.unlock_non_arm:
+                q_locked = configuration.q.copy()
+                q_locked[locked_q_indices] = q_ref[locked_q_indices]
+                configuration.update(q_locked)
+            if hardware_interface is not None:
+                send_hardware_upper_body_command(
+                    hardware_interface,
+                    configuration.q[arm_q_indices],
+                    configuration.q[hip_yaw_q_indices],
+                    enabled=teleop_enabled and status != "collision",
+                )
+            urdf_vis.update_cfg(pinocchio_to_yourdfpy_cfg(
+                robot.model, configuration.q))
+
+            joint_angles_deg = np.rad2deg(configuration.q[arm_q_indices])
+            joint_time_history[:-1] = joint_time_history[1:]
+            joint_time_history[-1] = t
+            joint_position_history[:, :-1] = joint_position_history[:, 1:]
+            joint_position_history[:, -1] = joint_angles_deg
+            if t - last_plot_update_time >= 1.0 / JOINT_PLOT_UPDATE_HZ:
+                joint_values_gui.content = format_joint_table(joint_angles_deg)
+                update_joint_plots(
+                    joint_plots,
+                    joint_time_history,
+                    joint_position_history,
+                    t,
+                )
+                status_gui.content = format_teleop_status(
+                    teleop_enabled,
+                    xr_ok,
+                    left_active,
+                    right_active,
+                    scale,
+                    status,
+                    min_barrier,
+                )
+                last_plot_update_time = t
+
+            rate.sleep()
+            t += dt
+    except KeyboardInterrupt:
+        print("Stopped.")
+    finally:
+        stop_hardware_upper_body_command(hardware_interface)
+        xr_client.close()
+
+
+if __name__ == "__main__":
+    main()

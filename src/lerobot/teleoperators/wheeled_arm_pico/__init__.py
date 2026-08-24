@@ -14,7 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .config_wheeled_arm_pico import WheeledArmPicoConfig
-from .wheeled_arm_pico import WheeledArmPico
+from .config_wheeled_arm_pico import WheeledArmPicoAddHipYawConfig, WheeledArmPicoConfig
+from .wheeled_arm_pico import WheeledArmPico, WheeledArmPicoAddHipYaw
 
-__all__ = ["WheeledArmPico", "WheeledArmPicoConfig"]
+__all__ = [
+    "WheeledArmPico",
+    "WheeledArmPicoAddHipYaw",
+    "WheeledArmPicoAddHipYawConfig",
+    "WheeledArmPicoConfig",
+]

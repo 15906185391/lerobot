@@ -115,6 +115,10 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> "Teleoperator":
         from .wheeled_arm_pico import WheeledArmPico
 
         return WheeledArmPico(config)
+    elif config.type == "wheeled_arm_pico_add_hip_yaw":
+        from .wheeled_arm_pico import WheeledArmPicoAddHipYaw
+
+        return WheeledArmPicoAddHipYaw(config)
     else:
         try:
             return cast("Teleoperator", make_device_from_device_class(config))

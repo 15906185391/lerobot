@@ -44,10 +44,16 @@ def _joint_translation(model, data, joint_name: str) -> np.ndarray | None:
     return np.asarray(data.oMi[joint_id].translation, dtype=float).copy()
 
 
-def _arm_chain_positions(model, data, configuration, side_prefix: str, tcp_frame: str) -> np.ndarray:
+def _arm_chain_positions(
+    model,
+    data,
+    configuration,
+    joint_names: tuple[str, ...],
+    tcp_frame: str,
+) -> np.ndarray:
     positions = []
-    for idx in range(1, 8):
-        position = _joint_translation(model, data, f"{side_prefix}_joint_{idx}")
+    for joint_name in joint_names:
+        position = _joint_translation(model, data, joint_name)
         if position is not None:
             positions.append(position)
 
@@ -86,6 +92,8 @@ def log_rerun_robot_visualization(
     frame_index: int | None = None,
     timestamp: float | None = None,
     urdf_path: Path | None = None,
+    left_tcp: str = LEFT_TCP,
+    right_tcp: str = RIGHT_TCP,
 ) -> None:
     require_rerun_robot_visualization_dependencies()
     import rerun as rr
@@ -107,8 +115,20 @@ def log_rerun_robot_visualization(
     if urdf_path is not None:
         rr.log(f"{prefix}/metadata/urdf_path", rr.TextDocument(str(urdf_path)), static=True)
 
-    left_chain = _arm_chain_positions(model, data, configuration, LEFT_ARM_PREFIX, LEFT_TCP)
-    right_chain = _arm_chain_positions(model, data, configuration, RIGHT_ARM_PREFIX, RIGHT_TCP)
+    left_joint_names = tuple(
+        f"{LEFT_ARM_PREFIX}_joint_{idx}"
+        if model.getJointId(f"{LEFT_ARM_PREFIX}_joint_{idx}") != 0
+        else f"L_joint{idx}"
+        for idx in range(1, 8)
+    )
+    right_joint_names = tuple(
+        f"{RIGHT_ARM_PREFIX}_joint_{idx}"
+        if model.getJointId(f"{RIGHT_ARM_PREFIX}_joint_{idx}") != 0
+        else f"R_joint{idx}"
+        for idx in range(1, 8)
+    )
+    left_chain = _arm_chain_positions(model, data, configuration, left_joint_names, left_tcp)
+    right_chain = _arm_chain_positions(model, data, configuration, right_joint_names, right_tcp)
     rr.log(
         f"{prefix}/left_arm/skeleton",
         rr.LineStrips3D([left_chain], radii=[0.012], colors=[(31, 119, 180)]),
@@ -126,8 +146,8 @@ def log_rerun_robot_visualization(
         rr.Points3D(right_chain, radii=[0.025], colors=[(255, 127, 14)]),
     )
 
-    left_tcp_pose = configuration.get_transform_frame_to_world(LEFT_TCP)
-    right_tcp_pose = configuration.get_transform_frame_to_world(RIGHT_TCP)
+    left_tcp_pose = configuration.get_transform_frame_to_world(left_tcp)
+    right_tcp_pose = configuration.get_transform_frame_to_world(right_tcp)
     _log_transform(rr, f"{prefix}/left_tcp", left_tcp_pose, pin, config.rerun_robot_axis_length)
     _log_transform(rr, f"{prefix}/right_tcp", right_tcp_pose, pin, config.rerun_robot_axis_length)
     _log_transform(rr, f"{prefix}/left_target", left_target_pose, pin, config.rerun_robot_axis_length)

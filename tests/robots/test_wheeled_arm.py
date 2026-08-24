@@ -22,7 +22,7 @@ import numpy as np
 
 from lerobot.robots import make_robot_from_config
 from lerobot.robots.config import RobotConfig
-from lerobot.robots.wheeled_arm import WheeledArm, WheeledArmConfig
+from lerobot.robots.wheeled_arm import WheeledArm, WheeledArmConfig, WheeledArmWithHipYawConfig
 from lerobot.robots.wheeled_arm.config_wheeled_arm import (
     WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY,
     WHEELED_ARM_DEFAULT_ROS2_CAMERA_TOPIC,
@@ -64,9 +64,7 @@ class FakeLCMHandler:
     def has_arm_state_feedback(self, max_age_s=None, min_time_s=None):
         if not self.has_feedback:
             return False
-        if min_time_s is not None and self.arm_state_time_s < min_time_s:
-            return False
-        return True
+        return min_time_s is None or self.arm_state_time_s >= min_time_s
 
     def simulate_arm_state_feedback(self, joint_position):
         with self.joint_current_pos_lock:
@@ -113,6 +111,14 @@ def test_wheeled_arm_config_is_registered():
     assert "wheeled_arm" in RobotConfig.get_known_choices()
     assert isinstance(make_robot_from_config(
         WheeledArmConfig(cameras={}, connect_timeout_s=0)), WheeledArm)
+
+
+def test_wheeled_arm_with_hip_yaw_config_is_registered():
+    assert "wheeled_arm_with_hip_yaw" in RobotConfig.get_known_choices()
+    robot = make_robot_from_config(WheeledArmWithHipYawConfig(cameras={}, connect_timeout_s=0))
+
+    assert isinstance(robot, WheeledArm)
+    assert "hip_yaw.pos" in robot.action_features
 
 
 def test_default_camera_config_uses_ros2_camera():
@@ -397,6 +403,34 @@ def test_send_action_respects_pico_active_arm_metadata():
     assert handler.left_gripper_moving is True
 
 
+def test_send_action_can_command_hip_yaw_when_waist_is_configured():
+    robot, handler = _make_robot(
+        joint_names=[
+            *(f"left_arm_{idx}" for idx in range(7)),
+            *(f"right_arm_{idx}" for idx in range(7)),
+            "left_gripper",
+            "right_gripper",
+            "hip_yaw",
+        ],
+        controlled_parts=["left_arm", "right_arm", "left_gripper", "right_gripper", "waist"],
+    )
+
+    returned = robot.send_action(
+        {
+            "left_arm_0.pos": 1.5,
+            "hip_yaw.pos": -0.25,
+            WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY: ("left_arm", "waist"),
+        }
+    )
+
+    assert returned == {"left_arm_0.pos": 1.5, "hip_yaw.pos": -0.25}
+    assert handler.last_package[0] == 1.5
+    assert handler.last_package[20] == -0.25
+    assert handler.left_arm_moving is True
+    assert handler.waist_moving is True
+    assert handler.right_arm_moving is False
+
+
 def test_send_action_respects_disabled_parts_and_relative_limit():
     robot, handler = _make_robot(
         controlled_parts=["left_arm", "left_gripper"], max_relative_target=2.0)
@@ -430,7 +464,7 @@ def test_reset_to_rest_pose_uses_movej_with_arm_targets_in_radians():
             self.stop_requested = stop_requested
             self.progress_callback = progress_callback
 
-        def moveJ2target(self, current_position, target_position):
+        def moveJ2target(self, current_position, target_position):  # noqa: N802
             calls.append(
                 (np.asarray(current_position).copy(), np.asarray(target_position).copy())
             )
@@ -476,7 +510,7 @@ def test_reset_to_rest_pose_stops_when_movej_is_interrupted():
             self.stop_requested = stop_requested
             self.progress_callback = progress_callback
 
-        def moveJ2target(self, current_position, target_position):
+        def moveJ2target(self, current_position, target_position):  # noqa: N802
             assert self.stop_requested is not None
             assert self.stop_requested() is True
             return False

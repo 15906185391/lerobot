@@ -32,7 +32,7 @@ from lerobot.robots.wheeled_arm.config_wheeled_arm import (
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from ..teleoperator import Teleoperator
-from .config_wheeled_arm_pico import WheeledArmPicoConfig
+from .config_wheeled_arm_pico import WheeledArmPicoAddHipYawConfig, WheeledArmPicoConfig
 from .ik_utils import (
     LEFT_TCP,
     RIGHT_TCP,
@@ -63,13 +63,18 @@ class WheeledArmPico(Teleoperator):
 
     config_class = WheeledArmPicoConfig
     name = "wheeled_arm_pico"
+    left_tcp = LEFT_TCP
+    right_tcp = RIGHT_TCP
+    extra_joint_names: tuple[str, ...] = ()
+    active_extra_parts: tuple[str, ...] = ()
 
     def __init__(self, config: WheeledArmPicoConfig):
         super().__init__(config)
         self.config = config
         self.arm_joint_names = WHEELED_ARM_ARM_JOINT_NAMES.copy()
         self.gripper_names = WHEELED_ARM_GRIPPER_NAMES.copy()
-        self.joint_names = WHEELED_ARM_JOINT_NAMES.copy()
+        self.extra_joint_names = list(self.extra_joint_names)
+        self.joint_names = [*WHEELED_ARM_JOINT_NAMES, *self.extra_joint_names]
 
         self._connected = False
         self._deps = None
@@ -81,6 +86,7 @@ class WheeledArmPico(Teleoperator):
         self._constraints = None
         self._collision_barrier = None
         self._arm_q_indices = None
+        self._extra_q_indices = None
         self._locked_q_indices = None
         self._q_ref = None
         self._solver = None
@@ -132,6 +138,27 @@ class WheeledArmPico(Teleoperator):
     def is_calibrated(self) -> bool:
         return True
 
+    def _default_urdf_path(self):
+        return default_urdf_path()
+
+    def _after_robot_loaded(self, robot, pin) -> None:
+        pass
+
+    def _initial_configuration(self, model, pin) -> np.ndarray:
+        return initial_configuration(model, pin)
+
+    def _arm_joint_indices(self, model) -> tuple[np.ndarray, np.ndarray]:
+        return arm_joint_indices(model)
+
+    def _extra_joint_indices(self, model) -> tuple[np.ndarray, np.ndarray]:
+        return np.array([], dtype=int), np.array([], dtype=int)
+
+    def _locked_joint_indices(self, model) -> tuple[np.ndarray, np.ndarray]:
+        return locked_joint_indices(model)
+
+    def _build_collision_model(self, model, pin, fcl):
+        return build_primitive_collision_model(model, pin, fcl)
+
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
         if self.config.solve_frequency_hz <= 0:
@@ -141,7 +168,7 @@ class WheeledArmPico(Teleoperator):
         self._dt = 1.0 / self.config.solve_frequency_hz
 
         self._deps = import_runtime_dependencies(require_collision_backend=self.config.use_self_collision)
-        urdf_path = self.config.urdf_path or default_urdf_path()
+        urdf_path = self.config.urdf_path or self._default_urdf_path()
         if not urdf_path.is_file():
             raise FileNotFoundError(
                 f"Cannot find wheeled_arm URDF: {urdf_path}. "
@@ -156,14 +183,16 @@ class WheeledArmPico(Teleoperator):
             package_dirs=package_dirs_for_urdf(urdf_path),
             root_joint=None,
         )
+        self._after_robot_loaded(self._robot, pin)
         if self.config.use_self_collision:
-            self._robot.collision_model = build_primitive_collision_model(
+            self._robot.collision_model = self._build_collision_model(
                 self._robot.model, pin, self._deps.fcl
             )
 
-        self._q_ref = initial_configuration(self._robot.model, pin)
-        self._arm_q_indices, _ = arm_joint_indices(self._robot.model)
-        self._locked_q_indices, locked_v_indices = locked_joint_indices(self._robot.model)
+        self._q_ref = self._initial_configuration(self._robot.model, pin)
+        self._arm_q_indices, _ = self._arm_joint_indices(self._robot.model)
+        self._extra_q_indices, _ = self._extra_joint_indices(self._robot.model)
+        self._locked_q_indices, locked_v_indices = self._locked_joint_indices(self._robot.model)
 
         if self.config.use_self_collision:
             initial_ignore_distance = (
@@ -184,9 +213,9 @@ class WheeledArmPico(Teleoperator):
         else:
             self._barriers = []
 
-        LockedJointsTask = make_locked_joints_task_class(self._deps.Task)
+        locked_joints_task_cls = make_locked_joints_task_class(self._deps.Task)
         self._constraints = [
-            LockedJointsTask(
+            locked_joints_task_cls(
                 self._locked_q_indices,
                 locked_v_indices,
                 self._q_ref,
@@ -204,14 +233,14 @@ class WheeledArmPico(Teleoperator):
         )
 
         left_task = self._deps.FrameTask(
-            LEFT_TCP,
+            self.left_tcp,
             position_cost=self.config.position_cost,
             orientation_cost=self.config.orientation_cost,
             lm_damping=self.config.frame_lm_damping,
             gain=self.config.task_gain,
         )
         right_task = self._deps.FrameTask(
-            RIGHT_TCP,
+            self.right_tcp,
             position_cost=self.config.position_cost,
             orientation_cost=self.config.orientation_cost,
             lm_damping=self.config.frame_lm_damping,
@@ -227,12 +256,13 @@ class WheeledArmPico(Teleoperator):
         for task in (left_task, right_task, posture_task):
             task.set_target_from_configuration(self._configuration)
 
-        WheeledArmPicoVisualizer = None
+        visualizer_cls = None
         if self.config.visualize:
             try:
-                from .visualization import WheeledArmPicoVisualizer, require_visualization_dependencies
+                from . import visualization as pico_visualization
 
-                require_visualization_dependencies()
+                pico_visualization.require_visualization_dependencies()
+                visualizer_cls = pico_visualization.WheeledArmPicoVisualizer
             except Exception as exc:
                 logger.warning("Disabling wheeled_arm_pico Viser visualization: %s", exc)
                 self.config.visualize = False
@@ -241,15 +271,17 @@ class WheeledArmPico(Teleoperator):
         self._xr_client = MockXrClient() if self.config.mock_xr else self._make_xr_client()
         self._reset_action_filter_from_q(self._configuration.q)
         self._last_action = self._make_action(self._configuration.q, set())
-        if self.config.visualize and WheeledArmPicoVisualizer is not None:
+        if self.config.visualize and visualizer_cls is not None:
             try:
-                self._visualizer = WheeledArmPicoVisualizer(
+                self._visualizer = visualizer_cls(
                     self.config,
                     self._deps,
                     self._robot,
                     self._configuration,
                     self._arm_q_indices,
                     urdf_path,
+                    left_tcp=self.left_tcp,
+                    right_tcp=self.right_tcp,
                 )
             except Exception as exc:
                 logger.warning("Disabling wheeled_arm_pico Viser visualization: %s", exc)
@@ -360,9 +392,13 @@ class WheeledArmPico(Teleoperator):
 
         q = self._configuration.q.copy()
         q[self._arm_q_indices] = arm_q
+        if self._extra_q_indices is not None and self.extra_joint_names:
+            extra_q = arm_q_from_feedback(feedback, self.extra_joint_names)
+            if extra_q is not None:
+                q[self._extra_q_indices] = extra_q
         q[self._locked_q_indices] = self._q_ref[self._locked_q_indices]
         self._configuration.update(q)
-        self._filtered_arm_q = arm_q.copy()
+        self._reset_action_filter_from_q(self._configuration.q)
 
     @check_if_not_connected
     def refresh_visualization_from_feedback(
@@ -377,8 +413,8 @@ class WheeledArmPico(Teleoperator):
 
         assert self._configuration is not None
 
-        left_pose = self._configuration.get_transform_frame_to_world(LEFT_TCP).copy()
-        right_pose = self._configuration.get_transform_frame_to_world(RIGHT_TCP).copy()
+        left_pose = self._configuration.get_transform_frame_to_world(self.left_tcp).copy()
+        right_pose = self._configuration.get_transform_frame_to_world(self.right_tcp).copy()
         self._update_visualization(
             left_pose,
             right_pose,
@@ -402,8 +438,8 @@ class WheeledArmPico(Teleoperator):
 
         pin = self._deps.pin
         left_task, right_task, damping_task, posture_task = self._tasks
-        current_left = self._configuration.get_transform_frame_to_world(LEFT_TCP).copy()
-        current_right = self._configuration.get_transform_frame_to_world(RIGHT_TCP).copy()
+        current_left = self._configuration.get_transform_frame_to_world(self.left_tcp).copy()
+        current_right = self._configuration.get_transform_frame_to_world(self.right_tcp).copy()
         left_target_pose = current_left
         right_target_pose = current_right
         xr_ok = False
@@ -487,6 +523,7 @@ class WheeledArmPico(Teleoperator):
         self._update_gripper_positions(left_gripper_value, right_gripper_value)
         hold_arm_q = np.asarray(self._configuration.q[self._arm_q_indices], dtype=float).copy()
         active_arm_mask = self._active_arm_mask(left_active, right_active)
+        active_joint_mask = self._active_joint_mask(left_active, right_active)
 
         if not np.any(active_arm_mask):
             self._reset_action_filter_from_q(self._configuration.q)
@@ -558,7 +595,7 @@ class WheeledArmPico(Teleoperator):
         q_locked[self._locked_q_indices] = self._q_ref[self._locked_q_indices]
         q_locked[self._arm_q_indices[~active_arm_mask]] = hold_arm_q[~active_arm_mask]
         self._configuration.update(q_locked)
-        self._apply_action_smoothing_to_configuration(active_arm_mask)
+        self._apply_action_smoothing_to_configuration(active_joint_mask)
 
         self._last_action = self._make_action(
             self._configuration.q,
@@ -594,17 +631,32 @@ class WheeledArmPico(Teleoperator):
 
     def _make_action(self, q: np.ndarray, active_arms: set[str] | None = None) -> RobotAction:
         action = arm_action_from_q(q, self._arm_q_indices, self.arm_joint_names)
+        if self._extra_q_indices is not None and self.extra_joint_names:
+            action.update(arm_action_from_q(q, self._extra_q_indices, self.extra_joint_names))
         action.update(self._gripper_positions)
         action[WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY] = tuple(sorted(active_arms or set()))
         return action
 
     def _reset_action_filter_from_q(self, q: np.ndarray) -> None:
-        assert self._arm_q_indices is not None
-        self._filtered_arm_q = np.asarray(q[self._arm_q_indices], dtype=float).copy()
+        controlled_q_indices = self._controlled_q_indices()
+        self._filtered_arm_q = np.asarray(q[controlled_q_indices], dtype=float).copy()
         self._previous_arm_step = np.zeros_like(self._filtered_arm_q)
+
+    def _controlled_q_indices(self) -> np.ndarray:
+        assert self._arm_q_indices is not None
+        if self._extra_q_indices is None or self._extra_q_indices.size == 0:
+            return self._arm_q_indices
+        return np.concatenate((self._arm_q_indices, self._extra_q_indices))
 
     def _active_arm_mask(self, left_active: bool, right_active: bool) -> np.ndarray:
         return np.array([left_active] * 7 + [right_active] * 7, dtype=bool)
+
+    def _active_joint_mask(self, left_active: bool, right_active: bool) -> np.ndarray:
+        arm_mask = self._active_arm_mask(left_active, right_active)
+        extra_count = 0 if self._extra_q_indices is None else int(self._extra_q_indices.size)
+        if extra_count == 0:
+            return arm_mask
+        return np.concatenate((arm_mask, np.array([left_active or right_active] * extra_count, dtype=bool)))
 
     def _active_arm_names(self, left_active: bool, right_active: bool) -> set[str]:
         active_arms = set()
@@ -612,19 +664,21 @@ class WheeledArmPico(Teleoperator):
             active_arms.add("left_arm")
         if right_active:
             active_arms.add("right_arm")
+        if (left_active or right_active) and self.extra_joint_names:
+            active_arms.update(self.active_extra_parts)
         return active_arms
 
     def _apply_action_smoothing_to_configuration(self, active_arm_mask: np.ndarray) -> None:
         assert self._configuration is not None
-        assert self._arm_q_indices is not None
         assert self._locked_q_indices is not None
         assert self._q_ref is not None
 
-        target_arm_q = np.asarray(self._configuration.q[self._arm_q_indices], dtype=float)
+        controlled_q_indices = self._controlled_q_indices()
+        target_arm_q = np.asarray(self._configuration.q[controlled_q_indices], dtype=float)
         active_arm_mask = np.asarray(active_arm_mask, dtype=bool)
         if active_arm_mask.shape != target_arm_q.shape:
             raise ValueError(
-                f"`active_arm_mask` shape {active_arm_mask.shape} does not match arm q shape {target_arm_q.shape}."
+                f"`active_arm_mask` shape {active_arm_mask.shape} does not match controlled q shape {target_arm_q.shape}."
             )
         current_arm_q = (
             target_arm_q
@@ -656,7 +710,7 @@ class WheeledArmPico(Teleoperator):
         self._previous_arm_step = arm_step
 
         q_filtered = self._configuration.q.copy()
-        q_filtered[self._arm_q_indices] = filtered_arm_q
+        q_filtered[controlled_q_indices] = filtered_arm_q
         q_filtered[self._locked_q_indices] = self._q_ref[self._locked_q_indices]
         self._configuration.update(q_filtered)
 
@@ -751,6 +805,8 @@ class WheeledArmPico(Teleoperator):
                 frame_index=frame_index,
                 timestamp=timestamp,
                 urdf_path=self._urdf_path,
+                left_tcp=self.left_tcp,
+                right_tcp=self.right_tcp,
                 **self._last_visualization_state,
             )
         except Exception as exc:
@@ -768,3 +824,50 @@ class WheeledArmPico(Teleoperator):
         self._last_visualization_state = None
         self._connected = False
         logger.info("%s disconnected.", self)
+
+
+class WheeledArmPicoAddHipYaw(WheeledArmPico):
+    """PICO teleoperator variant that solves IK with G01 hip_yaw plus both arms."""
+
+    config_class = WheeledArmPicoAddHipYawConfig
+    name = "wheeled_arm_pico_add_hip_yaw"
+    left_tcp = "L_tcp"
+    right_tcp = "R_tcp"
+    extra_joint_names = ("hip_yaw",)
+    active_extra_parts = ("waist",)
+
+    def _default_urdf_path(self):
+        from .ik_utils import default_g01_urdf_path
+
+        return default_g01_urdf_path()
+
+    def _after_robot_loaded(self, robot, pin) -> None:
+        from .ik_utils import ensure_g01_tcp_frames
+
+        ensure_g01_tcp_frames(robot.model, pin)
+        robot.data = robot.model.createData()
+
+    def _initial_configuration(self, model, pin) -> np.ndarray:
+        from .ik_utils import g01_initial_configuration
+
+        return g01_initial_configuration(model, pin)
+
+    def _arm_joint_indices(self, model) -> tuple[np.ndarray, np.ndarray]:
+        from .ik_utils import g01_arm_joint_indices
+
+        return g01_arm_joint_indices(model)
+
+    def _extra_joint_indices(self, model) -> tuple[np.ndarray, np.ndarray]:
+        from .ik_utils import g01_hip_yaw_joint_indices
+
+        return g01_hip_yaw_joint_indices(model)
+
+    def _locked_joint_indices(self, model) -> tuple[np.ndarray, np.ndarray]:
+        from .ik_utils import g01_locked_joint_indices
+
+        return g01_locked_joint_indices(model)
+
+    def _build_collision_model(self, model, pin, fcl):
+        from .ik_utils import build_g01_primitive_collision_model
+
+        return build_g01_primitive_collision_model(model, pin, fcl)

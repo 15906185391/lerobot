@@ -31,7 +31,16 @@ from lerobot.utils.decorators import check_if_already_connected, check_if_not_co
 
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
-from .config_wheeled_arm import WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY, WheeledArmConfig
+from .config_wheeled_arm import (
+    WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY,
+    WHEELED_ARM_ARM_JOINT_NAMES,
+    WHEELED_ARM_GRIPPER_NAMES,
+    WHEELED_ARM_HEAD_JOINT_NAMES,
+    WHEELED_ARM_JOINT_PACKAGE_INDICES,
+    WHEELED_ARM_LEG_JOINT_NAMES,
+    WHEELED_ARM_WAIST_JOINT_NAMES,
+    WheeledArmConfig,
+)
 
 if TYPE_CHECKING:
     from .hardware_interface.lcm_handler import LCMHandler
@@ -65,6 +74,15 @@ def _make_lcm_handler(lcm_url: str) -> LCMHandler:
         raise
 
 
+_PART_JOINT_NAMES: dict[str, tuple[str, ...]] = {
+    "left_arm": tuple(WHEELED_ARM_ARM_JOINT_NAMES[:7]),
+    "right_arm": tuple(WHEELED_ARM_ARM_JOINT_NAMES[7:14]),
+    "left_gripper": (WHEELED_ARM_GRIPPER_NAMES[0],),
+    "right_gripper": (WHEELED_ARM_GRIPPER_NAMES[1],),
+    "head": tuple(WHEELED_ARM_HEAD_JOINT_NAMES),
+    "waist": tuple(WHEELED_ARM_WAIST_JOINT_NAMES),
+    "leg": tuple(WHEELED_ARM_LEG_JOINT_NAMES),
+}
 _PART_SLICES: dict[str, slice] = {
     "left_arm": slice(0, 7),
     "right_arm": slice(7, 14),
@@ -120,7 +138,8 @@ class WheeledArm(Robot):
         self._watchdog_timed_out = False
 
         self._joint_index_by_action_key = {
-            f"{joint_name}.pos": idx for idx, joint_name in enumerate(self.config.joint_names)
+            f"{joint_name}.pos": WHEELED_ARM_JOINT_PACKAGE_INDICES[joint_name]
+            for joint_name in self.config.joint_names
         }
 
     @property
@@ -246,10 +265,9 @@ class WheeledArm(Robot):
         if not self.wait_for_valid_feedback(wait_timeout_s):
             if self.config.require_fresh_feedback:
                 raise RuntimeError(
-                    "%s did not receive fresh left/right arm LCM state feedback while connecting. "
+                    f"{self} did not receive fresh left/right arm LCM state feedback while connecting. "
                     "为避免实物遥操作初始状态跳变，连接已中止。"
                     "请检查 LCM URL、组播路由和控制器状态发布程序。"
-                    % self
                 )
             logger.warning(
                 "%s has not received fresh left/right arm state feedback. "
@@ -328,8 +346,8 @@ class WheeledArm(Robot):
     def joint_observation_from_package(self, joint_positions: np.ndarray) -> RobotObservation:
         joint_positions = np.asarray(joint_positions, dtype=np.float32)
         return {
-            f"{joint_name}.pos": float(joint_positions[idx])
-            for idx, joint_name in enumerate(self.config.joint_names)
+            f"{joint_name}.pos": float(joint_positions[WHEELED_ARM_JOINT_PACKAGE_INDICES[joint_name]])
+            for joint_name in self.config.joint_names
         }
 
     def _make_reset_progress_callback(
@@ -377,8 +395,8 @@ class WheeledArm(Robot):
             joint_positions = np.asarray(self._handler.joint_current_pos, dtype=np.float32).copy()
 
         obs_dict: RobotObservation = {
-            f"{joint_name}.pos": float(joint_positions[idx])
-            for idx, joint_name in enumerate(self.config.joint_names)
+            f"{joint_name}.pos": float(joint_positions[WHEELED_ARM_JOINT_PACKAGE_INDICES[joint_name]])
+            for joint_name in self.config.joint_names
         }
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
@@ -435,11 +453,10 @@ class WheeledArm(Robot):
             return action_keys
 
         active_arm_set = {active_arms} if isinstance(active_arms, str) else {str(part) for part in active_arms}
-        for part in ("left_arm", "right_arm"):
+        for part in ("left_arm", "right_arm", "waist"):
             if part in active_arm_set:
                 continue
-            part_slice = _PART_SLICES[part]
-            action_keys -= {f"{joint_name}.pos" for joint_name in self.config.joint_names[part_slice]}
+            action_keys -= self._part_action_keys(part)
         return action_keys
 
     def _start_control_loop(self) -> None:
@@ -623,18 +640,20 @@ class WheeledArm(Robot):
 
         return ControlLoopPause()
 
+    def _part_action_keys(self, part: str) -> set[str]:
+        configured_joints = set(self.config.joint_names)
+        return {
+            f"{joint_name}.pos"
+            for joint_name in _PART_JOINT_NAMES.get(part, ())
+            if joint_name in configured_joints
+        }
+
     def _set_moving_flags(self, action_keys: set[str]) -> None:
         assert self._handler is not None
 
         controlled_parts = set(self.config.controlled_parts)
         for part, flag_name in _PART_MOVING_FLAGS.items():
-            part_slice = _PART_SLICES.get(part)
-            part_action_keys = (
-                {f"{joint_name}.pos" for joint_name in self.config.joint_names[part_slice]}
-                if part_slice is not None
-                else set()
-            )
-            should_move = part in controlled_parts and bool(action_keys & part_action_keys)
+            should_move = part in controlled_parts and bool(action_keys & self._part_action_keys(part))
             setattr(self._handler, flag_name, should_move)
 
     @check_if_not_connected
@@ -670,7 +689,7 @@ class WheeledArm(Robot):
         logger.info(f"{self} disconnected.")
 
     def _default_mock_joint_pos(self) -> np.ndarray:
-        joint_pos = np.zeros(len(self.config.joint_names), dtype=np.float32)
+        joint_pos = np.zeros(23, dtype=np.float32)
         joint_pos[_PART_SLICES["left_arm"]] = _RESET_LEFT_ARM_RAD
         joint_pos[_PART_SLICES["right_arm"]] = _RESET_RIGHT_ARM_RAD
         return joint_pos

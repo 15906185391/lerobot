@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .config_wheeled_arm import WheeledArmConfig
+from .config_wheeled_arm import WheeledArmConfig, WheeledArmWithHipYawConfig
 from .wheeled_arm import WheeledArm
 
-__all__ = ["WheeledArm", "WheeledArmConfig"]
+__all__ = ["WheeledArm", "WheeledArmConfig", "WheeledArmWithHipYawConfig"]

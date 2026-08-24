@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
 
 from ..config import TeleoperatorConfig
 
@@ -211,3 +211,10 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
         _validate_non_negative("rerun_robot_axis_length", self.rerun_robot_axis_length)
         if not self.rerun_robot_prefix:
             raise ValueError("`rerun_robot_prefix` must not be empty.")
+
+
+@TeleoperatorConfig.register_subclass("wheeled_arm_pico_add_hip_yaw")
+@dataclass
+class WheeledArmPicoAddHipYawConfig(WheeledArmPicoConfig):
+    # PICO teleoperator variant that uses G01.urdf and lets hip_yaw move with both arms.
+    pass
