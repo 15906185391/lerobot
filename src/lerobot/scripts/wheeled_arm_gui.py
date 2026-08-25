@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import html
+import importlib
 import json
 import os
 import random
@@ -315,6 +316,38 @@ COMMON_SCRIPT_MODULES = {
 }
 DEFAULT_WHEELED_ARM_URDF = default_g01_urdf_path()
 WHEELED_ARM_TELEOP_TYPES = ("wheeled_arm_pico", "wheeled_arm_pico_add_hip_yaw")
+WHEELED_ARM_END_EFFECTOR_OPTIONS = ("suction", "gripper")
+WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR = "suction"
+WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR = "gripper"
+LCM_TYPES_DIR = PROJECT_ROOT / "src/lerobot/robots/wheeled_arm/hardware_interface/lcm_types"
+LCM_SPY_SCRIPT = LCM_TYPES_DIR / "launch_lcm_spy.sh"
+LCM_SPY_JAVA_DIR = LCM_TYPES_DIR / "java"
+DEFAULT_LCM_SPY_URL = "udpm://239.255.76.67:8880?ttl=255"
+LCM_DATA_STRUCTURE_DIR = (
+    PROJECT_ROOT / "src/lerobot/robots/wheeled_arm/hardware_interface/lcm_data_structure"
+)
+LCM_CHANNEL_TYPE_PATHS = {
+    "MANIP_LEFT_ARM_STATE": "manipulation.arm.joint_state_t:joint_state_t",
+    "MANIP_RIGHT_ARM_STATE": "manipulation.arm.joint_state_t:joint_state_t",
+    "MANIP_LEFT_ARM_CMD": "manipulation.arm.joint_command_t:joint_command_t",
+    "MANIP_RIGHT_ARM_CMD": "manipulation.arm.joint_command_t:joint_command_t",
+    "MANIP_HEAD_STATE": "manipulation.head.joint_state_t:joint_state_t",
+    "MANIP_HEAD_CMD": "manipulation.head.joint_command_t:joint_command_t",
+    "MANIP_WAIST_STATE": "manipulation.waist.joint_state_t:joint_state_t",
+    "MANIP_WAIST_CMD": "manipulation.waist.joint_command_t:joint_command_t",
+    "MANIP_LEG_STATE": "manipulation.leg.joint_state_t:joint_state_t",
+    "MANIP_LEG_CMD": "manipulation.leg.joint_command_t:joint_command_t",
+    "MANIP_LEFT_GRIPPER_STATE": "manipulation.gripper.gripper_state_t:gripper_state_t",
+    "MANIP_RIGHT_GRIPPER_STATE": "manipulation.gripper.gripper_state_t:gripper_state_t",
+    "MANIP_LEFT_GRIPPER_CMD": "manipulation.gripper.gripper_command_t:gripper_command_t",
+    "MANIP_RIGHT_GRIPPER_CMD": "manipulation.gripper.gripper_command_t:gripper_command_t",
+    "MANIP_SUCTION_STATE": "manipulation.suction.suction_state_t:suction_state_t",
+    "MANIP_LEFT_SUCTION_STATE": "manipulation.suction.suction_state_t:suction_state_t",
+    "MANIP_RIGHT_SUCTION_STATE": "manipulation.suction.suction_state_t:suction_state_t",
+    "MANIP_LEFT_SUCTION_CMD": "manipulation.suction.suction_command_t:suction_command_t",
+    "MANIP_RIGHT_SUCTION_CMD": "manipulation.suction.suction_command_t:suction_command_t",
+    "MANIP_ROBOT_INFO": "manipulation.robot.robot_info_t:robot_info_t",
+}
 
 
 def _bool_arg(value: bool) -> str:
@@ -335,6 +368,30 @@ def _module_command(module: str) -> list[str]:
 
 def _format_command(command: list[str]) -> str:
     return shlex.join(command)
+
+
+def _find_env_executable(name: str) -> str | None:
+    path = shutil.which(name)
+    if path is not None:
+        return path
+
+    executable_dir = Path(sys.executable).resolve().parent
+    candidates = [executable_dir / name, Path(sys.prefix) / "bin" / name]
+    if os.name == "nt":
+        candidates.extend([executable_dir / f"{name}.exe", Path(sys.prefix) / "Scripts" / f"{name}.exe"])
+
+    for candidate in candidates:
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _env_path_with_current_python_bin() -> str:
+    bin_dir = str(Path(sys.executable).resolve().parent)
+    paths = [path for path in os.environ.get("PATH", "").split(os.pathsep) if path]
+    if bin_dir not in paths:
+        paths.insert(0, bin_dir)
+    return os.pathsep.join(paths)
 
 
 def _find_free_tcp_port() -> int:
@@ -724,6 +781,7 @@ LOG_SOURCE_COLORS = {
     "编辑": "#f9a8d4",
     "转换": "#fdba74",
     "常用": "#93c5fd",
+    "LCM": "#5eead4",
     "点动": "#86efac",
 }
 LOG_NORMAL_COLOR = "#d8e7f3"
@@ -1103,6 +1161,174 @@ class ProcessRunner(QObject):
         code = process.wait()
         self._handle = None
         self.finished.emit(code)
+
+
+def _load_lcm_message_types() -> dict[str, type]:
+    if str(LCM_DATA_STRUCTURE_DIR) not in sys.path:
+        sys.path.insert(0, str(LCM_DATA_STRUCTURE_DIR))
+
+    message_types: dict[str, type] = {}
+    for channel, type_path in LCM_CHANNEL_TYPE_PATHS.items():
+        module_name, class_name = type_path.split(":", 1)
+        try:
+            module = importlib.import_module(module_name)
+            message_types[channel] = getattr(module, class_name)
+        except Exception:
+            continue
+    return message_types
+
+
+def _summarize_lcm_value(value: Any, depth: int = 0, max_items: int = 8) -> str:
+    if depth >= 3:
+        return "..."
+    if value is None or isinstance(value, bool | int | float | str):
+        return repr(value)
+    if isinstance(value, bytes):
+        return f"<{len(value)} bytes>"
+    if isinstance(value, np.ndarray):
+        return _summarize_lcm_value(value.tolist(), depth=depth + 1, max_items=max_items)
+    if isinstance(value, (list, tuple)):
+        items = [
+            _summarize_lcm_value(item, depth=depth + 1, max_items=max_items)
+            for item in value[:max_items]
+        ]
+        if len(value) > max_items:
+            items.append(f"... +{len(value) - max_items}")
+        return "[" + ", ".join(items) + "]"
+    slots = getattr(value, "__slots__", None)
+    if slots:
+        fields = []
+        for field in slots[:max_items]:
+            if field.startswith("_"):
+                continue
+            fields.append(f"{field}={_summarize_lcm_value(getattr(value, field), depth + 1, max_items)}")
+        if len(slots) > max_items:
+            fields.append(f"... +{len(slots) - max_items}")
+        return f"{type(value).__name__}(" + ", ".join(fields) + ")"
+    return repr(value)
+
+
+def _compact_lcm_summary(summary: str, max_chars: int) -> str:
+    summary = " ".join(summary.split())
+    if len(summary) <= max_chars:
+        return summary
+    return summary[: max(0, max_chars - 3)] + "..."
+
+
+class LcmMessageMonitor(QObject):
+    output = Signal(str)
+    started = Signal(str)
+    finished = Signal(int)
+    failed = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._is_running = False
+
+    @property
+    def is_running(self) -> bool:
+        return self._is_running and self._thread is not None and self._thread.is_alive()
+
+    def start(
+        self,
+        lcm_url: str,
+        channels: list[str],
+        rate_limit_hz: float,
+        max_chars: int,
+        decode_messages: bool,
+    ) -> bool:
+        if self.is_running:
+            self.failed.emit("LCM 通道监听已在运行。")
+            return False
+        self._stop_event.clear()
+        command = [
+            "LCM monitor",
+            "--lcm-url",
+            lcm_url,
+            "--channels",
+            ",".join(channels),
+            "--rate-limit-hz",
+            str(rate_limit_hz),
+            "--max-chars",
+            str(max_chars),
+        ]
+        if not decode_messages:
+            command.append("--raw")
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(lcm_url, channels, rate_limit_hz, max_chars, decode_messages),
+            name="lcm-message-monitor",
+            daemon=True,
+        )
+        self._is_running = True
+        self.started.emit(_format_command(command))
+        self._thread.start()
+        return True
+
+    def interrupt(self) -> None:
+        self._stop_event.set()
+
+    def _run(
+        self,
+        lcm_url: str,
+        channels: list[str],
+        rate_limit_hz: float,
+        max_chars: int,
+        decode_messages: bool,
+    ) -> None:
+        code = 0
+        try:
+            import lcm
+
+            message_types = _load_lcm_message_types() if decode_messages else {}
+            lc = lcm.LCM(lcm_url)
+            last_emit_by_channel: dict[str, float] = {}
+            min_interval_s = 0.0 if rate_limit_hz <= 0 else 1.0 / rate_limit_hz
+
+            def callback(channel: str, data: bytes) -> None:
+                now = time.monotonic()
+                previous = last_emit_by_channel.get(channel, 0.0)
+                if min_interval_s > 0 and now - previous < min_interval_s:
+                    return
+                last_emit_by_channel[channel] = now
+
+                message_type = message_types.get(channel)
+                if message_type is None:
+                    summary = f"{time.strftime('%H:%M:%S')} {channel} bytes={len(data)}"
+                else:
+                    try:
+                        msg = message_type.decode(data)
+                        body = _compact_lcm_summary(_summarize_lcm_value(msg), max_chars)
+                        summary = f"{time.strftime('%H:%M:%S')} {channel} bytes={len(data)} {body}"
+                    except Exception as exc:
+                        summary = (
+                            f"{time.strftime('%H:%M:%S')} {channel} "
+                            f"bytes={len(data)} decode failed: {exc}"
+                        )
+                self.output.emit(summary)
+
+            for pattern in channels:
+                lc.subscribe(pattern, callback)
+            self.output.emit("已开始监听 LCM 通道：" + ", ".join(channels))
+
+            if not hasattr(lc, "handle_timeout"):
+                self.failed.emit(
+                    "当前 lcm Python 绑定缺少 handle_timeout，停止监听可能需要等待下一条消息。"
+                )
+
+            while not self._stop_event.is_set():
+                if hasattr(lc, "handle_timeout"):
+                    lc.handle_timeout(100)
+                else:
+                    lc.handle()
+        except Exception as exc:
+            code = 1
+            self.failed.emit(f"LCM 监听失败: {exc}")
+        finally:
+            self._is_running = False
+            self.finished.emit(code)
 
 
 class DatasetImageLabel(QLabel):
@@ -2245,6 +2471,8 @@ class WheeledArmGui(QMainWindow):
         self.edit_runner = ProcessRunner("数据集编辑")
         self.conversion_runner = ProcessRunner("格式转换")
         self.common_runner = ProcessRunner("常用命令")
+        self.lcm_spy_runner = ProcessRunner("LCM 监视")
+        self.lcm_monitor = LcmMessageMonitor()
         self.joint_jog_runner = ProcessRunner("关节点动")
         self._last_record_base_repo_id = ""
         self._last_record_root = ""
@@ -2270,6 +2498,7 @@ class WheeledArmGui(QMainWindow):
         self.update_edit_preview()
         self.update_conversion_preview()
         self.update_common_preview()
+        self.update_lcm_spy_preview()
         self.update_joint_jog_preview()
 
     def closeEvent(self, event) -> None:  # noqa: N802
@@ -2279,12 +2508,15 @@ class WheeledArmGui(QMainWindow):
             or self.edit_runner.is_running
             or self.conversion_runner.is_running
             or self.common_runner.is_running
+            or self.lcm_monitor.is_running
+            or self.lcm_spy_runner.is_running
             or self.joint_jog_runner.is_running
         ):
             answer = QMessageBox.question(
                 self,
                 "仍有任务运行",
-                "采集、查看、编辑、转换、常用命令或关节点动进程仍在运行。是否先发送停止信号并关闭窗口？",
+                "采集、查看、编辑、转换、常用命令、LCM 监视或关节点动进程仍在运行。"
+                "是否先发送停止信号并关闭窗口？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
@@ -2295,6 +2527,8 @@ class WheeledArmGui(QMainWindow):
             self.edit_runner.interrupt()
             self.conversion_runner.interrupt()
             self.common_runner.interrupt()
+            self.lcm_monitor.interrupt()
+            self.lcm_spy_runner.interrupt()
             self.joint_jog_runner.interrupt()
         self._save_settings()
         super().closeEvent(event)
@@ -2336,12 +2570,14 @@ class WheeledArmGui(QMainWindow):
         self.edit_tab = self._make_edit_tab()
         self.conversion_tab = self._make_conversion_tab()
         self.common_tab = self._make_common_tab()
+        self.lcm_spy_tab = self._make_lcm_spy_tab()
         self.joint_jog_tab = self._make_joint_jog_tab()
         self.tabs.addTab(self.record_tab, "采集")
         self.tabs.addTab(self.viewer_tab, "查看数据集")
         self.tabs.addTab(self.edit_tab, "编辑数据集")
         self.tabs.addTab(self.conversion_tab, "格式转换")
         self.tabs.addTab(self.common_tab, "常用命令")
+        self.tabs.addTab(self.lcm_spy_tab, "LCM 监视")
         self.tabs.addTab(self.joint_jog_tab, "关节点动")
 
         sidebar = self._make_sidebar()
@@ -2396,7 +2632,7 @@ class WheeledArmGui(QMainWindow):
         self.sidebar_group = QButtonGroup(self)
         self.sidebar_group.setExclusive(True)
         self.sidebar_buttons: list[QPushButton] = []
-        for index, label_text in enumerate(("采集", "查看", "编辑", "转换", "常用", "点动")):
+        for index, label_text in enumerate(("采集", "查看", "编辑", "转换", "常用", "LCM", "点动")):
             button = QPushButton(label_text)
             button.setObjectName("SidebarButton")
             button.setCheckable(True)
@@ -2435,6 +2671,7 @@ class WheeledArmGui(QMainWindow):
             self.start_edit,
             self.start_conversion,
             self.start_common_command,
+            self.start_lcm_monitor,
             self.start_joint_jog,
         )
         callbacks[self.tabs.currentIndex()]()
@@ -2447,6 +2684,7 @@ class WheeledArmGui(QMainWindow):
             self.stop_edit,
             self.stop_conversion,
             self.stop_common_command,
+            self.stop_lcm_tools,
             self.stop_joint_jog,
         )
         callbacks[self.tabs.currentIndex()]()
@@ -2476,7 +2714,16 @@ class WheeledArmGui(QMainWindow):
         self.addAction(exit_action)
         file_menu.addAction(exit_action)
 
-        for index, label in enumerate(("采集", "查看数据集", "编辑数据集", "格式转换", "常用命令", "关节点动")):
+        view_labels = (
+            "采集",
+            "查看数据集",
+            "编辑数据集",
+            "格式转换",
+            "常用命令",
+            "LCM 监视",
+            "关节点动",
+        )
+        for index, label in enumerate(view_labels):
             action = QAction(label, self)
             action.triggered.connect(lambda _checked=False, tab_index=index: self.tabs.setCurrentIndex(tab_index))
             view_menu.addAction(action)
@@ -2569,6 +2816,8 @@ class WheeledArmGui(QMainWindow):
         self.mock_cameras.setToolTip("仅完全离线测试时开启；有真实相机时保持关闭。")
         self.mock_xr = QCheckBox("模拟 PICO 输入")
         self.lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
+        self.left_end_effector = self._end_effector_combo(WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR)
+        self.right_end_effector = self._end_effector_combo(WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR)
         self.publish_action_ros2 = QCheckBox("发布 action 到 ROS2")
         self.publish_action_ros2.setToolTip("发布最终下发给机器人的 action，便于观察关节命令是否抖动。")
         self.action_ros2_topic = QLineEdit("/lerobot/action")
@@ -2609,6 +2858,8 @@ class WheeledArmGui(QMainWindow):
         robot_form.addRow("", self.mock_xr)
         robot_form.addRow("teleop.type", self.record_teleop_type)
         robot_form.addRow("LCM URL", self.lcm_url)
+        robot_form.addRow("左臂末端", self.left_end_effector)
+        robot_form.addRow("右臂末端", self.right_end_effector)
         robot_form.addRow("", self.publish_action_ros2)
         robot_form.addRow("Action topic", self.action_ros2_topic)
         robot_form.addRow("PICO 位置滤波", self.pico_position_smoothing_alpha)
@@ -2818,9 +3069,9 @@ class WheeledArmGui(QMainWindow):
         self.conversion_python.setText(sys.executable)
         self.conversion_backend = PathPicker("Any4LeRobot backend 路径")
         self.conversion_backend.setText(str(ANY4LEROBOT_BACKEND))
-        self.conversion_script_label = QLabel("")
-        self.conversion_script_label.setWordWrap(True)
-        self.conversion_script_label.setObjectName("MutedLabel")
+        self.conversion_script_label = QLineEdit()
+        self.conversion_script_label.setReadOnly(True)
+        self.conversion_script_label.setObjectName("PathDisplay")
         type_form.addRow("类型", self.conversion_type)
         type_form.addRow("Python", self.conversion_python)
         type_form.addRow("Backend", self.conversion_backend)
@@ -2967,6 +3218,104 @@ class WheeledArmGui(QMainWindow):
         self.common_tokenizer_root.changed.connect(self.update_common_preview)
         self.common_tokenizer_output_dir.changed.connect(self.update_common_preview)
 
+        return self._scrollable(page)
+
+    def _make_lcm_spy_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 12, 12)
+        layout.setSpacing(14)
+
+        config_box = QGroupBox("LCM 通道消息")
+        form = QFormLayout(config_box)
+        self._setup_form_layout(form)
+        self.lcm_spy_url = QLineEdit(DEFAULT_LCM_SPY_URL)
+        self.lcm_spy_url.setPlaceholderText("例如 udpm://239.255.76.67:8880?ttl=255")
+        self.lcm_spy_java_dir_label = QLineEdit(str(LCM_SPY_JAVA_DIR))
+        self.lcm_spy_java_dir_label.setReadOnly(True)
+        self.lcm_spy_java_dir_label.setObjectName("PathDisplay")
+        self.lcm_spy_java_dir_label.setToolTip(str(LCM_SPY_JAVA_DIR))
+        self.lcm_spy_java_dir_label.setCursorPosition(0)
+        self.lcm_monitor_channels = QPlainTextEdit()
+        self.lcm_monitor_channels.setPlainText("MANIP_.*")
+        self.lcm_monitor_channels.setPlaceholderText("每行一个通道名或正则，例如 MANIP_LEFT_ARM_STATE")
+        self.lcm_monitor_channels.setFixedHeight(76)
+        self.lcm_monitor_decode = QCheckBox("解码已知 wheeled_arm 消息")
+        self.lcm_monitor_decode.setChecked(True)
+        self.lcm_monitor_rate_limit_hz = self._double_spin(0.0, 1000.0, 10.0, 1)
+        self.lcm_monitor_rate_limit_hz.setSpecialValueText("不限速")
+        self.lcm_monitor_max_chars = self._spin(80, 10000, 1200)
+        form.addRow("LCM URL", self.lcm_spy_url)
+        form.addRow("监听通道", self.lcm_monitor_channels)
+        form.addRow("", self.lcm_monitor_decode)
+        form.addRow("每通道 Hz", self.lcm_monitor_rate_limit_hz)
+        form.addRow("消息字符", self.lcm_monitor_max_chars)
+        form.addRow("类型目录", self.lcm_spy_java_dir_label)
+        layout.addWidget(config_box)
+
+        channel_box = QGroupBox("常用通道")
+        channel_layout = QGridLayout(channel_box)
+        channel_layout.setContentsMargins(12, 22, 12, 14)
+        channel_layout.setHorizontalSpacing(8)
+        channel_layout.setVerticalSpacing(8)
+        for index, channel in enumerate(
+            (
+                "MANIP_LEFT_ARM_STATE",
+                "MANIP_RIGHT_ARM_STATE",
+                "MANIP_LEFT_ARM_CMD",
+                "MANIP_RIGHT_ARM_CMD",
+                "MANIP_HEAD_STATE",
+                "MANIP_WAIST_STATE",
+                "MANIP_LEG_STATE",
+                "MANIP_ROBOT_INFO",
+                "MANIP_LEFT_GRIPPER_STATE",
+                "MANIP_RIGHT_GRIPPER_STATE",
+                "MANIP_SUCTION_STATE",
+                "MANIP_LEFT_SUCTION_CMD",
+                "MANIP_RIGHT_SUCTION_CMD",
+            )
+        ):
+            label = QLabel(channel)
+            label.setObjectName("MutedLabel")
+            channel_layout.addWidget(label, index // 2, index % 2)
+        layout.addWidget(channel_box)
+
+        button_row = QHBoxLayout()
+        self.start_lcm_monitor_btn = QPushButton("开始监听")
+        self.start_lcm_monitor_btn.setObjectName("PrimaryButton")
+        self.stop_lcm_monitor_btn = QPushButton("停止监听")
+        self.stop_lcm_monitor_btn.setObjectName("DangerButton")
+        self.stop_lcm_monitor_btn.setEnabled(False)
+        self.start_lcm_spy_btn = QPushButton("打开 LCM Spy 窗口")
+        self.start_lcm_spy_btn.setObjectName("PrimaryButton")
+        self.stop_lcm_spy_btn = QPushButton("关闭 LCM Spy")
+        self.stop_lcm_spy_btn.setObjectName("DangerButton")
+        self.stop_lcm_spy_btn.setEnabled(False)
+        self.copy_lcm_spy_btn = QPushButton("复制命令")
+        self.use_record_lcm_url_btn = QPushButton("使用采集 LCM URL")
+        self.start_lcm_monitor_btn.clicked.connect(self.start_lcm_monitor)
+        self.stop_lcm_monitor_btn.clicked.connect(self.stop_lcm_monitor)
+        self.start_lcm_spy_btn.clicked.connect(self.start_lcm_spy)
+        self.stop_lcm_spy_btn.clicked.connect(self.stop_lcm_spy)
+        self.copy_lcm_spy_btn.clicked.connect(
+            lambda: self.copy_command(self.lcm_spy_command_preview.toPlainText())
+        )
+        self.use_record_lcm_url_btn.clicked.connect(self.fill_lcm_spy_from_record)
+        button_row.addWidget(self.start_lcm_monitor_btn)
+        button_row.addWidget(self.stop_lcm_monitor_btn)
+        button_row.addWidget(self.start_lcm_spy_btn)
+        button_row.addWidget(self.stop_lcm_spy_btn)
+        button_row.addWidget(self.copy_lcm_spy_btn)
+        button_row.addWidget(self.use_record_lcm_url_btn)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+        layout.addStretch(1)
+
+        self._connect_preview_signal(self.lcm_spy_url, self.update_lcm_spy_preview)
+        self._connect_preview_signal(self.lcm_monitor_channels, self.update_lcm_spy_preview)
+        self._connect_preview_signal(self.lcm_monitor_decode, self.update_lcm_spy_preview)
+        self._connect_preview_signal(self.lcm_monitor_rate_limit_hz, self.update_lcm_spy_preview)
+        self._connect_preview_signal(self.lcm_monitor_max_chars, self.update_lcm_spy_preview)
         return self._scrollable(page)
 
     def _make_joint_jog_tab(self) -> QWidget:
@@ -3333,6 +3682,12 @@ class WheeledArmGui(QMainWindow):
         self.common_teleop_mock_cameras.setToolTip("仅完全离线测试时开启；有真实相机时保持关闭。")
         self.common_teleop_mock_xr = QCheckBox("模拟 PICO 输入")
         self.common_teleop_lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
+        self.common_teleop_left_end_effector = self._end_effector_combo(
+            WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR
+        )
+        self.common_teleop_right_end_effector = self._end_effector_combo(
+            WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR
+        )
         self.common_teleop_publish_action_ros2 = QCheckBox("发布 action 到 ROS2")
         self.common_teleop_publish_action_ros2.setToolTip(
             "发布最终下发给机器人的 action，便于观察关节命令是否抖动。"
@@ -3376,6 +3731,8 @@ class WheeledArmGui(QMainWindow):
         form.addRow("", self.common_teleop_mock_cameras)
         form.addRow("", self.common_teleop_mock_xr)
         form.addRow("LCM URL", self.common_teleop_lcm_url)
+        form.addRow("左臂末端", self.common_teleop_left_end_effector)
+        form.addRow("右臂末端", self.common_teleop_right_end_effector)
         form.addRow("", self.common_teleop_publish_action_ros2)
         form.addRow("Action topic", self.common_teleop_action_ros2_topic)
         form.addRow("PICO 位置滤波", self.common_teleop_pico_position_smoothing_alpha)
@@ -3399,12 +3756,20 @@ class WheeledArmGui(QMainWindow):
         self.common_replay_play_sounds = QCheckBox("英文语音提示")
         self.common_replay_play_sounds.setChecked(True)
         self.common_replay_lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
+        self.common_replay_left_end_effector = self._end_effector_combo(
+            WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR
+        )
+        self.common_replay_right_end_effector = self._end_effector_combo(
+            WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR
+        )
         form.addRow("Repo ID", self.common_replay_repo_id)
         form.addRow("root", self.common_replay_root)
         form.addRow("Episode", self.common_replay_episode)
         form.addRow("FPS", self.common_replay_fps)
         form.addRow("", self.common_replay_play_sounds)
         form.addRow("LCM URL", self.common_replay_lcm_url)
+        form.addRow("左臂末端", self.common_replay_left_end_effector)
+        form.addRow("右臂末端", self.common_replay_right_end_effector)
         return box
 
     def _make_calibrate_common_panel(self) -> QWidget:
@@ -3445,6 +3810,12 @@ class WheeledArmGui(QMainWindow):
         self.common_joint_warmup_time = self._spin(0, 36000, 5)
         self.common_joint_fps = self._spin(1, 240, 30)
         self.common_joint_lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
+        self.common_joint_left_end_effector = self._end_effector_combo(
+            WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR
+        )
+        self.common_joint_right_end_effector = self._end_effector_combo(
+            WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR
+        )
         form.addRow("URDF", self.common_joint_urdf_path)
         form.addRow("目标 frame", self.common_joint_target_frame)
         form.addRow("teleop.type", self.common_joint_teleop_type)
@@ -3452,6 +3823,8 @@ class WheeledArmGui(QMainWindow):
         form.addRow("预热秒数", self.common_joint_warmup_time)
         form.addRow("FPS", self.common_joint_fps)
         form.addRow("LCM URL", self.common_joint_lcm_url)
+        form.addRow("左臂末端", self.common_joint_left_end_effector)
+        form.addRow("右臂末端", self.common_joint_right_end_effector)
         return box
 
     def _make_setup_can_common_panel(self) -> QWidget:
@@ -3558,6 +3931,12 @@ class WheeledArmGui(QMainWindow):
         self.common_rollout_policy_path.setPlaceholderText("Hub repo 或 pretrained_model 路径")
         self.common_rollout_robot_type = QLineEdit("wheeled_arm")
         self.common_rollout_teleop_type = self._teleop_type_combo("wheeled_arm_pico")
+        self.common_rollout_left_end_effector = self._end_effector_combo(
+            WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR
+        )
+        self.common_rollout_right_end_effector = self._end_effector_combo(
+            WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR
+        )
         self.common_rollout_dataset_repo_id = QLineEdit()
         self.common_rollout_dataset_repo_id.setPlaceholderText("记录 rollout 数据时填写，例如 user/rollout_data")
         self.common_rollout_task = QLineEdit("PICO rollout wheeled arm")
@@ -3573,6 +3952,8 @@ class WheeledArmGui(QMainWindow):
         form.addRow("policy.path", self.common_rollout_policy_path)
         form.addRow("robot.type", self.common_rollout_robot_type)
         form.addRow("teleop.type", self.common_rollout_teleop_type)
+        form.addRow("左臂末端", self.common_rollout_left_end_effector)
+        form.addRow("右臂末端", self.common_rollout_right_end_effector)
         form.addRow("dataset.repo_id", self.common_rollout_dataset_repo_id)
         form.addRow("task", self.common_rollout_task)
         form.addRow("duration", self.common_rollout_duration)
@@ -3871,6 +4252,8 @@ class WheeledArmGui(QMainWindow):
         self.conversion_command_preview.setReadOnly(True)
         self.common_command_preview = QTextEdit()
         self.common_command_preview.setReadOnly(True)
+        self.lcm_spy_command_preview = QTextEdit()
+        self.lcm_spy_command_preview.setReadOnly(True)
         self.joint_jog_command_preview = QTextEdit()
         self.joint_jog_command_preview.setReadOnly(True)
         for edit in (
@@ -3879,6 +4262,7 @@ class WheeledArmGui(QMainWindow):
             self.edit_command_preview,
             self.conversion_command_preview,
             self.common_command_preview,
+            self.lcm_spy_command_preview,
             self.joint_jog_command_preview,
         ):
             edit.setObjectName("CommandPreview")
@@ -3888,6 +4272,7 @@ class WheeledArmGui(QMainWindow):
         self.preview_tabs.addTab(self.edit_command_preview, "编辑")
         self.preview_tabs.addTab(self.conversion_command_preview, "转换")
         self.preview_tabs.addTab(self.common_command_preview, "常用")
+        self.preview_tabs.addTab(self.lcm_spy_command_preview, "LCM")
         self.preview_tabs.addTab(self.joint_jog_command_preview, "点动")
         self.preview_tabs.setMinimumHeight(240)
         preview_layout.addWidget(self.preview_tabs)
@@ -3943,6 +4328,17 @@ class WheeledArmGui(QMainWindow):
         value = combo.currentText().strip()
         return value or WHEELED_ARM_TELEOP_TYPES[0]
 
+    def _end_effector_combo(self, value: str) -> QComboBox:
+        combo = QComboBox()
+        combo.addItems(WHEELED_ARM_END_EFFECTOR_OPTIONS)
+        combo.setCurrentText(value)
+        return combo
+
+    def _load_end_effector_setting(self, combo: QComboBox, key: str) -> None:
+        value = str(self.settings.value(key, combo.currentText()) or combo.currentText())
+        if value in WHEELED_ARM_END_EFFECTOR_OPTIONS:
+            combo.setCurrentText(value)
+
     def _setup_form_layout(self, form: QFormLayout) -> None:
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
@@ -3988,6 +4384,8 @@ class WheeledArmGui(QMainWindow):
             self.mock_cameras,
             self.mock_xr,
             self.lcm_url,
+            self.left_end_effector,
+            self.right_end_effector,
             self.publish_action_ros2,
             self.action_ros2_topic,
             self.pico_position_smoothing_alpha,
@@ -4116,6 +4514,8 @@ class WheeledArmGui(QMainWindow):
             self.common_teleop_mock_cameras,
             self.common_teleop_mock_xr,
             self.common_teleop_lcm_url,
+            self.common_teleop_left_end_effector,
+            self.common_teleop_right_end_effector,
             self.common_teleop_publish_action_ros2,
             self.common_teleop_action_ros2_topic,
             self.common_teleop_pico_position_smoothing_alpha,
@@ -4130,6 +4530,8 @@ class WheeledArmGui(QMainWindow):
             self.common_replay_fps,
             self.common_replay_play_sounds,
             self.common_replay_lcm_url,
+            self.common_replay_left_end_effector,
+            self.common_replay_right_end_effector,
             self.common_calibrate_target,
             self.common_calibrate_robot_type,
             self.common_calibrate_teleop_type,
@@ -4142,6 +4544,8 @@ class WheeledArmGui(QMainWindow):
             self.common_joint_warmup_time,
             self.common_joint_fps,
             self.common_joint_lcm_url,
+            self.common_joint_left_end_effector,
+            self.common_joint_right_end_effector,
             self.common_can_mode,
             self.common_can_interfaces,
             self.common_can_bitrate,
@@ -4172,6 +4576,8 @@ class WheeledArmGui(QMainWindow):
             self.common_rollout_policy_path,
             self.common_rollout_robot_type,
             self.common_rollout_teleop_type,
+            self.common_rollout_left_end_effector,
+            self.common_rollout_right_end_effector,
             self.common_rollout_dataset_repo_id,
             self.common_rollout_task,
             self.common_rollout_duration,
@@ -4251,6 +4657,16 @@ class WheeledArmGui(QMainWindow):
         self.common_runner.failed.connect(lambda message: self.handle_runner_failure("常用", message))
         self.common_runner.finished.connect(self._on_common_finished)
 
+        self.lcm_monitor.started.connect(lambda command: self._on_started("LCM", command))
+        self.lcm_monitor.output.connect(lambda line: self.handle_runner_output("LCM", line))
+        self.lcm_monitor.failed.connect(lambda message: self.handle_runner_failure("LCM", message))
+        self.lcm_monitor.finished.connect(self._on_lcm_monitor_finished)
+
+        self.lcm_spy_runner.started.connect(lambda command: self._on_started("LCM", command))
+        self.lcm_spy_runner.output.connect(lambda line: self.handle_runner_output("LCM", line))
+        self.lcm_spy_runner.failed.connect(lambda message: self.handle_runner_failure("LCM", message))
+        self.lcm_spy_runner.finished.connect(self._on_lcm_spy_finished)
+
         self.joint_jog_runner.started.connect(lambda command: self._on_started("点动", command))
         self.joint_jog_runner.output.connect(lambda line: self.handle_runner_output("点动", line))
         self.joint_jog_runner.failed.connect(lambda message: self.handle_runner_failure("点动", message))
@@ -4266,6 +4682,8 @@ class WheeledArmGui(QMainWindow):
         )
         self.dataset_root.setText(self.settings.value("record/root", ""))
         self.lcm_url.setText(self.settings.value("record/lcm_url", self.lcm_url.text()))
+        self._load_end_effector_setting(self.left_end_effector, "record/left_end_effector")
+        self._load_end_effector_setting(self.right_end_effector, "record/right_end_effector")
         self.advanced_args.setPlainText(self.settings.value("record/advanced_args", ""))
         self.wait_for_episode_start.setChecked(
             _settings_bool(
@@ -4370,6 +4788,14 @@ class WheeledArmGui(QMainWindow):
         self.conversion_advanced_args.setPlainText(self.settings.value("conversion/advanced_args", ""))
         self.common_replay_repo_id.setText(self.settings.value("common/replay_repo_id", ""))
         self.common_replay_root.setText(self.settings.value("common/replay_root", ""))
+        self._load_end_effector_setting(
+            self.common_replay_left_end_effector,
+            "common/replay_left_end_effector",
+        )
+        self._load_end_effector_setting(
+            self.common_replay_right_end_effector,
+            "common/replay_right_end_effector",
+        )
         self.common_custom_module.setText(
             self.settings.value("common/custom_module", self.common_custom_module.text())
         )
@@ -4398,6 +4824,27 @@ class WheeledArmGui(QMainWindow):
                 self.common_pico_usb_remove.isChecked(),
             )
         )
+        self.lcm_spy_url.setText(self.settings.value("lcm_spy/url", self.lcm_spy_url.text()))
+        self.lcm_monitor_channels.setPlainText(
+            self.settings.value("lcm_spy/channels", self.lcm_monitor_channels.toPlainText())
+        )
+        self.lcm_monitor_decode.setChecked(
+            _settings_bool(
+                self.settings.value("lcm_spy/decode", self.lcm_monitor_decode.isChecked()),
+                self.lcm_monitor_decode.isChecked(),
+            )
+        )
+        self.lcm_monitor_rate_limit_hz.setValue(
+            float(
+                self.settings.value(
+                    "lcm_spy/rate_limit_hz",
+                    self.lcm_monitor_rate_limit_hz.value(),
+                )
+            )
+        )
+        self.lcm_monitor_max_chars.setValue(
+            int(self.settings.value("lcm_spy/max_chars", self.lcm_monitor_max_chars.value()))
+        )
         self.common_teleop_mock_robot.setChecked(
             _settings_bool(
                 self.settings.value(
@@ -4419,6 +4866,14 @@ class WheeledArmGui(QMainWindow):
         )
         self.common_teleop_viser.setChecked(
             _settings_bool(self.settings.value("common/teleop_viser", False), False)
+        )
+        self._load_end_effector_setting(
+            self.common_teleop_left_end_effector,
+            "common/teleop_left_end_effector",
+        )
+        self._load_end_effector_setting(
+            self.common_teleop_right_end_effector,
+            "common/teleop_right_end_effector",
         )
         self.common_teleop_publish_action_ros2.setChecked(
             _settings_bool(
@@ -4513,6 +4968,22 @@ class WheeledArmGui(QMainWindow):
                 self._teleop_type_value(self.common_rollout_teleop_type),
             )
         )
+        self._load_end_effector_setting(
+            self.common_joint_left_end_effector,
+            "common/joint_left_end_effector",
+        )
+        self._load_end_effector_setting(
+            self.common_joint_right_end_effector,
+            "common/joint_right_end_effector",
+        )
+        self._load_end_effector_setting(
+            self.common_rollout_left_end_effector,
+            "common/rollout_left_end_effector",
+        )
+        self._load_end_effector_setting(
+            self.common_rollout_right_end_effector,
+            "common/rollout_right_end_effector",
+        )
         self.joint_jog_lcm_url.setText(
             self.settings.value("joint_jog/lcm_url", self.joint_jog_lcm_url.text())
         )
@@ -4541,6 +5012,8 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("record/teleop_type", self.record_teleop_type.currentText())
         self.settings.setValue("record/root", self.dataset_root.text())
         self.settings.setValue("record/lcm_url", self.lcm_url.text())
+        self.settings.setValue("record/left_end_effector", self.left_end_effector.currentText())
+        self.settings.setValue("record/right_end_effector", self.right_end_effector.currentText())
         self.settings.setValue("record/advanced_args", self.advanced_args.toPlainText())
         self.settings.setValue(
             "record/wait_for_episode_start", self.wait_for_episode_start.isChecked()
@@ -4592,6 +5065,14 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("conversion/advanced_args", self.conversion_advanced_args.toPlainText())
         self.settings.setValue("common/replay_repo_id", self.common_replay_repo_id.text())
         self.settings.setValue("common/replay_root", self.common_replay_root.text())
+        self.settings.setValue(
+            "common/replay_left_end_effector",
+            self.common_replay_left_end_effector.currentText(),
+        )
+        self.settings.setValue(
+            "common/replay_right_end_effector",
+            self.common_replay_right_end_effector.currentText(),
+        )
         self.settings.setValue("common/custom_module", self.common_custom_module.text())
         self.settings.setValue("common/advanced_args", self.common_advanced_args.toPlainText())
         self.settings.setValue("common/pico_usb_port", self.common_pico_usb_port.value())
@@ -4600,10 +5081,23 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("common/pico_usb_log_file", self.common_pico_usb_log_file.text())
         self.settings.setValue("common/pico_usb_no_service", self.common_pico_usb_no_service.isChecked())
         self.settings.setValue("common/pico_usb_remove", self.common_pico_usb_remove.isChecked())
+        self.settings.setValue("lcm_spy/url", self.lcm_spy_url.text())
+        self.settings.setValue("lcm_spy/channels", self.lcm_monitor_channels.toPlainText())
+        self.settings.setValue("lcm_spy/decode", self.lcm_monitor_decode.isChecked())
+        self.settings.setValue("lcm_spy/rate_limit_hz", self.lcm_monitor_rate_limit_hz.value())
+        self.settings.setValue("lcm_spy/max_chars", self.lcm_monitor_max_chars.value())
         self.settings.setValue("common/teleop_mock_robot", self.common_teleop_mock_robot.isChecked())
         self.settings.setValue("common/teleop_mock_cameras", self.common_teleop_mock_cameras.isChecked())
         self.settings.setValue("common/teleop_type", self.common_teleop_type.currentText())
         self.settings.setValue("common/teleop_viser", self.common_teleop_viser.isChecked())
+        self.settings.setValue(
+            "common/teleop_left_end_effector",
+            self.common_teleop_left_end_effector.currentText(),
+        )
+        self.settings.setValue(
+            "common/teleop_right_end_effector",
+            self.common_teleop_right_end_effector.currentText(),
+        )
         self.settings.setValue(
             "common/teleop_publish_action_ros2",
             self.common_teleop_publish_action_ros2.isChecked(),
@@ -4645,12 +5139,54 @@ class WheeledArmGui(QMainWindow):
         )
         self.settings.setValue("common/joint_teleop_type", self.common_joint_teleop_type.currentText())
         self.settings.setValue("common/rollout_teleop_type", self.common_rollout_teleop_type.currentText())
+        self.settings.setValue(
+            "common/joint_left_end_effector",
+            self.common_joint_left_end_effector.currentText(),
+        )
+        self.settings.setValue(
+            "common/joint_right_end_effector",
+            self.common_joint_right_end_effector.currentText(),
+        )
+        self.settings.setValue(
+            "common/rollout_left_end_effector",
+            self.common_rollout_left_end_effector.currentText(),
+        )
+        self.settings.setValue(
+            "common/rollout_right_end_effector",
+            self.common_rollout_right_end_effector.currentText(),
+        )
         self.settings.setValue("joint_jog/lcm_url", self.joint_jog_lcm_url.text())
         self.settings.setValue("joint_jog/urdf_path", self.joint_jog_urdf_path.text())
         self.settings.setValue("joint_jog/visualization_host", self.joint_jog_visualization_host.text())
         self.settings.setValue("joint_jog/visualization_port", self.joint_jog_visualization_port.value())
         self.settings.setValue("joint_jog/visualize", self.joint_jog_visualize.isChecked())
         self.settings.setValue("joint_jog/open_browser", self.joint_jog_open_browser.isChecked())
+
+    def _append_end_effector_args(
+        self,
+        command: list[str],
+        left_combo: QComboBox,
+        right_combo: QComboBox,
+        *,
+        include_robot: bool,
+        include_teleop: bool,
+    ) -> None:
+        left = left_combo.currentText()
+        right = right_combo.currentText()
+        if include_robot:
+            command.extend(
+                [
+                    f"--robot.left_end_effector={left}",
+                    f"--robot.right_end_effector={right}",
+                ]
+            )
+        if include_teleop:
+            command.extend(
+                [
+                    f"--teleop.left_end_effector={left}",
+                    f"--teleop.right_end_effector={right}",
+                ]
+            )
 
     def build_record_command(self) -> list[str]:
         command = _module_command("lerobot.scripts.lerobot_record")
@@ -4710,6 +5246,13 @@ class WheeledArmGui(QMainWindow):
             command.append(f"--display_port={_find_free_tcp_port()}")
         if self.lcm_url.text().strip():
             command.append(f"--robot.lcm_url={self.lcm_url.text().strip()}")
+        self._append_end_effector_args(
+            command,
+            self.left_end_effector,
+            self.right_end_effector,
+            include_robot=True,
+            include_teleop=True,
+        )
         if self.camera_override.isChecked():
             camera_config = (
                 "{front: {type: ros2, "
@@ -5053,6 +5596,13 @@ class WheeledArmGui(QMainWindow):
                 command.append(f"--display_port={_find_free_tcp_port()}")
             if self.common_teleop_lcm_url.text().strip():
                 command.append(f"--robot.lcm_url={self.common_teleop_lcm_url.text().strip()}")
+            self._append_end_effector_args(
+                command,
+                self.common_teleop_left_end_effector,
+                self.common_teleop_right_end_effector,
+                include_robot=True,
+                include_teleop=True,
+            )
         elif command_type == "replay":
             command.extend(
                 [
@@ -5067,6 +5617,13 @@ class WheeledArmGui(QMainWindow):
                 command.append(f"--dataset.root={self.common_replay_root.text()}")
             if self.common_replay_lcm_url.text().strip():
                 command.append(f"--robot.lcm_url={self.common_replay_lcm_url.text().strip()}")
+            self._append_end_effector_args(
+                command,
+                self.common_replay_left_end_effector,
+                self.common_replay_right_end_effector,
+                include_robot=True,
+                include_teleop=False,
+            )
         elif command_type == "calibrate":
             if self.common_calibrate_target.currentText() == "robot":
                 command.append(f"--robot.type={self.common_calibrate_robot_type.text().strip()}")
@@ -5095,6 +5652,13 @@ class WheeledArmGui(QMainWindow):
             )
             if self.common_joint_lcm_url.text().strip():
                 command.append(f"--robot.lcm_url={self.common_joint_lcm_url.text().strip()}")
+            self._append_end_effector_args(
+                command,
+                self.common_joint_left_end_effector,
+                self.common_joint_right_end_effector,
+                include_robot=True,
+                include_teleop=True,
+            )
         elif command_type == "pico_usb_service":
             command.extend(["--port", str(self.common_pico_usb_port.value())])
             if self.common_pico_usb_serial.text().strip():
@@ -5164,7 +5728,16 @@ class WheeledArmGui(QMainWindow):
                     f"--display_mode={self.common_rollout_display_mode.currentText()}",
                 ]
             )
-            command.append(f"--teleop.type={self._teleop_type_value(self.common_rollout_teleop_type)}")
+            robot_type = self.common_rollout_robot_type.text().strip()
+            teleop_type = self._teleop_type_value(self.common_rollout_teleop_type)
+            command.append(f"--teleop.type={teleop_type}")
+            self._append_end_effector_args(
+                command,
+                self.common_rollout_left_end_effector,
+                self.common_rollout_right_end_effector,
+                include_robot=robot_type in {"wheeled_arm", "wheeled_arm_with_hip_yaw"},
+                include_teleop=teleop_type == "wheeled_arm_pico",
+            )
             if self.common_rollout_dataset_repo_id.text().strip():
                 command.extend(
                     [
@@ -5255,6 +5828,32 @@ class WheeledArmGui(QMainWindow):
             command.extend(shlex.split(extra))
         return command
 
+    def lcm_monitor_channel_patterns(self) -> list[str]:
+        patterns: list[str] = []
+        for line in self.lcm_monitor_channels.toPlainText().replace(",", "\n").splitlines():
+            pattern = line.strip()
+            if pattern and not pattern.startswith("#"):
+                patterns.append(pattern)
+        return patterns
+
+    def build_lcm_monitor_command(self) -> list[str]:
+        command = [
+            "LCM monitor",
+            "--lcm-url",
+            self.lcm_spy_url.text().strip(),
+            "--channels",
+            ",".join(self.lcm_monitor_channel_patterns()),
+            "--rate-limit-hz",
+            str(self.lcm_monitor_rate_limit_hz.value()),
+            "--max-chars",
+            str(self.lcm_monitor_max_chars.value()),
+        ]
+        command.append("--decode" if self.lcm_monitor_decode.isChecked() else "--raw")
+        return command
+
+    def build_lcm_spy_command(self) -> list[str]:
+        return ["/bin/bash", str(LCM_SPY_SCRIPT), "--lcm-url", self.lcm_spy_url.text().strip()]
+
     def build_joint_jog_command(self) -> list[str]:
         command = _module_command("lerobot.scripts.wheeled_arm_joint_jog")
         command.extend(["--lcm-url", self.joint_jog_lcm_url.text().strip()])
@@ -5299,6 +5898,8 @@ class WheeledArmGui(QMainWindow):
             return
         script_path = self._conversion_script_path()
         self.conversion_script_label.setText(str(script_path))
+        self.conversion_script_label.setToolTip(str(script_path))
+        self.conversion_script_label.setCursorPosition(0)
         try:
             text = _format_command(self.build_conversion_command())
         except ValueError as exc:
@@ -5318,6 +5919,16 @@ class WheeledArmGui(QMainWindow):
         except (ValueError, json.JSONDecodeError) as exc:
             text = f"常用命令参数解析失败：{exc}"
         self._set_command_preview(self.common_command_preview, text)
+
+    @Slot()
+    def update_lcm_spy_preview(self, *_args) -> None:
+        text = "\n".join(
+            (
+                _format_command(self.build_lcm_monitor_command()),
+                _format_command(self.build_lcm_spy_command()),
+            )
+        )
+        self._set_command_preview(self.lcm_spy_command_preview, text)
 
     @Slot()
     def update_joint_jog_preview(self, *_args) -> None:
@@ -5609,6 +6220,57 @@ class WheeledArmGui(QMainWindow):
             return False
         return True
 
+    def validate_lcm_monitor_form(self) -> bool:
+        if not self.lcm_spy_url.text().strip():
+            QMessageBox.warning(self, "缺少 LCM URL", "请填写要监听的 LCM URL。")
+            return False
+        if not self.lcm_monitor_channel_patterns():
+            QMessageBox.warning(self, "缺少监听通道", "请至少填写一个 LCM 通道名或正则。")
+            return False
+        try:
+            import lcm  # noqa: F401
+        except ImportError:
+            QMessageBox.warning(
+                self,
+                "缺少 lcm",
+                "当前 Python 环境缺少 lcm 模块，无法在 GUI 内监听消息。"
+                "请先安装 lcm Python 绑定。",
+            )
+            return False
+        return True
+
+    def validate_lcm_spy_form(self) -> bool:
+        if not self.lcm_spy_url.text().strip():
+            QMessageBox.warning(self, "缺少 LCM URL", "请填写要监听的 LCM URL。")
+            return False
+        if not LCM_SPY_SCRIPT.exists():
+            QMessageBox.warning(self, "脚本不存在", f"未找到 LCM Spy 启动脚本：\n{LCM_SPY_SCRIPT}")
+            return False
+        if _find_env_executable("lcm-spy") is None:
+            QMessageBox.warning(
+                self,
+                "缺少 lcm-spy",
+                "当前环境没有找到 lcm-spy 命令。"
+                "请确认已安装 LCM 工具，并在启动 GUI 的环境中可执行 lcm-spy。",
+            )
+            return False
+
+        missing_jars = [
+            jar
+            for jar in (LCM_SPY_JAVA_DIR / "my_types.jar", LCM_SPY_JAVA_DIR / "lcm.jar")
+            if not jar.exists()
+        ]
+        if missing_jars:
+            QMessageBox.warning(
+                self,
+                "缺少 LCM Java 类型",
+                "LCM Spy 需要先生成 Java 类型 jar。\n\n"
+                f"请先执行：\n{LCM_TYPES_DIR / 'make_types.sh'}\n\n"
+                "缺少文件：\n" + "\n".join(str(path) for path in missing_jars),
+            )
+            return False
+        return True
+
     def validate_joint_jog_form(self) -> bool:
         if not self.joint_jog_lcm_url.text().strip():
             QMessageBox.warning(self, "缺少 LCM URL", "请填写机器人 LCM URL。")
@@ -5751,6 +6413,63 @@ class WheeledArmGui(QMainWindow):
         QTimer.singleShot(3000, self._offer_common_kill_if_running)
 
     @Slot()
+    def start_lcm_monitor(self) -> None:
+        if not self.validate_lcm_monitor_form():
+            return
+        self._save_settings()
+        if self.lcm_monitor.start(
+            self.lcm_spy_url.text().strip(),
+            self.lcm_monitor_channel_patterns(),
+            self.lcm_monitor_rate_limit_hz.value(),
+            self.lcm_monitor_max_chars.value(),
+            self.lcm_monitor_decode.isChecked(),
+        ):
+            self.start_lcm_monitor_btn.setEnabled(False)
+            self.stop_lcm_monitor_btn.setEnabled(True)
+            self.status_label.setText("LCM 监听中")
+            self.preview_tabs.setCurrentWidget(self.lcm_spy_command_preview)
+
+    @Slot()
+    def stop_lcm_monitor(self) -> None:
+        self._stop_requested_sources.add("LCM")
+        self.lcm_monitor.interrupt()
+
+    @Slot()
+    def stop_lcm_tools(self) -> None:
+        self._stop_requested_sources.add("LCM")
+        self.lcm_monitor.interrupt()
+        self.lcm_spy_runner.interrupt()
+        QTimer.singleShot(3000, self._offer_lcm_spy_kill_if_running)
+
+    @Slot()
+    def start_lcm_spy(self) -> None:
+        if not self.validate_lcm_spy_form():
+            return
+        self._save_settings()
+        if self.lcm_spy_runner.start(
+            self.build_lcm_spy_command(),
+            cwd=LCM_TYPES_DIR,
+            env_overrides={"PATH": _env_path_with_current_python_bin()},
+        ):
+            self.start_lcm_spy_btn.setEnabled(False)
+            self.stop_lcm_spy_btn.setEnabled(True)
+            self.status_label.setText("LCM 监视运行中")
+            self.preview_tabs.setCurrentWidget(self.lcm_spy_command_preview)
+
+    @Slot()
+    def stop_lcm_spy(self) -> None:
+        self._stop_requested_sources.add("LCM")
+        self.lcm_spy_runner.interrupt()
+        QTimer.singleShot(3000, self._offer_lcm_spy_kill_if_running)
+
+    @Slot()
+    def fill_lcm_spy_from_record(self) -> None:
+        if self.lcm_url.text().strip():
+            self.lcm_spy_url.setText(self.lcm_url.text().strip())
+        self.tabs.setCurrentWidget(self.lcm_spy_tab)
+        self.update_lcm_spy_preview()
+
+    @Slot()
     def start_joint_jog(self) -> None:
         if not self.validate_joint_jog_form():
             return
@@ -5820,6 +6539,11 @@ class WheeledArmGui(QMainWindow):
         if not self.common_runner.is_running:
             return
         self.common_runner.kill()
+
+    def _offer_lcm_spy_kill_if_running(self) -> None:
+        if not self.lcm_spy_runner.is_running:
+            return
+        self.lcm_spy_runner.kill()
 
     def _offer_joint_jog_kill_if_running(self) -> None:
         if not self.joint_jog_runner.is_running:
@@ -5945,6 +6669,28 @@ class WheeledArmGui(QMainWindow):
         self._refresh_visual_state()
 
     @Slot(int)
+    def _on_lcm_monitor_finished(self, code: int) -> None:
+        self.start_lcm_monitor_btn.setEnabled(True)
+        self.stop_lcm_monitor_btn.setEnabled(False)
+        self.status_label.setText(self._current_status_text())
+        self.statusBar().showMessage(f"LCM 监听{_readable_exit(code)}")
+        self.append_log("LCM", f"监听{_readable_exit(code)}")
+        self._maybe_show_failure_dialog("LCM", code)
+        self._stop_requested_sources.discard("LCM")
+        self._refresh_visual_state()
+
+    @Slot(int)
+    def _on_lcm_spy_finished(self, code: int) -> None:
+        self.start_lcm_spy_btn.setEnabled(True)
+        self.stop_lcm_spy_btn.setEnabled(False)
+        self.status_label.setText(self._current_status_text())
+        self.statusBar().showMessage(f"LCM 监视{_readable_exit(code)}")
+        self.append_log("LCM", f"进程{_readable_exit(code)}")
+        self._maybe_show_failure_dialog("LCM", code)
+        self._stop_requested_sources.discard("LCM")
+        self._refresh_visual_state()
+
+    @Slot(int)
     def _on_joint_jog_finished(self, code: int) -> None:
         self.start_joint_jog_btn.setEnabled(True)
         self.stop_joint_jog_btn.setEnabled(False)
@@ -5966,6 +6712,10 @@ class WheeledArmGui(QMainWindow):
             return "转换中"
         if self.common_runner.is_running:
             return "常用命令运行中"
+        if self.lcm_monitor.is_running:
+            return "LCM 监听中"
+        if self.lcm_spy_runner.is_running:
+            return "LCM 监视运行中"
         if self.joint_jog_runner.is_running:
             return "关节点动控制台运行中"
         return "未运行"
@@ -5977,6 +6727,8 @@ class WheeledArmGui(QMainWindow):
             or self.edit_runner.is_running
             or self.conversion_runner.is_running
             or self.common_runner.is_running
+            or self.lcm_monitor.is_running
+            or self.lcm_spy_runner.is_running
             or self.joint_jog_runner.is_running
         )
 
@@ -6391,6 +7143,11 @@ QLineEdit:hover, QPlainTextEdit:hover, QTextEdit:hover, QSpinBox:hover, QDoubleS
 }
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
     border: 1px solid #2f6fed;
+}
+QLineEdit#PathDisplay {
+    background: #f7fafc;
+    color: #516075;
+    font-family: "JetBrains Mono", "Consolas", "Courier New", monospace;
 }
 QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
     background: #edf2f7;
