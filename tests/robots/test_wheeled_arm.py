@@ -115,10 +115,9 @@ def _make_robot(**overrides):
 
 def test_wheeled_arm_config_is_registered():
     assert "wheeled_arm" in RobotConfig.get_known_choices()
-    assert isinstance(make_robot_from_config(
-        WheeledArmConfig(cameras={}, connect_timeout_s=0)), WheeledArm)
-
-
+    assert isinstance(
+        make_robot_from_config(WheeledArmConfig(cameras={}, connect_timeout_s=0)), WheeledArm
+    )
 
 
 def test_wheeled_arm_suction_operation_mode_maps_suction_and_release_modes():
@@ -138,6 +137,15 @@ def test_wheeled_arm_suction_operation_mode_maps_suction_and_release_modes():
         )
         == 3
     )
+
+
+def test_wheeled_arm_config_defaults_to_left_suction_and_right_gripper():
+    cfg = WheeledArmConfig(cameras={}, connect_timeout_s=0)
+
+    assert cfg.left_end_effector == "suction"
+    assert cfg.right_end_effector == "gripper"
+    assert cfg.controlled_parts == ["left_arm", "right_arm", "left_suction", "right_gripper"]
+    assert cfg.joint_names[-2:] == ["left_suction", "right_gripper"]
 
 
 def test_lcm_handler_publishes_suction_only_on_trigger_edges():
@@ -178,6 +186,54 @@ def test_lcm_handler_publishes_suction_only_on_trigger_edges():
     assert release_msg.vacuum_pct == 0.0
 
 
+def test_lcm_handler_publishes_mixed_left_suction_and_right_gripper_commands():
+    from lerobot.robots.wheeled_arm.hardware_interface import lcm_handler
+
+    class FakeManipLCM:
+        def __init__(self):
+            self.published = []
+
+        def publish(self, channel, data):
+            self.published.append((channel, data))
+
+    handler = object.__new__(lcm_handler.LCMHandler)
+    handler.left_end_effector = "suction"
+    handler.right_end_effector = "gripper"
+    handler.suction_on_threshold = 0.5
+    handler.suction_operation_mode = 2
+    handler.suction_release_operation_mode = 3
+    handler.suction_max_vacuum_pct = 70.0
+    handler.suction_detect_vacuum_pct = 60.0
+    handler.suction_grip_timeout_100ms = 20.0
+    handler._last_suction_active = {"left": False, "right": False}
+    handler.manip_lcm = FakeManipLCM()
+    handler.left_arm_moving = False
+    handler.right_arm_moving = False
+    handler.head_moving = False
+    handler.waist_moving = False
+    handler.leg_moving = False
+    handler.left_suction_moving = True
+    handler.right_suction_moving = False
+    handler.left_gripper_moving = False
+    handler.right_gripper_moving = True
+
+    package = np.zeros(23, dtype=np.float32)
+    package[14] = 1.0
+    package[15] = 42.0
+
+    handler.publish_manipulation_commands(package)
+
+    assert [channel for channel, _data in handler.manip_lcm.published] == [
+        "MANIP_LEFT_SUCTION_CMD",
+        "MANIP_RIGHT_GRIPPER_CMD",
+    ]
+    suction_msg = lcm_handler.suction_command_t.decode(handler.manip_lcm.published[0][1])
+    gripper_msg = lcm_handler.gripper_command_t.decode(handler.manip_lcm.published[1][1])
+    assert suction_msg.operation_mode == 2
+    assert suction_msg.vacuum_pct == 70.0
+    assert gripper_msg.cmd.pos[0] == 42.0
+
+
 def test_default_camera_config_uses_ros2_camera():
     cameras = wheeled_arm_cameras_config()
 
@@ -213,6 +269,23 @@ def test_suction_end_effector_switches_joint_names_and_parts():
     assert "left_suction.pos" in robot.action_features
     assert "right_suction.pos" in robot.observation_features
     assert "left_gripper.pos" not in robot.action_features
+
+
+def test_mixed_end_effectors_switch_joint_names_parts_and_flags():
+    cfg = WheeledArmConfig(
+        cameras={},
+        left_end_effector="suction",
+        right_end_effector="gripper",
+        connect_timeout_s=0,
+    )
+    robot = WheeledArm(cfg)
+
+    assert cfg.joint_names[-2:] == ["left_suction", "right_gripper"]
+    assert cfg.controlled_parts[-2:] == ["left_suction", "right_gripper"]
+    assert "left_suction.pos" in robot.action_features
+    assert "right_gripper.pos" in robot.action_features
+    assert "left_gripper.pos" not in robot.action_features
+    assert "right_suction.pos" not in robot.action_features
 
 
 def test_has_valid_feedback_reflects_lcm_arm_state_availability():
@@ -471,6 +544,20 @@ def test_send_action_publishes_suction_end_effector_flags():
     assert handler.right_gripper_moving is False
 
 
+def test_send_action_publishes_mixed_end_effector_flags():
+    robot, handler = _make_robot(left_end_effector="suction", right_end_effector="gripper")
+
+    returned = robot.send_action({"left_suction.pos": 1.0, "right_gripper.pos": 42.0})
+
+    assert returned == {"left_suction.pos": 1.0, "right_gripper.pos": 42.0}
+    assert handler.last_package[14] == 1.0
+    assert handler.last_package[15] == 42.0
+    assert handler.left_suction_moving is True
+    assert handler.right_gripper_moving is True
+    assert handler.left_gripper_moving is False
+    assert handler.right_suction_moving is False
+
+
 def test_send_action_respects_pico_active_arm_metadata():
     robot, handler = _make_robot()
 
@@ -502,13 +589,33 @@ def test_send_action_respects_disabled_parts_and_relative_limit():
     returned = robot.send_action(
         {"left_arm_0.pos": 100.0, "right_arm_0.pos": 100.0, "left_gripper.pos": 100.0})
 
-    assert returned == {"left_arm_0.pos": 2.0, "right_arm_0.pos": 9.0, "left_gripper.pos": 16.0}
+    assert returned == {"left_arm_0.pos": 2.0, "right_arm_0.pos": 9.0, "left_gripper.pos": 100.0}
     assert handler.last_package[0] == 2.0
     assert handler.last_package[7] == 9.0
-    assert handler.last_package[14] == 16.0
+    assert handler.last_package[14] == 100.0
     assert handler.left_arm_moving is True
     assert handler.right_arm_moving is False
     assert handler.left_gripper_moving is True
+
+
+def test_relative_limit_does_not_clip_mixed_end_effector_commands():
+    robot, handler = _make_robot(
+        left_end_effector="suction",
+        right_end_effector="gripper",
+        max_relative_target=2.0,
+    )
+
+    returned = robot.send_action(
+        {"right_arm_0.pos": 100.0, "left_suction.pos": 1.0, "right_gripper.pos": 130.0}
+    )
+
+    assert returned == {"right_arm_0.pos": 9.0, "left_suction.pos": 1.0, "right_gripper.pos": 130.0}
+    assert handler.last_package[7] == 9.0
+    assert handler.last_package[14] == 1.0
+    assert handler.last_package[15] == 130.0
+    assert handler.right_arm_moving is True
+    assert handler.left_suction_moving is True
+    assert handler.right_gripper_moving is True
 
 
 def test_reset_to_rest_pose_uses_movej_with_arm_targets_in_radians():

@@ -38,6 +38,14 @@ def test_wheeled_arm_pico_config_is_registered():
     assert isinstance(make_teleoperator_from_config(WheeledArmPicoConfig()), WheeledArmPico)
 
 
+def test_wheeled_arm_pico_config_defaults_to_left_suction_and_right_gripper():
+    cfg = WheeledArmPicoConfig()
+
+    assert cfg.end_effector is None
+    assert cfg.left_end_effector == "suction"
+    assert cfg.right_end_effector == "gripper"
+
+
 def test_wheeled_arm_pico_config_exposes_ik_parameters():
     cfg = WheeledArmPicoConfig(
         position_cost=[5.0, 4.0, 3.0],
@@ -104,6 +112,8 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
     assert cfg.rerun_robot_prefix == "ik_robot"
     assert cfg.rerun_robot_axis_length == 0.2
     assert cfg.end_effector == "suction"
+    assert cfg.left_end_effector == "suction"
+    assert cfg.right_end_effector == "suction"
     assert cfg.suction_off_pos == 0.1
     assert cfg.suction_on_pos == 0.9
     assert cfg.suction_trigger_threshold == 0.4
@@ -127,25 +137,39 @@ def test_action_features_can_switch_to_suction_end_effector():
     assert "left_gripper.pos" not in teleop.action_features
 
 
+def test_action_features_can_mix_suction_and_gripper_end_effectors():
+    teleop = WheeledArmPico(
+        WheeledArmPicoConfig(left_end_effector="suction", right_end_effector="gripper")
+    )
 
-def test_suction_trigger_is_binarized_without_gripper_smoothing():
+    assert list(teleop.action_features)[-2:] == ["left_suction.pos", "right_gripper.pos"]
+    assert teleop.gripper_names == ["left_suction", "right_gripper"]
+    assert "left_gripper.pos" not in teleop.action_features
+    assert "right_suction.pos" not in teleop.action_features
+
+
+
+def test_mixed_end_effectors_map_triggers_to_suction_and_gripper_ranges():
     teleop = WheeledArmPico(
         WheeledArmPicoConfig(
-            end_effector="suction",
+            left_end_effector="suction",
+            right_end_effector="gripper",
             suction_off_pos=0.0,
             suction_on_pos=1.0,
             suction_trigger_threshold=0.5,
-            gripper_position_smoothing_alpha=0.1,
+            gripper_open_pos=130.0,
+            gripper_closed_pos=0.0,
+            gripper_position_smoothing_alpha=1.0,
         )
     )
 
     teleop._update_gripper_positions(0.4, 0.6)
     assert teleop._gripper_positions["left_suction.pos"] == 0.0
-    assert teleop._gripper_positions["right_suction.pos"] == 1.0
+    assert teleop._gripper_positions["right_gripper.pos"] == 52.0
 
-    teleop._update_gripper_positions(1.0, 0.0)
+    teleop._update_gripper_positions(1.0, 1.0)
     assert teleop._gripper_positions["left_suction.pos"] == 1.0
-    assert teleop._gripper_positions["right_suction.pos"] == 0.0
+    assert teleop._gripper_positions["right_gripper.pos"] == 0.0
 
 
 def test_relative_teleop_target_uses_reference_end_effector_baseline():

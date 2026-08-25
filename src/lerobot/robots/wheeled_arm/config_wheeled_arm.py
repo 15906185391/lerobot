@@ -24,6 +24,8 @@ from ..config import RobotConfig
 
 WheeledArmEndEffector = Literal["gripper", "suction"]
 WHEELED_ARM_END_EFFECTOR_TYPES: tuple[WheeledArmEndEffector, ...] = ("gripper", "suction")
+WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR: WheeledArmEndEffector = "suction"
+WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR: WheeledArmEndEffector = "gripper"
 
 WHEELED_ARM_ARM_JOINT_NAMES = [
     *(f"left_arm_{idx}" for idx in range(7)),
@@ -55,23 +57,67 @@ WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY = "__wheeled_arm_active_arms"
 WHEELED_ARM_DEFAULT_ROS2_CAMERA_TOPIC = "/camera/color/image_raw"
 
 
-def wheeled_arm_end_effector_names(end_effector: WheeledArmEndEffector) -> list[str]:
-    if end_effector == "gripper":
-        return WHEELED_ARM_GRIPPER_NAMES.copy()
-    if end_effector == "suction":
-        return WHEELED_ARM_SUCTION_NAMES.copy()
-    raise ValueError(
-        f"Unknown wheeled_arm end effector {end_effector!r}. "
-        f"Known end effectors are {list(WHEELED_ARM_END_EFFECTOR_TYPES)}."
+def _validate_end_effector(end_effector: WheeledArmEndEffector) -> None:
+    if end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES:
+        raise ValueError(
+            f"Unknown wheeled_arm end effector {end_effector!r}. "
+            f"Known end effectors are {list(WHEELED_ARM_END_EFFECTOR_TYPES)}."
+        )
+
+
+def wheeled_arm_resolve_end_effectors(
+    end_effector: WheeledArmEndEffector | None = None,
+    left_end_effector: WheeledArmEndEffector | None = None,
+    right_end_effector: WheeledArmEndEffector | None = None,
+) -> tuple[WheeledArmEndEffector, WheeledArmEndEffector]:
+    if end_effector is not None:
+        _validate_end_effector(end_effector)
+    if left_end_effector is not None:
+        _validate_end_effector(left_end_effector)
+    if right_end_effector is not None:
+        _validate_end_effector(right_end_effector)
+
+    if left_end_effector is None and right_end_effector is None:
+        if end_effector is None:
+            return WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR, WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR
+        return end_effector, end_effector
+
+    left = (
+        left_end_effector
+        if left_end_effector is not None
+        else (end_effector if end_effector is not None else WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR)
     )
+    right = (
+        right_end_effector
+        if right_end_effector is not None
+        else (end_effector if end_effector is not None else WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR)
+    )
+    return left, right
 
 
-def wheeled_arm_joint_names(end_effector: WheeledArmEndEffector) -> list[str]:
-    return [*WHEELED_ARM_ARM_JOINT_NAMES, *wheeled_arm_end_effector_names(end_effector)]
+def wheeled_arm_end_effector_names(
+    left_end_effector: WheeledArmEndEffector,
+    right_end_effector: WheeledArmEndEffector | None = None,
+) -> list[str]:
+    if right_end_effector is None:
+        right_end_effector = left_end_effector
+    _validate_end_effector(left_end_effector)
+    _validate_end_effector(right_end_effector)
+    return [f"left_{left_end_effector}", f"right_{right_end_effector}"]
 
 
-def wheeled_arm_parts(end_effector: WheeledArmEndEffector) -> tuple[str, ...]:
-    return ("left_arm", "right_arm", *wheeled_arm_end_effector_names(end_effector))
+def wheeled_arm_joint_names(
+    left_end_effector: WheeledArmEndEffector,
+    right_end_effector: WheeledArmEndEffector | None = None,
+) -> list[str]:
+    return [*WHEELED_ARM_ARM_JOINT_NAMES, *wheeled_arm_end_effector_names(left_end_effector, right_end_effector)]
+
+
+def wheeled_arm_parts(
+    left_end_effector: WheeledArmEndEffector,
+    right_end_effector: WheeledArmEndEffector | None = None,
+) -> tuple[str, ...]:
+    return ("left_arm", "right_arm", *wheeled_arm_end_effector_names(left_end_effector, right_end_effector))
 
 
 def wheeled_arm_suction_operation_mode(
@@ -102,9 +148,11 @@ def wheeled_arm_cameras_config() -> dict[str, CameraConfig]:
 class WheeledArmConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(default_factory=wheeled_arm_cameras_config)
 
-    # Physical end effector mounted on the left/right wrists. This controls the
-    # final two data features and the Manipulation LCM command topics.
-    end_effector: WheeledArmEndEffector = "suction"
+    # Legacy homogeneous end effector selector. When left/right side-specific
+    # values are not provided, this value is used for both wrists.
+    end_effector: WheeledArmEndEffector | None = None
+    left_end_effector: WheeledArmEndEffector | None = None
+    right_end_effector: WheeledArmEndEffector | None = None
 
     joint_names: list[str] = field(default_factory=lambda: WHEELED_ARM_JOINT_NAMES.copy())
 
@@ -173,16 +221,16 @@ class WheeledArmConfig(RobotConfig):
     def __post_init__(self) -> None:
         super().__post_init__()
 
-        if self.end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES:
-            raise ValueError(
-                f"`end_effector` must be one of {list(WHEELED_ARM_END_EFFECTOR_TYPES)}, "
-                f"got {self.end_effector!r}."
-            )
+        self.left_end_effector, self.right_end_effector = wheeled_arm_resolve_end_effectors(
+            self.end_effector,
+            self.left_end_effector,
+            self.right_end_effector,
+        )
 
         if self.joint_names == WHEELED_ARM_JOINT_NAMES:
-            self.joint_names = wheeled_arm_joint_names(self.end_effector)
+            self.joint_names = wheeled_arm_joint_names(self.left_end_effector, self.right_end_effector)
         if self.controlled_parts == list(WHEELED_ARM_PARTS):
-            self.controlled_parts = list(wheeled_arm_parts(self.end_effector))
+            self.controlled_parts = list(wheeled_arm_parts(self.left_end_effector, self.right_end_effector))
 
         if len(self.joint_names) != 16:
             raise ValueError(
@@ -193,12 +241,12 @@ class WheeledArmConfig(RobotConfig):
         if duplicate_names:
             raise ValueError(f"`joint_names` must be unique, got duplicates: {sorted(duplicate_names)}.")
 
-        known_parts = set(wheeled_arm_parts(self.end_effector))
+        known_parts = set(wheeled_arm_parts(self.left_end_effector, self.right_end_effector))
         unknown_parts = set(self.controlled_parts) - known_parts
         if unknown_parts:
             raise ValueError(
                 f"`controlled_parts` contains unknown parts {sorted(unknown_parts)}. "
-                f"Known parts are {list(wheeled_arm_parts(self.end_effector))}."
+                f"Known parts are {list(wheeled_arm_parts(self.left_end_effector, self.right_end_effector))}."
             )
 
         if self.feedback_wait_timeout_s < 0:

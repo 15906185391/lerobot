@@ -903,6 +903,8 @@ class JointJogWindow(QMainWindow):
         self.reset_head_btn = QPushButton("头部默认目标")
         self.select_left_btn = QPushButton("勾选左臂")
         self.select_right_btn = QPushButton("勾选右臂")
+        self.select_left_gripper_btn = QPushButton("勾选左夹爪")
+        self.select_right_gripper_btn = QPushButton("勾选右夹爪")
         self.select_head_btn = QPushButton("勾选头部")
         self.clear_selection_btn = QPushButton("取消勾选")
         preset_buttons = (
@@ -912,6 +914,8 @@ class JointJogWindow(QMainWindow):
             self.reset_head_btn,
             self.select_left_btn,
             self.select_right_btn,
+            self.select_left_gripper_btn,
+            self.select_right_gripper_btn,
             self.select_head_btn,
             self.clear_selection_btn,
         )
@@ -934,7 +938,7 @@ class JointJogWindow(QMainWindow):
         joints_layout.setVerticalSpacing(10)
         header = QLabel(
             "勾选关节后可批量点动到目标；单行 +/- 会按当前反馈做小步点动。"
-            "手臂和头部角度单位为 degree。"
+            "手臂和头部角度单位为 degree，夹爪目标为归一化位置 [0, 1]。"
         )
         header.setObjectName("Hint")
         header.setWordWrap(True)
@@ -1016,6 +1020,8 @@ class JointJogWindow(QMainWindow):
         self.reset_head_btn.clicked.connect(lambda: self.set_reset_targets("head"))
         self.select_left_btn.clicked.connect(lambda: self.select_arm("left"))
         self.select_right_btn.clicked.connect(lambda: self.select_arm("right"))
+        self.select_left_gripper_btn.clicked.connect(lambda: self.select_gripper("left"))
+        self.select_right_gripper_btn.clicked.connect(lambda: self.select_gripper("right"))
         self.select_head_btn.clicked.connect(lambda: self.select_arm("head"))
         self.clear_selection_btn.clicked.connect(lambda: self.select_arm("none"))
         self.urdf_path.changed.connect(self._rebuild_joint_rows)
@@ -1088,6 +1094,8 @@ class JointJogWindow(QMainWindow):
             self.reset_head_btn,
             self.select_left_btn,
             self.select_right_btn,
+            self.select_left_gripper_btn,
+            self.select_right_gripper_btn,
             self.select_head_btn,
             self.clear_selection_btn,
         ):
@@ -1154,6 +1162,18 @@ class JointJogWindow(QMainWindow):
         if side == "none":
             for row in self.joint_rows:
                 row.enable.setChecked(False)
+
+    def select_gripper(self, side: str) -> None:
+        gripper_index_by_side = {"left": 14, "right": 15}
+        if side not in gripper_index_by_side and side != "both":
+            raise ValueError(f"Unknown gripper side: {side}")
+        for row in self.joint_rows:
+            checked = (
+                (side == "left" and row.index == gripper_index_by_side["left"])
+                or (side == "right" and row.index == gripper_index_by_side["right"])
+                or (side == "both" and row.index in gripper_index_by_side.values())
+            )
+            row.enable.setChecked(checked)
 
     def append_log(self, text: str) -> None:
         timestamp = time.strftime("%H:%M:%S")

@@ -68,9 +68,17 @@ class WheeledArmPico(Teleoperator):
         super().__init__(config)
         self.config = config
         self.arm_joint_names = WHEELED_ARM_ARM_JOINT_NAMES.copy()
-        self.end_effector_names = wheeled_arm_end_effector_names(self.config.end_effector)
+        self.end_effector_names = wheeled_arm_end_effector_names(
+            self.config.left_end_effector, self.config.right_end_effector
+        )
         self.gripper_names = self.end_effector_names
-        self.joint_names = wheeled_arm_joint_names(self.config.end_effector)
+        self.joint_names = wheeled_arm_joint_names(
+            self.config.left_end_effector, self.config.right_end_effector
+        )
+        self._end_effector_types = {
+            "left": self.config.left_end_effector,
+            "right": self.config.right_end_effector,
+        }
 
         self._connected = False
         self._deps = None
@@ -112,7 +120,8 @@ class WheeledArmPico(Teleoperator):
         self._last_reset_button = False
         self._last_recording_control_buttons: dict[str, bool] = {}
         self._gripper_positions = {
-            f"{name}.pos": self._end_effector_initial_pos() for name in self.gripper_names
+            f"{name}.pos": self._end_effector_initial_pos(self._end_effector_types[side])
+            for side, name in zip(("left", "right"), self.gripper_names, strict=True)
         }
         self._filtered_gripper_positions = self._gripper_positions.copy()
         self._last_action = dict.fromkeys(self.action_features, 0.0)
@@ -185,9 +194,9 @@ class WheeledArmPico(Teleoperator):
         else:
             self._barriers = []
 
-        LockedJointsTask = make_locked_joints_task_class(self._deps.Task)
+        locked_joints_task_cls = make_locked_joints_task_class(self._deps.Task)
         self._constraints = [
-            LockedJointsTask(
+            locked_joints_task_cls(
                 self._locked_q_indices,
                 locked_v_indices,
                 self._q_ref,
@@ -228,11 +237,12 @@ class WheeledArmPico(Teleoperator):
         for task in (left_task, right_task, posture_task):
             task.set_target_from_configuration(self._configuration)
 
-        WheeledArmPicoVisualizer = None
+        wheeled_arm_pico_visualizer_cls = None
         if self.config.visualize:
             try:
                 from .visualization import WheeledArmPicoVisualizer, require_visualization_dependencies
 
+                wheeled_arm_pico_visualizer_cls = WheeledArmPicoVisualizer
                 require_visualization_dependencies()
             except Exception as exc:
                 logger.warning("Disabling wheeled_arm_pico Viser visualization: %s", exc)
@@ -242,9 +252,9 @@ class WheeledArmPico(Teleoperator):
         self._xr_client = MockXrClient() if self.config.mock_xr else self._make_xr_client()
         self._reset_action_filter_from_q(self._configuration.q)
         self._last_action = self._make_action(self._configuration.q, set())
-        if self.config.visualize and WheeledArmPicoVisualizer is not None:
+        if self.config.visualize and wheeled_arm_pico_visualizer_cls is not None:
             try:
-                self._visualizer = WheeledArmPicoVisualizer(
+                self._visualizer = wheeled_arm_pico_visualizer_cls(
                     self.config,
                     self._deps,
                     self._robot,
@@ -599,14 +609,14 @@ class WheeledArmPico(Teleoperator):
         action[WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY] = tuple(sorted(active_arms or set()))
         return action
 
-    def _end_effector_initial_pos(self) -> float:
-        if self.config.end_effector == "suction":
+    def _end_effector_initial_pos(self, end_effector: str) -> float:
+        if end_effector == "suction":
             return self.config.suction_off_pos
         return self.config.gripper_open_pos
 
-    def _end_effector_target_pos(self, ratio: float) -> float:
+    def _end_effector_target_pos(self, end_effector: str, ratio: float) -> float:
         ratio = float(np.clip(ratio, 0.0, 1.0))
-        if self.config.end_effector == "suction":
+        if end_effector == "suction":
             return (
                 self.config.suction_on_pos
                 if ratio >= self.config.suction_trigger_threshold
@@ -681,16 +691,18 @@ class WheeledArmPico(Teleoperator):
     def _update_gripper_positions(
         self, left_value: float | None, right_value: float | None
     ) -> None:
-        values = {
-            f"{self.gripper_names[0]}.pos": left_value,
-            f"{self.gripper_names[1]}.pos": right_value,
-        }
-        for key, raw_value in values.items():
+        values = (
+            ("left", left_value),
+            ("right", right_value),
+        )
+        for side, raw_value in values:
             if raw_value is None:
                 continue
-            target_pos = self._end_effector_target_pos(float(raw_value))
+            end_effector = self._end_effector_types[side]
+            key = f"{side}_{end_effector}.pos"
+            target_pos = self._end_effector_target_pos(end_effector, float(raw_value))
             current_pos = self._filtered_gripper_positions[key]
-            if self.config.end_effector == "suction":
+            if end_effector == "suction":
                 filtered_pos = target_pos
             elif abs(target_pos - current_pos) <= self.config.gripper_input_deadband:
                 filtered_pos = current_pos

@@ -21,6 +21,7 @@ from pathlib import Path
 from lerobot.robots.wheeled_arm.config_wheeled_arm import (
     WHEELED_ARM_END_EFFECTOR_TYPES,
     WheeledArmEndEffector,
+    wheeled_arm_resolve_end_effectors,
 )
 
 from ..config import TeleoperatorConfig
@@ -54,8 +55,11 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     # 机器人 URDF 路径。默认使用 teleoperator assets 下的 real_robot.urdf。
     urdf_path: Path | None = None
 
-    # 与 robot.end_effector 保持一致：gripper 输出夹爪位置，suction 输出吸盘开关比例。
-    end_effector: WheeledArmEndEffector = "suction"
+    # Legacy homogeneous end effector selector. When left/right side-specific
+    # values are not provided, this value is used for both wrists.
+    end_effector: WheeledArmEndEffector | None = None
+    left_end_effector: WheeledArmEndEffector | None = None
+    right_end_effector: WheeledArmEndEffector | None = None
 
     # PICO 手柄位移到末端目标位移的比例。调大更灵敏，调小更稳。
     scale: float = 1.0
@@ -130,7 +134,7 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     recording_stop_button: str = "X"
     # 复位 movej 执行期间按住该按钮会立即停止继续发布复位轨迹。
     emergency_stop_button: str = "X"
-    # gripper 模式：trigger=0/1 分别映射到 open/closed；实物夹爪单位不同时改这两个值。
+    # gripper 模式：trigger=0/1 分别映射到 open/closed；默认范围兼容 0=closed, 130=open。
     gripper_open_pos: float = 130.0
     gripper_closed_pos: float = 0.0
     # suction 模式：trigger 被二值化为吸取/释放，robot 侧按 suction.lcm 的 mode 编号切换。
@@ -177,11 +181,28 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     rerun_robot_axis_length: float = 0.12
 
     def __post_init__(self) -> None:
-        if self.end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES:
+        if self.end_effector is not None and self.end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES:
             raise ValueError(
                 f"`end_effector` must be one of {list(WHEELED_ARM_END_EFFECTOR_TYPES)}, "
                 f"got {self.end_effector!r}."
             )
+        if self.left_end_effector is not None and self.left_end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES:
+            raise ValueError(
+                f"`left_end_effector` must be one of {list(WHEELED_ARM_END_EFFECTOR_TYPES)}, "
+                f"got {self.left_end_effector!r}."
+            )
+        if self.right_end_effector is not None and self.right_end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES:
+            raise ValueError(
+                f"`right_end_effector` must be one of {list(WHEELED_ARM_END_EFFECTOR_TYPES)}, "
+                f"got {self.right_end_effector!r}."
+            )
+
+        self.left_end_effector, self.right_end_effector = wheeled_arm_resolve_end_effectors(
+            self.end_effector,
+            self.left_end_effector,
+            self.right_end_effector,
+        )
+
         _validate_non_negative("scale", self.scale)
         _validate_gain("activation_threshold", self.activation_threshold)
         _validate_non_negative("activation_hysteresis", self.activation_hysteresis)

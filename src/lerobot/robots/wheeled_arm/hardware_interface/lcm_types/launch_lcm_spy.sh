@@ -1,11 +1,11 @@
 #!/bin/bash
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd ${DIR}/java
-export CLASSPATH=${DIR}/java/my_types.jar
+export CLASSPATH="${DIR}/java/my_types.jar:${DIR}/java/lcm.jar"
 pwd
 
 if [ $# == 0 ];then
-  com=7667
+  com=8880
 else
   com=$1
 fi

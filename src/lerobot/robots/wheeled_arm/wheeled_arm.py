@@ -55,7 +55,8 @@ def _make_lcm_handler(config: WheeledArmConfig) -> LCMHandler:
     try:
         return LCMHandler(
             lcm_url=config.lcm_url,
-            end_effector=config.end_effector,
+            left_end_effector=config.left_end_effector,
+            right_end_effector=config.right_end_effector,
             suction_on_threshold=config.suction_on_threshold,
             suction_operation_mode=config.suction_operation_mode,
             suction_release_operation_mode=config.suction_release_operation_mode,
@@ -412,12 +413,7 @@ class WheeledArm(Robot):
 
         goal_pos = {key: float(value) for key, value in hardware_action.items() if key.endswith(".pos")}
 
-        if self.config.max_relative_target is not None:
-            goal_present_pos = {
-                key: (target, float(package[self._joint_index_by_action_key[key]]))
-                for key, target in goal_pos.items()
-            }
-            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+        goal_pos = self._apply_max_relative_target(goal_pos, package)
 
         for key, value in goal_pos.items():
             package[self._joint_index_by_action_key[key]] = value
@@ -432,6 +428,37 @@ class WheeledArm(Robot):
             self._handler.upper_body_data_publisher(package)
 
         return goal_pos
+
+    def _apply_max_relative_target(self, goal_pos: dict[str, float], package: np.ndarray) -> dict[str, float]:
+        if self.config.max_relative_target is None:
+            return goal_pos
+
+        arm_goal_pos = {
+            key: target for key, target in goal_pos.items() if self._is_arm_action_key(key)
+        }
+        if not arm_goal_pos:
+            return goal_pos
+
+        goal_present_pos = {
+            key: (target, float(package[self._joint_index_by_action_key[key]]))
+            for key, target in arm_goal_pos.items()
+        }
+        max_relative_target = self.config.max_relative_target
+        if isinstance(max_relative_target, dict):
+            missing_keys = set(arm_goal_pos) - set(max_relative_target)
+            if missing_keys:
+                raise ValueError(
+                    "`max_relative_target` dict is missing arm action keys: "
+                    f"{sorted(missing_keys)}."
+                )
+            max_relative_target = {key: max_relative_target[key] for key in arm_goal_pos}
+
+        safe_arm_goal_pos = ensure_safe_goal_position(goal_present_pos, max_relative_target)
+        return {**goal_pos, **safe_arm_goal_pos}
+
+    def _is_arm_action_key(self, key: str) -> bool:
+        joint_name = key.removesuffix(".pos")
+        return joint_name.startswith("left_arm_") or joint_name.startswith("right_arm_")
 
     def _moving_action_keys(self, goal_pos: dict[str, float], active_arms) -> set[str]:
         action_keys = set(goal_pos)
@@ -708,12 +735,7 @@ class WheeledArm(Robot):
 
         goal_pos = {key: float(value) for key, value in hardware_action.items() if key.endswith(".pos")}
 
-        if self.config.max_relative_target is not None:
-            goal_present_pos = {
-                key: (target, float(self._mock_joint_pos[self._joint_index_by_action_key[key]]))
-                for key, target in goal_pos.items()
-            }
-            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+        goal_pos = self._apply_max_relative_target(goal_pos, self._mock_joint_pos)
 
         for key, value in goal_pos.items():
             self._mock_joint_pos[self._joint_index_by_action_key[key]] = value

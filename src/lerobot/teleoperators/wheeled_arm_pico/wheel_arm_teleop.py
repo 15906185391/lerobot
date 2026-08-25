@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+# ruff: noqa: E402
+
 # Copyright 2026 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -37,11 +39,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", default=8082, type=int)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--urdf-path", type=Path, default=None)
-    parser.add_argument("--end-effector", choices=("gripper", "suction"), default="gripper")
+    parser.add_argument("--end-effector", choices=("gripper", "suction"), default=None)
+    parser.add_argument("--left-end-effector", choices=("gripper", "suction"), default=None)
+    parser.add_argument("--right-end-effector", choices=("gripper", "suction"), default=None)
     parser.add_argument("--scale", default=1.0, type=float)
     parser.add_argument("--activation-threshold", default=0.9, type=float)
-    parser.add_argument("--gripper-open-pos", default=0.0, type=float)
-    parser.add_argument("--gripper-closed-pos", default=1.0, type=float)
+    parser.add_argument("--gripper-open-pos", default=130.0, type=float)
+    parser.add_argument("--gripper-closed-pos", default=0.0, type=float)
     parser.add_argument("--suction-off-pos", default=0.0, type=float)
     parser.add_argument("--suction-on-pos", default=1.0, type=float)
     parser.add_argument("--suction-trigger-threshold", default=0.5, type=float)
@@ -61,9 +65,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     args = parse_args()
+    left_end_effector = args.left_end_effector if args.left_end_effector is not None else args.end_effector
+    right_end_effector = args.right_end_effector if args.right_end_effector is not None else args.end_effector
     cfg = WheeledArmPicoConfig(
         urdf_path=args.urdf_path,
         end_effector=args.end_effector,
+        left_end_effector=left_end_effector,
+        right_end_effector=right_end_effector,
         scale=args.scale,
         activation_threshold=args.activation_threshold,
         gripper_open_pos=args.gripper_open_pos,
@@ -89,7 +97,10 @@ def main() -> None:
     teleop.connect()
     print(f"Open http://localhost:{args.port}")
     print("PICO control: hold left/right grip to move each arm; press Y to reset baseline.")
-    print(f"Use left/right trigger to control the left/right {args.end_effector}.")
+    print(
+        f"Use left trigger to control the left {cfg.left_end_effector} and "
+        f"right trigger to control the right {cfg.right_end_effector}."
+    )
     if args.mock_xr:
         print("Mock XR is enabled, so the simulated controllers will move without a PICO device.")
 
@@ -108,7 +119,7 @@ def main() -> None:
                 end_effectors = [action[key] for key in end_effector_keys]
                 print(f"left={left!r}")
                 print(f"right={right!r}")
-                print(f"{args.end_effector}s={end_effectors!r}")
+                print(f"{list(zip(teleop.gripper_names, end_effectors, strict=True))!r}")
                 last_print_t = now
             time.sleep(max(0.0, period_s - (time.perf_counter() - loop_t)))
     except KeyboardInterrupt:

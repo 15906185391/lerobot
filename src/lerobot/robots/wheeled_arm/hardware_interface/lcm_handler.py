@@ -35,6 +35,8 @@ class LCMHandler:
         self,
         lcm_url: str = "udpm://239.255.76.67:8880?ttl=1",
         end_effector: str = "gripper",
+        left_end_effector: str | None = None,
+        right_end_effector: str | None = None,
         suction_on_threshold: float = 0.5,
         suction_operation_mode: int = 2,
         suction_release_operation_mode: int = 3,
@@ -54,7 +56,15 @@ class LCMHandler:
         self.num_joints = 16
         if end_effector not in {"gripper", "suction"}:
             raise ValueError(f"Unknown end_effector: {end_effector!r}")
-        self.end_effector = end_effector
+        left_end_effector = end_effector if left_end_effector is None else left_end_effector
+        right_end_effector = end_effector if right_end_effector is None else right_end_effector
+        if left_end_effector not in {"gripper", "suction"}:
+            raise ValueError(f"Unknown left_end_effector: {left_end_effector!r}")
+        if right_end_effector not in {"gripper", "suction"}:
+            raise ValueError(f"Unknown right_end_effector: {right_end_effector!r}")
+        self.left_end_effector = left_end_effector
+        self.right_end_effector = right_end_effector
+        self.end_effector = left_end_effector if left_end_effector == right_end_effector else None
         self.suction_on_threshold = suction_on_threshold
         self.suction_operation_mode = suction_operation_mode
         self.suction_release_operation_mode = suction_release_operation_mode
@@ -96,13 +106,16 @@ class LCMHandler:
         self.manip_lcm.subscribe('MANIP_HEAD_STATE', self.manip_head_state_listener)
         self.manip_lcm.subscribe('MANIP_WAIST_STATE', self.manip_waist_state_listener)
         self.manip_lcm.subscribe('MANIP_LEG_STATE', self.manip_leg_state_listener)
-        if self.end_effector == 'gripper':
+        if self.left_end_effector == 'gripper':
             self.manip_lcm.subscribe('MANIP_LEFT_GRIPPER_STATE', self.manip_left_gripper_state_listener)
+        else:
+            self.manip_lcm.subscribe('MANIP_LEFT_SUCTION_STATE', self.manip_left_suction_state_listener)
+        if self.right_end_effector == 'gripper':
             self.manip_lcm.subscribe('MANIP_RIGHT_GRIPPER_STATE', self.manip_right_gripper_state_listener)
         else:
-            self.manip_lcm.subscribe('MANIP_SUCTION_STATE', self.manip_suction_state_listener)
-            self.manip_lcm.subscribe('MANIP_LEFT_SUCTION_STATE', self.manip_left_suction_state_listener)
             self.manip_lcm.subscribe('MANIP_RIGHT_SUCTION_STATE', self.manip_right_suction_state_listener)
+        if self.left_end_effector == 'suction' and self.right_end_effector == 'suction':
+            self.manip_lcm.subscribe('MANIP_SUCTION_STATE', self.manip_suction_state_listener)
         self.manip_lcm.subscribe('MANIP_ROBOT_INFO', self.manip_robot_info_listener)
 
         # 启动 Manipulation LCM 处理线程
@@ -337,7 +350,7 @@ class LCMHandler:
                 right_arm_msg.joints[i].vel = 0.0
             self.manip_lcm.publish('MANIP_RIGHT_ARM_CMD', right_arm_msg.encode())
 
-        if self.end_effector == 'gripper':
+        if self.left_end_effector == 'gripper':
             # --- 左夹爪 ---
             if self.left_gripper_moving:
                 left_gripper_msg = gripper_command_t()
@@ -345,7 +358,12 @@ class LCMHandler:
                 left_gripper_msg.cmd = single_gripper_joint_command_t()
                 left_gripper_msg.cmd.pos = [float(package[14])]
                 self.manip_lcm.publish('MANIP_LEFT_GRIPPER_CMD', left_gripper_msg.encode())
+        else:
+            # --- 左吸盘 ---
+            if self.left_suction_moving:
+                self._publish_suction_command_if_changed(ts, "left", float(package[14]))
 
+        if self.right_end_effector == 'gripper':
             # --- 右夹爪 ---
             if self.right_gripper_moving:
                 right_gripper_msg = gripper_command_t()
@@ -354,10 +372,6 @@ class LCMHandler:
                 right_gripper_msg.cmd.pos = [float(package[15])]
                 self.manip_lcm.publish('MANIP_RIGHT_GRIPPER_CMD', right_gripper_msg.encode())
         else:
-            # --- 左吸盘 ---
-            if self.left_suction_moving:
-                self._publish_suction_command_if_changed(ts, "left", float(package[14]))
-
             # --- 右吸盘 ---
             if self.right_suction_moving:
                 self._publish_suction_command_if_changed(ts, "right", float(package[15]))
