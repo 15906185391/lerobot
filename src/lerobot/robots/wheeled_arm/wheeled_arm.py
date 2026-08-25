@@ -57,11 +57,8 @@ def _make_lcm_handler(config: WheeledArmConfig) -> LCMHandler:
             lcm_url=config.lcm_url,
             end_effector=config.end_effector,
             suction_on_threshold=config.suction_on_threshold,
-            suction_activation_threshold=config.suction_activation_threshold,
-            suction_left_suction_operation_mode=config.suction_left_suction_operation_mode,
-            suction_right_suction_operation_mode=config.suction_right_suction_operation_mode,
-            suction_left_release_operation_mode=config.suction_left_release_operation_mode,
-            suction_right_release_operation_mode=config.suction_right_release_operation_mode,
+            suction_operation_mode=config.suction_operation_mode,
+            suction_release_operation_mode=config.suction_release_operation_mode,
             suction_max_vacuum_pct=config.suction_max_vacuum_pct,
             suction_detect_vacuum_pct=config.suction_detect_vacuum_pct,
             suction_grip_timeout_100ms=config.suction_grip_timeout_100ms,
@@ -576,6 +573,7 @@ class WheeledArm(Robot):
             self._joint_index_by_action_key[key]
             for key in action_keys
             if key in self._joint_index_by_action_key
+            and not key.removesuffix(".pos").endswith("_suction")
         ]
         return np.asarray(indices, dtype=int)
 

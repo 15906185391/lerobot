@@ -75,19 +75,12 @@ def wheeled_arm_parts(end_effector: WheeledArmEndEffector) -> tuple[str, ...]:
 
 
 def wheeled_arm_suction_operation_mode(
-    side: str,
     active: bool,
     *,
-    left_suction_operation_mode: int,
-    right_suction_operation_mode: int,
-    left_release_operation_mode: int,
-    right_release_operation_mode: int,
+    suction_operation_mode: int,
+    release_operation_mode: int,
 ) -> int:
-    if side == "left":
-        return left_suction_operation_mode if active else left_release_operation_mode
-    if side == "right":
-        return right_suction_operation_mode if active else right_release_operation_mode
-    raise ValueError(f"Unknown suction side: {side!r}")
+    return suction_operation_mode if active else release_operation_mode
 
 
 def wheeled_arm_cameras_config() -> dict[str, CameraConfig]:
@@ -111,7 +104,7 @@ class WheeledArmConfig(RobotConfig):
 
     # Physical end effector mounted on the left/right wrists. This controls the
     # final two data features and the Manipulation LCM command topics.
-    end_effector: WheeledArmEndEffector = "gripper"
+    end_effector: WheeledArmEndEffector = "suction"
 
     joint_names: list[str] = field(default_factory=lambda: WHEELED_ARM_JOINT_NAMES.copy())
 
@@ -170,15 +163,9 @@ class WheeledArmConfig(RobotConfig):
     mock_cameras: bool = False
 
     # Suction command mapping aligned with `suction.lcm`.
-    # Legacy single-mode defaults are kept for backward compatibility.
     suction_on_threshold: float = 0.5
-    suction_off_operation_mode: int = 0
-    suction_on_operation_mode: int = 1
-    suction_activation_threshold: float = 0.05
-    suction_left_suction_operation_mode: int = 11
-    suction_right_suction_operation_mode: int = 12
-    suction_left_release_operation_mode: int = 13
-    suction_right_release_operation_mode: int = 14
+    suction_operation_mode: int = 2
+    suction_release_operation_mode: int = 3
     suction_max_vacuum_pct: float = 70.0
     suction_detect_vacuum_pct: float = 60.0
     suction_grip_timeout_100ms: float = 20.0
@@ -233,8 +220,6 @@ class WheeledArmConfig(RobotConfig):
             raise ValueError("`action_watchdog_timeout_s` must be positive or None.")
         if not 0.0 <= self.suction_on_threshold <= 1.0:
             raise ValueError("`suction_on_threshold` must be in [0, 1].")
-        if not 0.0 <= self.suction_activation_threshold <= 1.0:
-            raise ValueError("`suction_activation_threshold` must be in [0, 1].")
         if not 0.0 <= self.suction_max_vacuum_pct <= 70.0:
             raise ValueError("`suction_max_vacuum_pct` must be in [0, 70].")
         if not -1.0 <= self.suction_detect_vacuum_pct <= 70.0:

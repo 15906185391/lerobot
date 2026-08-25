@@ -71,6 +71,7 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
         end_effector="suction",
         suction_off_pos=0.1,
         suction_on_pos=0.9,
+        suction_trigger_threshold=0.4,
     )
 
     assert cfg.position_cost == [5.0, 4.0, 3.0]
@@ -105,10 +106,11 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
     assert cfg.end_effector == "suction"
     assert cfg.suction_off_pos == 0.1
     assert cfg.suction_on_pos == 0.9
+    assert cfg.suction_trigger_threshold == 0.4
 
 
 def test_action_features_match_wheeled_arm_arm_and_gripper_joints():
-    teleop = WheeledArmPico(WheeledArmPicoConfig())
+    teleop = WheeledArmPico(WheeledArmPicoConfig(end_effector="gripper"))
 
     assert list(teleop.action_features) == [
         *(f"left_arm_{idx}.pos" for idx in range(7)),
@@ -123,6 +125,27 @@ def test_action_features_can_switch_to_suction_end_effector():
 
     assert list(teleop.action_features)[-2:] == ["left_suction.pos", "right_suction.pos"]
     assert "left_gripper.pos" not in teleop.action_features
+
+
+
+def test_suction_trigger_is_binarized_without_gripper_smoothing():
+    teleop = WheeledArmPico(
+        WheeledArmPicoConfig(
+            end_effector="suction",
+            suction_off_pos=0.0,
+            suction_on_pos=1.0,
+            suction_trigger_threshold=0.5,
+            gripper_position_smoothing_alpha=0.1,
+        )
+    )
+
+    teleop._update_gripper_positions(0.4, 0.6)
+    assert teleop._gripper_positions["left_suction.pos"] == 0.0
+    assert teleop._gripper_positions["right_suction.pos"] == 1.0
+
+    teleop._update_gripper_positions(1.0, 0.0)
+    assert teleop._gripper_positions["left_suction.pos"] == 1.0
+    assert teleop._gripper_positions["right_suction.pos"] == 0.0
 
 
 def test_relative_teleop_target_uses_reference_end_effector_baseline():
@@ -367,7 +390,7 @@ def test_wheeled_arm_pico_get_action_includes_damping_task(tmp_path, monkeypatch
 
 
 def test_make_action_marks_only_active_arms_without_changing_action_features():
-    teleop = WheeledArmPico(WheeledArmPicoConfig())
+    teleop = WheeledArmPico(WheeledArmPicoConfig(end_effector="gripper"))
     teleop._arm_q_indices = np.arange(14)
     q = np.arange(14, dtype=float)
 

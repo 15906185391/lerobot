@@ -36,11 +36,8 @@ class LCMHandler:
         lcm_url: str = "udpm://239.255.76.67:8880?ttl=1",
         end_effector: str = "gripper",
         suction_on_threshold: float = 0.5,
-        suction_activation_threshold: float = 0.05,
-        suction_left_suction_operation_mode: int = 11,
-        suction_right_suction_operation_mode: int = 12,
-        suction_left_release_operation_mode: int = 13,
-        suction_right_release_operation_mode: int = 14,
+        suction_operation_mode: int = 2,
+        suction_release_operation_mode: int = 3,
         suction_max_vacuum_pct: float = 70.0,
         suction_detect_vacuum_pct: float = 60.0,
         suction_grip_timeout_100ms: float = 20.0,
@@ -59,14 +56,12 @@ class LCMHandler:
             raise ValueError(f"Unknown end_effector: {end_effector!r}")
         self.end_effector = end_effector
         self.suction_on_threshold = suction_on_threshold
-        self.suction_activation_threshold = suction_activation_threshold
-        self.suction_left_suction_operation_mode = suction_left_suction_operation_mode
-        self.suction_right_suction_operation_mode = suction_right_suction_operation_mode
-        self.suction_left_release_operation_mode = suction_left_release_operation_mode
-        self.suction_right_release_operation_mode = suction_right_release_operation_mode
+        self.suction_operation_mode = suction_operation_mode
+        self.suction_release_operation_mode = suction_release_operation_mode
         self.suction_max_vacuum_pct = suction_max_vacuum_pct
         self.suction_detect_vacuum_pct = suction_detect_vacuum_pct
         self.suction_grip_timeout_100ms = suction_grip_timeout_100ms
+        self._last_suction_active = {"left": False, "right": False}
 
         self.left_arm_FT_original = [0.0 for _ in range(6)]
         self.right_arm_FT_original = [0.0 for _ in range(6)]
@@ -278,23 +273,30 @@ class LCMHandler:
         pass
 
 
-    def _make_suction_command(self, ts: int, side: str, value: float) -> suction_command_t:
-        ratio = float(np.clip(value, 0.0, 1.0))
-        active = ratio >= self.suction_activation_threshold
+    def _make_suction_command(self, ts: int, active: bool) -> suction_command_t:
         msg = suction_command_t()
         msg.timestamp = ts
         msg.operation_mode = wheeled_arm_suction_operation_mode(
-            side,
             active,
-            left_suction_operation_mode=self.suction_left_suction_operation_mode,
-            right_suction_operation_mode=self.suction_right_suction_operation_mode,
-            left_release_operation_mode=self.suction_left_release_operation_mode,
-            right_release_operation_mode=self.suction_right_release_operation_mode,
+            suction_operation_mode=self.suction_operation_mode,
+            release_operation_mode=self.suction_release_operation_mode,
         )
-        msg.vacuum_pct = min(self.suction_max_vacuum_pct, self.suction_max_vacuum_pct * ratio) if active else 0.0
+        msg.vacuum_pct = self.suction_max_vacuum_pct if active else 0.0
         msg.detect_vacuum_pct = self.suction_detect_vacuum_pct
         msg.grip_timeout_100ms = self.suction_grip_timeout_100ms
         return msg
+
+    def _publish_suction_command_if_changed(self, ts: int, side: str, value: float) -> None:
+        ratio = float(np.clip(value, 0.0, 1.0))
+        active = ratio >= self.suction_on_threshold
+        last_active = self._last_suction_active[side]
+        if last_active is not None and active == last_active:
+            return
+
+        self._last_suction_active[side] = active
+        suction_msg = self._make_suction_command(ts, active)
+        channel = "MANIP_LEFT_SUCTION_CMD" if side == "left" else "MANIP_RIGHT_SUCTION_CMD"
+        self.manip_lcm.publish(channel, suction_msg.encode())
 
     # ==================== 发布接口 ====================
 
@@ -354,13 +356,11 @@ class LCMHandler:
         else:
             # --- 左吸盘 ---
             if self.left_suction_moving:
-                left_suction_msg = self._make_suction_command(ts, "left", float(package[14]))
-                self.manip_lcm.publish('MANIP_LEFT_SUCTION_CMD', left_suction_msg.encode())
+                self._publish_suction_command_if_changed(ts, "left", float(package[14]))
 
             # --- 右吸盘 ---
             if self.right_suction_moving:
-                right_suction_msg = self._make_suction_command(ts, "right", float(package[15]))
-                self.manip_lcm.publish('MANIP_RIGHT_SUCTION_CMD', right_suction_msg.encode())
+                self._publish_suction_command_if_changed(ts, "right", float(package[15]))
 
         # --- 头部 (2 joints) ---
         if self.head_moving:

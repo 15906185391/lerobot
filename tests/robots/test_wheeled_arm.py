@@ -104,6 +104,7 @@ class FakeCamera:
 
 def _make_robot(**overrides):
     handler = FakeLCMHandler()
+    overrides.setdefault("end_effector", "gripper")
     overrides.setdefault("use_control_loop", False)
     with patch("lerobot.robots.wheeled_arm.wheeled_arm._make_lcm_handler", return_value=handler):
         robot = WheeledArm(WheeledArmConfig(
@@ -120,51 +121,62 @@ def test_wheeled_arm_config_is_registered():
 
 
 
-def test_wheeled_arm_suction_operation_mode_maps_left_and_right_channels():
+def test_wheeled_arm_suction_operation_mode_maps_suction_and_release_modes():
     assert (
         wheeled_arm_suction_operation_mode(
-            "left",
             True,
-            left_suction_operation_mode=11,
-            right_suction_operation_mode=12,
-            left_release_operation_mode=13,
-            right_release_operation_mode=14,
+            suction_operation_mode=2,
+            release_operation_mode=3,
         )
-        == 11
+        == 2
     )
     assert (
         wheeled_arm_suction_operation_mode(
-            "left",
             False,
-            left_suction_operation_mode=11,
-            right_suction_operation_mode=12,
-            left_release_operation_mode=13,
-            right_release_operation_mode=14,
+            suction_operation_mode=2,
+            release_operation_mode=3,
         )
-        == 13
+        == 3
     )
-    assert (
-        wheeled_arm_suction_operation_mode(
-            "right",
-            True,
-            left_suction_operation_mode=11,
-            right_suction_operation_mode=12,
-            left_release_operation_mode=13,
-            right_release_operation_mode=14,
-        )
-        == 12
-    )
-    assert (
-        wheeled_arm_suction_operation_mode(
-            "right",
-            False,
-            left_suction_operation_mode=11,
-            right_suction_operation_mode=12,
-            left_release_operation_mode=13,
-            right_release_operation_mode=14,
-        )
-        == 14
-    )
+
+
+def test_lcm_handler_publishes_suction_only_on_trigger_edges():
+    from lerobot.robots.wheeled_arm.hardware_interface import lcm_handler
+
+    class FakeManipLCM:
+        def __init__(self):
+            self.published = []
+
+        def publish(self, channel, data):
+            self.published.append((channel, data))
+
+    handler = object.__new__(lcm_handler.LCMHandler)
+    handler.suction_on_threshold = 0.5
+    handler.suction_operation_mode = 2
+    handler.suction_release_operation_mode = 3
+    handler.suction_max_vacuum_pct = 70.0
+    handler.suction_detect_vacuum_pct = 60.0
+    handler.suction_grip_timeout_100ms = 20.0
+    handler._last_suction_active = {"left": False, "right": False}
+    handler.manip_lcm = FakeManipLCM()
+
+    handler._publish_suction_command_if_changed(1, "left", 0.0)
+    handler._publish_suction_command_if_changed(2, "left", 0.6)
+    handler._publish_suction_command_if_changed(3, "left", 1.0)
+    handler._publish_suction_command_if_changed(4, "left", 0.4)
+    handler._publish_suction_command_if_changed(5, "left", 0.0)
+
+    assert [channel for channel, _data in handler.manip_lcm.published] == [
+        "MANIP_LEFT_SUCTION_CMD",
+        "MANIP_LEFT_SUCTION_CMD",
+    ]
+    suction_msg = lcm_handler.suction_command_t.decode(handler.manip_lcm.published[0][1])
+    release_msg = lcm_handler.suction_command_t.decode(handler.manip_lcm.published[1][1])
+    assert suction_msg.operation_mode == 2
+    assert suction_msg.vacuum_pct == 70.0
+    assert release_msg.operation_mode == 3
+    assert release_msg.vacuum_pct == 0.0
+
 
 def test_default_camera_config_uses_ros2_camera():
     cameras = wheeled_arm_cameras_config()
@@ -253,6 +265,16 @@ def test_control_loop_interpolates_between_last_command_and_new_target():
 
     assert package[0] == 1.0
     np.testing.assert_allclose(package[1:], target[1:])
+    robot.disconnect()
+
+
+
+def test_control_loop_does_not_interpolate_suction_commands():
+    robot, _handler = _make_robot(end_effector="suction")
+
+    indices = robot._action_key_indices({"left_arm_0.pos", "left_suction.pos"})
+
+    assert indices.tolist() == [0]
     robot.disconnect()
 
 
@@ -584,7 +606,9 @@ def test_mock_wheeled_arm_uses_software_joints_without_lcm_and_keeps_real_camera
     camera = FakeCamera()
 
     with patch("lerobot.robots.wheeled_arm.wheeled_arm._make_lcm_handler") as make_handler:
-        robot = WheeledArm(WheeledArmConfig(cameras={}, mock=True, connect_timeout_s=0))
+        robot = WheeledArm(
+            WheeledArmConfig(cameras={}, end_effector="gripper", mock=True, connect_timeout_s=0)
+        )
         robot.cameras = {"front": camera}
         robot.connect()
 

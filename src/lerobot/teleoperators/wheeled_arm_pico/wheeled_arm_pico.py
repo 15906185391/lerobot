@@ -607,8 +607,10 @@ class WheeledArmPico(Teleoperator):
     def _end_effector_target_pos(self, ratio: float) -> float:
         ratio = float(np.clip(ratio, 0.0, 1.0))
         if self.config.end_effector == "suction":
-            return self.config.suction_off_pos + ratio * (
-                self.config.suction_on_pos - self.config.suction_off_pos
+            return (
+                self.config.suction_on_pos
+                if ratio >= self.config.suction_trigger_threshold
+                else self.config.suction_off_pos
             )
         return self.config.gripper_open_pos + ratio * (
             self.config.gripper_closed_pos - self.config.gripper_open_pos
@@ -688,7 +690,9 @@ class WheeledArmPico(Teleoperator):
                 continue
             target_pos = self._end_effector_target_pos(float(raw_value))
             current_pos = self._filtered_gripper_positions[key]
-            if abs(target_pos - current_pos) <= self.config.gripper_input_deadband:
+            if self.config.end_effector == "suction":
+                filtered_pos = target_pos
+            elif abs(target_pos - current_pos) <= self.config.gripper_input_deadband:
                 filtered_pos = current_pos
             else:
                 filtered_pos = current_pos + self.config.gripper_position_smoothing_alpha * (

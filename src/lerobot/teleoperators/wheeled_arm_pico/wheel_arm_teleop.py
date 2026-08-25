@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gripper-closed-pos", default=1.0, type=float)
     parser.add_argument("--suction-off-pos", default=0.0, type=float)
     parser.add_argument("--suction-on-pos", default=1.0, type=float)
+    parser.add_argument("--suction-trigger-threshold", default=0.5, type=float)
     parser.add_argument("--gripper-input-deadband", default=0.02, type=float)
     parser.add_argument("--gripper-position-smoothing-alpha", default=0.35, type=float)
     parser.add_argument("--position-only", action="store_true")
@@ -69,6 +70,7 @@ def main() -> None:
         gripper_closed_pos=args.gripper_closed_pos,
         suction_off_pos=args.suction_off_pos,
         suction_on_pos=args.suction_on_pos,
+        suction_trigger_threshold=args.suction_trigger_threshold,
         gripper_input_deadband=args.gripper_input_deadband,
         gripper_position_smoothing_alpha=args.gripper_position_smoothing_alpha,
         position_only=args.position_only,

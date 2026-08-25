@@ -55,7 +55,7 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     urdf_path: Path | None = None
 
     # 与 robot.end_effector 保持一致：gripper 输出夹爪位置，suction 输出吸盘开关比例。
-    end_effector: WheeledArmEndEffector = "gripper"
+    end_effector: WheeledArmEndEffector = "suction"
 
     # PICO 手柄位移到末端目标位移的比例。调大更灵敏，调小更稳。
     scale: float = 1.0
@@ -133,9 +133,11 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     # gripper 模式：trigger=0/1 分别映射到 open/closed；实物夹爪单位不同时改这两个值。
     gripper_open_pos: float = 130.0
     gripper_closed_pos: float = 0.0
-    # suction 模式：trigger 输出归一化比例，robot 侧按 suction.lcm 的 mode 编号切换吸取/释放。
+    # suction 模式：trigger 被二值化为吸取/释放，robot 侧按 suction.lcm 的 mode 编号切换。
     suction_off_pos: float = 0.0
     suction_on_pos: float = 1.0
+    # suction 模式下 trigger 大于等于该阈值视为按下，低于该阈值视为松开。
+    suction_trigger_threshold: float = 0.5
     # 末端输入的死区，单位是归一化 trigger 比例 [0, 1]。小变化会被忽略。
     gripper_input_deadband: float = 0.02
     # 末端目标的 EMA 平滑系数。越小越稳但越慢。
@@ -213,6 +215,7 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
         _validate_non_negative("collision_warning_distance", self.collision_warning_distance)
         _validate_gain("suction_off_pos", self.suction_off_pos)
         _validate_gain("suction_on_pos", self.suction_on_pos)
+        _validate_gain("suction_trigger_threshold", self.suction_trigger_threshold)
         _validate_non_negative("gripper_input_deadband", self.gripper_input_deadband)
         _validate_gain("gripper_position_smoothing_alpha", self.gripper_position_smoothing_alpha)
         _validate_cost("position_cost", self.position_cost, expected_len=3)
