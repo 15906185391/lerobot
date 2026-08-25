@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -68,6 +69,8 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
         damping_task_cost=0.07,
         max_joint_velocity_rad_s=1.2,
         max_joint_acceleration_rad_s2=6.0,
+        grip_release_deceleration_s=0.18,
+        grip_release_stop_step_rad=2e-4,
         self_collision_gain=12.0,
         self_collision_safe_displacement_gain=6.0,
         collision_warning_distance=0.02,
@@ -102,6 +105,8 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
     assert cfg.damping_task_cost == 0.07
     assert cfg.max_joint_velocity_rad_s == 1.2
     assert cfg.max_joint_acceleration_rad_s2 == 6.0
+    assert cfg.grip_release_deceleration_s == 0.18
+    assert cfg.grip_release_stop_step_rad == 2e-4
     assert cfg.use_continuous_robot_feedback is False
     assert cfg.self_collision_gain == 12.0
     assert cfg.self_collision_safe_displacement_gain == 6.0
@@ -293,7 +298,11 @@ def test_wheeled_arm_pico_connect_includes_damping_task(tmp_path, monkeypatch):
     assert any(isinstance(task, FakeDampingTask) for task in teleop._tasks)
     damping_task = next(task for task in teleop._tasks if isinstance(task, FakeDampingTask))
     assert damping_task.kwargs["cost"] == 0.07
-    assert all(task.target_set for task in teleop._tasks if isinstance(task, FakeTask) and not isinstance(task, FakeDampingTask))
+    assert all(
+        task.target_set
+        for task in teleop._tasks
+        if isinstance(task, FakeTask) and not isinstance(task, FakeDampingTask)
+    )
 
     teleop.disconnect()
 
@@ -413,6 +422,73 @@ def test_wheeled_arm_pico_get_action_includes_damping_task(tmp_path, monkeypatch
     teleop.disconnect()
 
 
+def test_get_action_soft_releases_arm_after_grip_release(monkeypatch):
+    class FakePose:
+        def __init__(self):
+            self.translation = np.zeros(3, dtype=float)
+            self.rotation = np.eye(3, dtype=float)
+
+        def copy(self):
+            return FakePose()
+
+    class FakeConfiguration:
+        def __init__(self):
+            self.q = np.zeros(18, dtype=float)
+
+        def update(self, q):
+            self.q = np.asarray(q, dtype=float).copy()
+
+        def get_transform_frame_to_world(self, frame):
+            return FakePose()
+
+    class FakeXrClient:
+        def get_button_state_by_name(self, name: str) -> bool:
+            return False
+
+        def get_key_value_by_name(self, name: str) -> float:
+            if name == "left_grip":
+                return 0.0
+            if name == "right_grip":
+                return 0.0
+            return 0.0
+
+        def get_pose_by_name(self, name: str) -> np.ndarray:
+            return np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=float)
+
+    monkeypatch.setattr(
+        "lerobot.teleoperators.wheeled_arm_pico.wheeled_arm_pico.xr_pose_to_world_se3",
+        lambda xr_pose, pin: FakePose(),
+    )
+
+    teleop = WheeledArmPico(
+        WheeledArmPicoConfig(
+            arm_action_smoothing_alpha=1.0,
+            max_joint_velocity_rad_s=None,
+            max_joint_acceleration_rad_s2=2.0,
+            grip_release_deceleration_s=0.2,
+        )
+    )
+    teleop._connected = True
+    teleop._configuration = FakeConfiguration()
+    teleop._tasks = [SimpleNamespace(transform_target_to_world=None) for _ in range(4)]
+    teleop._xr_client = FakeXrClient()
+    teleop._deps = SimpleNamespace(pin=object())
+    teleop._arm_q_indices = np.arange(14)
+    teleop._locked_q_indices = np.array([14, 15, 16, 17])
+    teleop._q_ref = np.zeros(18)
+    teleop._dt = 0.1
+    teleop._filtered_arm_q = np.zeros(14, dtype=float)
+    teleop._previous_arm_step = np.zeros(14, dtype=float)
+    teleop._previous_arm_step[:7] = 0.1
+    teleop._left_active = True
+
+    action = teleop.get_action()
+
+    assert action[WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY] == ("left_arm",)
+    np.testing.assert_allclose(teleop._previous_arm_step[:7], np.full(7, 0.08))
+    np.testing.assert_allclose(teleop._configuration.q[:7], np.full(7, 0.08))
+
+
 def test_make_action_marks_only_active_arms_without_changing_action_features():
     teleop = WheeledArmPico(WheeledArmPicoConfig(end_effector="gripper"))
     teleop._arm_q_indices = np.arange(14)
@@ -500,6 +576,27 @@ def test_pico_activation_uses_hysteresis_to_avoid_threshold_chatter():
     assert teleop._update_activation_state("left", 0.71) is True
     assert teleop._update_activation_state("left", 0.65) is True
     assert teleop._update_activation_state("left", 0.59) is False
+
+
+def test_pico_activation_starts_release_deceleration_on_grip_release():
+    teleop = WheeledArmPico(
+        WheeledArmPicoConfig(
+            activation_threshold=0.7,
+            activation_hysteresis=0.1,
+            grip_release_deceleration_s=0.2,
+            grip_release_stop_step_rad=1e-4,
+        )
+    )
+    teleop._previous_arm_step = np.zeros(14, dtype=float)
+    teleop._previous_arm_step[:7] = 0.01
+
+    assert teleop._update_activation_state("left", 0.8) is True
+    assert teleop._update_activation_state("left", 0.5) is False
+
+    assert teleop._arm_is_release_decelerating("left", teleop._left_release_until_t - 0.01)
+
+    teleop._previous_arm_step[:7] = 0.0
+    assert not teleop._arm_is_release_decelerating("left", teleop._left_release_until_t - 0.01)
 
 
 def test_pico_activation_rejects_unknown_side():
@@ -663,6 +760,42 @@ def test_inactive_arm_smoothing_holds_feedback_and_clears_previous_step():
     assert np.all(teleop._previous_arm_step[:7] != 0.0)
     np.testing.assert_allclose(teleop._previous_arm_step[7:], np.zeros(7))
     np.testing.assert_allclose(teleop._configuration.q[7:14], np.arange(7, 14, dtype=float))
+
+
+def test_release_deceleration_smoothing_keeps_released_arm_moving_briefly():
+    class FakeConfiguration:
+        def __init__(self):
+            self.q = np.zeros(18, dtype=float)
+
+        def update(self, q):
+            self.q = np.asarray(q, dtype=float).copy()
+
+    teleop = WheeledArmPico(
+        WheeledArmPicoConfig(
+            arm_action_smoothing_alpha=1.0,
+            max_joint_velocity_rad_s=None,
+            max_joint_acceleration_rad_s2=2.0,
+            grip_release_deceleration_s=0.2,
+        )
+    )
+    teleop._configuration = FakeConfiguration()
+    teleop._arm_q_indices = np.arange(14)
+    teleop._locked_q_indices = np.array([14, 15, 16, 17])
+    teleop._q_ref = np.zeros(18)
+    teleop._dt = 0.1
+    teleop._filtered_arm_q = np.zeros(14, dtype=float)
+    teleop._previous_arm_step = np.zeros(14, dtype=float)
+    teleop._previous_arm_step[:7] = 0.1
+    teleop._left_release_until_t = time.monotonic() + 1.0
+
+    release_mask = teleop._release_deceleration_arm_mask(time.monotonic())
+    teleop._apply_action_smoothing_to_configuration(release_mask)
+
+    assert release_mask[:7].all()
+    assert not release_mask[7:].any()
+    np.testing.assert_allclose(teleop._previous_arm_step[:7], np.full(7, 0.08))
+    np.testing.assert_allclose(teleop._configuration.q[:7], np.full(7, 0.08))
+    assert teleop._arm_names_from_mask(release_mask) == {"left_arm"}
 
 
 def test_locked_joints_task_uses_configured_gain_and_lm_damping():

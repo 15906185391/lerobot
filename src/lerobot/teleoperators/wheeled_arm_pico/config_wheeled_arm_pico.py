@@ -98,6 +98,10 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     max_joint_velocity_rad_s: float | None = 1.5
     # IK 输出后的关节加速度软限幅，单位 rad/s^2。None 表示不额外限幅。
     max_joint_acceleration_rad_s2: float | None = 8.0
+    # grip 松开后继续发送短暂减速指令，避免底层控制器瞬间关闭 moving flag 造成硬刹抖动。
+    grip_release_deceleration_s: float = 0.25
+    # 软释放期间，当每周期关节步进小于该值时认为已平稳停止，单位 rad。
+    grip_release_stop_step_rad: float = 1e-4
     # True 时每个控制周期都用机器人 LCM 反馈重置 IK 当前关节状态。
     # 实机反馈延迟/抖动明显时建议保持 False，仅使用启动和 reset 后的同步。
     use_continuous_robot_feedback: bool = False
@@ -186,12 +190,18 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
                 f"`end_effector` must be one of {list(WHEELED_ARM_END_EFFECTOR_TYPES)}, "
                 f"got {self.end_effector!r}."
             )
-        if self.left_end_effector is not None and self.left_end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES:
+        if (
+            self.left_end_effector is not None
+            and self.left_end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES
+        ):
             raise ValueError(
                 f"`left_end_effector` must be one of {list(WHEELED_ARM_END_EFFECTOR_TYPES)}, "
                 f"got {self.left_end_effector!r}."
             )
-        if self.right_end_effector is not None and self.right_end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES:
+        if (
+            self.right_end_effector is not None
+            and self.right_end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES
+        ):
             raise ValueError(
                 f"`right_end_effector` must be one of {list(WHEELED_ARM_END_EFFECTOR_TYPES)}, "
                 f"got {self.right_end_effector!r}."
@@ -226,6 +236,8 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
             _validate_non_negative(
                 "max_joint_acceleration_rad_s2", self.max_joint_acceleration_rad_s2
             )
+        _validate_non_negative("grip_release_deceleration_s", self.grip_release_deceleration_s)
+        _validate_non_negative("grip_release_stop_step_rad", self.grip_release_stop_step_rad)
         _validate_non_negative("d_min", self.d_min)
         if self.initial_ignore_distance is not None:
             _validate_non_negative("initial_ignore_distance", self.initial_ignore_distance)

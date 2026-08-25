@@ -2836,6 +2836,8 @@ class WheeledArmGui(QMainWindow):
         self.ik_max_joint_velocity.setToolTip("IK 输出后的每关节目标速度软限幅，单位 rad/s。")
         self.ik_max_joint_acceleration = self._double_spin(0.1, 200.0, 8.0, 1)
         self.ik_max_joint_acceleration.setToolTip("IK 输出后的每关节目标加速度软限幅，单位 rad/s^2。")
+        self.grip_release_deceleration = self._double_spin(0.0, 1.0, 0.25, 2)
+        self.grip_release_deceleration.setToolTip("松开 grip 后继续发送减速指令的时间，单位 s。")
         self.camera_override = QCheckBox("覆盖 front ROS2 相机参数")
         self.camera_serial_number_or_name = QLineEdit("/camera/color/image_raw")
         self.camera_serial_number_or_name.setPlaceholderText("例如 /camera/color/image_raw")
@@ -2868,6 +2870,7 @@ class WheeledArmGui(QMainWindow):
         robot_form.addRow("关节平滑系数", self.ik_smoothing_alpha)
         robot_form.addRow("最大关节速度", self.ik_max_joint_velocity)
         robot_form.addRow("最大关节加速度", self.ik_max_joint_acceleration)
+        robot_form.addRow("Grip 软释放", self.grip_release_deceleration)
         robot_form.addRow("", self.camera_override)
         robot_form.addRow("相机 topic", self.camera_serial_number_or_name)
         robot_form.addRow("相机宽", self.camera_width)
@@ -3715,6 +3718,10 @@ class WheeledArmGui(QMainWindow):
         self.common_teleop_ik_max_joint_acceleration.setToolTip(
             "IK 输出后的每关节目标加速度软限幅，单位 rad/s^2。"
         )
+        self.common_teleop_grip_release_deceleration = self._double_spin(0.0, 1.0, 0.25, 2)
+        self.common_teleop_grip_release_deceleration.setToolTip(
+            "松开 grip 后继续发送减速指令的时间，单位 s。"
+        )
         form.addRow("FPS", self.common_teleop_fps)
         form.addRow("运行秒数", self.common_teleop_time_s)
         form.addRow("", self.common_teleop_display_data)
@@ -3736,6 +3743,7 @@ class WheeledArmGui(QMainWindow):
         form.addRow("关节平滑系数", self.common_teleop_ik_smoothing_alpha)
         form.addRow("最大关节速度", self.common_teleop_ik_max_joint_velocity)
         form.addRow("最大关节加速度", self.common_teleop_ik_max_joint_acceleration)
+        form.addRow("Grip 软释放", self.common_teleop_grip_release_deceleration)
         return box
 
     def _make_replay_common_panel(self) -> QWidget:
@@ -4374,6 +4382,7 @@ class WheeledArmGui(QMainWindow):
             self.ik_smoothing_alpha,
             self.ik_max_joint_velocity,
             self.ik_max_joint_acceleration,
+            self.grip_release_deceleration,
             self.camera_override,
             self.camera_serial_number_or_name,
             self.camera_width,
@@ -4503,6 +4512,7 @@ class WheeledArmGui(QMainWindow):
             self.common_teleop_ik_smoothing_alpha,
             self.common_teleop_ik_max_joint_velocity,
             self.common_teleop_ik_max_joint_acceleration,
+            self.common_teleop_grip_release_deceleration,
             self.common_replay_repo_id,
             self.common_replay_episode,
             self.common_replay_fps,
@@ -4734,6 +4744,14 @@ class WheeledArmGui(QMainWindow):
                 )
             )
         )
+        self.grip_release_deceleration.setValue(
+            float(
+                self.settings.value(
+                    "record/grip_release_deceleration",
+                    self.grip_release_deceleration.value(),
+                )
+            )
+        )
         self.viewer_repo_id.setText(self.settings.value("viewer/repo_id", ""))
         self.viewer_root.setText(self.settings.value("viewer/root", ""))
         self.edit_repo_id.setText(self.settings.value("edit/repo_id", ""))
@@ -4910,6 +4928,14 @@ class WheeledArmGui(QMainWindow):
                 )
             )
         )
+        self.common_teleop_grip_release_deceleration.setValue(
+            float(
+                self.settings.value(
+                    "common/teleop_grip_release_deceleration",
+                    self.common_teleop_grip_release_deceleration.value(),
+                )
+            )
+        )
         self._load_end_effector_setting(
             self.common_joint_left_end_effector,
             "common/joint_left_end_effector",
@@ -4987,6 +5013,9 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("record/ik_max_joint_velocity", self.ik_max_joint_velocity.value())
         self.settings.setValue(
             "record/ik_max_joint_acceleration", self.ik_max_joint_acceleration.value()
+        )
+        self.settings.setValue(
+            "record/grip_release_deceleration", self.grip_release_deceleration.value()
         )
         self.settings.setValue("viewer/repo_id", self.viewer_repo_id.text())
         self.settings.setValue("viewer/root", self.viewer_root.text())
@@ -5072,6 +5101,10 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue(
             "common/teleop_ik_max_joint_acceleration",
             self.common_teleop_ik_max_joint_acceleration.value(),
+        )
+        self.settings.setValue(
+            "common/teleop_grip_release_deceleration",
+            self.common_teleop_grip_release_deceleration.value(),
         )
         self.settings.setValue(
             "common/joint_left_end_effector",
@@ -5163,6 +5196,7 @@ class WheeledArmGui(QMainWindow):
                 f"--teleop.arm_action_smoothing_alpha={self.ik_smoothing_alpha.value()}",
                 f"--teleop.max_joint_velocity_rad_s={self.ik_max_joint_velocity.value()}",
                 f"--teleop.max_joint_acceleration_rad_s2={self.ik_max_joint_acceleration.value()}",
+                f"--teleop.grip_release_deceleration_s={self.grip_release_deceleration.value()}",
             ]
         )
 
@@ -5518,6 +5552,10 @@ class WheeledArmGui(QMainWindow):
                     (
                         "--teleop.max_joint_acceleration_rad_s2="
                         f"{self.common_teleop_ik_max_joint_acceleration.value()}"
+                    ),
+                    (
+                        "--teleop.grip_release_deceleration_s="
+                        f"{self.common_teleop_grip_release_deceleration.value()}"
                     ),
                 ]
             )

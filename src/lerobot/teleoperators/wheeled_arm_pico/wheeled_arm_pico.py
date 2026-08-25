@@ -117,6 +117,8 @@ class WheeledArmPico(Teleoperator):
         self._right_mapper = RelativeTeleopTarget()
         self._left_active = False
         self._right_active = False
+        self._left_release_until_t = 0.0
+        self._right_release_until_t = 0.0
         self._last_reset_button = False
         self._last_recording_control_buttons: dict[str, bool] = {}
         self._gripper_positions = {
@@ -458,6 +460,7 @@ class WheeledArmPico(Teleoperator):
         except Exception as exc:
             logger.warning("Waiting for valid PICO XR data: %s", exc)
             self.reset_baseline()
+            self._clear_release_deceleration()
             self._last_action[WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY] = ()
             self._update_visualization(
                 left_target_pose,
@@ -497,9 +500,11 @@ class WheeledArmPico(Teleoperator):
         right_task.transform_target_to_world = right_target_pose
         self._update_gripper_positions(left_gripper_value, right_gripper_value)
         hold_arm_q = np.asarray(self._configuration.q[self._arm_q_indices], dtype=float).copy()
-        active_arm_mask = self._active_arm_mask(left_active, right_active)
+        ik_arm_mask = self._active_arm_mask(left_active, right_active)
+        release_arm_mask = self._release_deceleration_arm_mask(time.monotonic())
+        command_arm_mask = ik_arm_mask | release_arm_mask
 
-        if not np.any(active_arm_mask):
+        if not np.any(command_arm_mask):
             self._reset_action_filter_from_q(self._configuration.q)
             self._last_action = self._make_action(self._configuration.q, set())
             self._update_visualization(
@@ -513,6 +518,23 @@ class WheeledArmPico(Teleoperator):
             )
             return self._last_action.copy()
 
+        if not np.any(ik_arm_mask):
+            self._apply_action_smoothing_to_configuration(command_arm_mask)
+            self._last_action = self._make_action(
+                self._configuration.q,
+                self._arm_names_from_mask(command_arm_mask),
+            )
+            self._update_visualization(
+                left_target_pose,
+                right_target_pose,
+                xr_ok,
+                left_active,
+                right_active,
+                "decelerating",
+                min_barrier,
+            )
+            return self._last_action.copy()
+
         if self._collision_barrier is not None:
             min_barrier = float(np.min(self._collision_barrier.compute_barrier(self._configuration)))
             if min_barrier <= 0.0:
@@ -521,7 +543,7 @@ class WheeledArmPico(Teleoperator):
                 self._reset_action_filter_from_q(self._configuration.q)
                 self._last_action = self._make_action(
                     self._configuration.q,
-                    self._active_arm_names(left_active, right_active),
+                    self._arm_names_from_mask(command_arm_mask),
                 )
                 self._update_visualization(
                     left_target_pose,
@@ -567,13 +589,13 @@ class WheeledArmPico(Teleoperator):
         self._configuration.integrate_inplace(velocity, self._dt)
         q_locked = self._configuration.q.copy()
         q_locked[self._locked_q_indices] = self._q_ref[self._locked_q_indices]
-        q_locked[self._arm_q_indices[~active_arm_mask]] = hold_arm_q[~active_arm_mask]
+        q_locked[self._arm_q_indices[~ik_arm_mask]] = hold_arm_q[~ik_arm_mask]
         self._configuration.update(q_locked)
-        self._apply_action_smoothing_to_configuration(active_arm_mask)
+        self._apply_action_smoothing_to_configuration(command_arm_mask)
 
         self._last_action = self._make_action(
             self._configuration.q,
-            self._active_arm_names(left_active, right_active),
+            self._arm_names_from_mask(command_arm_mask),
         )
         self._update_visualization(
             left_target_pose,
@@ -597,10 +619,19 @@ class WheeledArmPico(Teleoperator):
         release_threshold = self.config.activation_threshold - self.config.activation_hysteresis
         is_active = grip >= (release_threshold if was_active else self.config.activation_threshold)
 
+        if was_active and not is_active:
+            release_until_t = time.monotonic() + self.config.grip_release_deceleration_s
+        else:
+            release_until_t = 0.0
+
         if side == "left":
             self._left_active = is_active
+            if is_active or release_until_t > 0.0:
+                self._left_release_until_t = release_until_t
         else:
             self._right_active = is_active
+            if is_active or release_until_t > 0.0:
+                self._right_release_until_t = release_until_t
         return is_active
 
     def _make_action(self, q: np.ndarray, active_arms: set[str] | None = None) -> RobotAction:
@@ -642,6 +673,42 @@ class WheeledArmPico(Teleoperator):
             active_arms.add("right_arm")
         return active_arms
 
+    def _arm_names_from_mask(self, active_arm_mask: np.ndarray) -> set[str]:
+        active_arm_mask = np.asarray(active_arm_mask, dtype=bool)
+        active_arms = set()
+        if bool(np.any(active_arm_mask[:7])):
+            active_arms.add("left_arm")
+        if bool(np.any(active_arm_mask[7:14])):
+            active_arms.add("right_arm")
+        return active_arms
+
+    def _clear_release_deceleration(self) -> None:
+        self._left_release_until_t = 0.0
+        self._right_release_until_t = 0.0
+
+    def _release_deceleration_arm_mask(self, now: float) -> np.ndarray:
+        return self._active_arm_mask(
+            self._arm_is_release_decelerating("left", now),
+            self._arm_is_release_decelerating("right", now),
+        )
+
+    def _arm_is_release_decelerating(self, side: str, now: float) -> bool:
+        if side == "left":
+            if self._left_active or now > self._left_release_until_t:
+                return False
+            arm_slice = slice(0, 7)
+        elif side == "right":
+            if self._right_active or now > self._right_release_until_t:
+                return False
+            arm_slice = slice(7, 14)
+        else:
+            raise ValueError(f"Unknown arm side: {side}")
+
+        if self._previous_arm_step is None:
+            return False
+        previous_step = np.asarray(self._previous_arm_step, dtype=float)[arm_slice]
+        return bool(np.any(np.abs(previous_step) > self.config.grip_release_stop_step_rad))
+
     def _apply_action_smoothing_to_configuration(self, active_arm_mask: np.ndarray) -> None:
         assert self._configuration is not None
         assert self._arm_q_indices is not None
@@ -652,7 +719,8 @@ class WheeledArmPico(Teleoperator):
         active_arm_mask = np.asarray(active_arm_mask, dtype=bool)
         if active_arm_mask.shape != target_arm_q.shape:
             raise ValueError(
-                f"`active_arm_mask` shape {active_arm_mask.shape} does not match arm q shape {target_arm_q.shape}."
+                f"`active_arm_mask` shape {active_arm_mask.shape} does not match "
+                f"arm q shape {target_arm_q.shape}."
             )
         current_arm_q = (
             target_arm_q
