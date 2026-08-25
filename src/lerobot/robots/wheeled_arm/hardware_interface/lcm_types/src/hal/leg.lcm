@@ -1,0 +1,23 @@
+package hal.leg;
+
+/**
+ * @brief 整个腿部关节控制命令
+ */
+struct joint_command_t
+{
+
+    int64_t timestamp;    
+
+    hal.joint.single_joint_command_t joints[2];   
+}
+
+/**
+ * @brief 整个腿部关节状态数据
+ */
+struct joint_state_t
+{
+
+    int64_t timestamp;                
+    
+    hal.joint.single_joint_state_t joints[2];  
+}

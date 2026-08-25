@@ -1,0 +1,77 @@
+package hal.canfd;
+
+/**
+ * @brief 单个关节的控制命令
+ */
+struct single_canfd_joint_command_t
+{
+    // CAN节点
+    int16_t can_node;  
+    // 控制字，工作模式
+    int16_t operation_mode;
+    // 可选指令参数
+    int16_t cmd_args;
+    // 目标位置
+    float pos;     
+    // 目标速度
+    float vel;     
+    // 目标力矩
+    float toq;     
+    // 位置增益
+    float kp;      
+    // 速度增益
+    float kd;  
+    // 预留字段
+    int16_t reserved;
+}
+
+/**
+ * @brief 整个控制命令
+ */
+struct canfd_command_t
+{
+    // 时间戳（纳秒）
+    int64_t timestamp;
+    // 关节数量        
+    int32_t num_joints;          
+    // 所有关节的控制命令             
+    single_canfd_joint_command_t joints[num_joints];      
+}
+
+/**
+ * @brief 单个关节的状态
+ */
+struct single_canfd_joint_state_t
+{
+    // 当前关节状态
+    int16_t status_word;
+    // 可选状态参数
+    int16_t state_args;     
+    // 当前关节位置
+    float pos;      
+    // 当前速度
+    float vel;     
+    // 当前力矩
+    float toq;     
+    // 当前电流
+    float current;
+    // 可配置上传参数
+    float para_data;
+    // 错误码
+    int16_t err_code;
+    // 预留字段, 自身canid号, 0x00表示离线
+    int16_t reserved;
+}
+
+/**
+ * @brief 整个状态信息
+ */
+struct canfd_state_t
+{
+    // 时间戳（纳秒）
+    int64_t timestamp;
+    // 关节数量        
+    int32_t num_joints;                
+    // 所有关节状态          
+    single_canfd_joint_state_t joints[num_joints];                 
+}

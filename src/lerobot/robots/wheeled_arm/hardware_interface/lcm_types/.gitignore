@@ -1,0 +1,14 @@
+.idea/
+cheetahlcm
+c_lcm_files
+lcontrollerlcm
+interfacelcm
+java/
+simulatorlcm
+wincontrollerlcm
+file_list.txt
+cpp/*
+lcmtypes/*
+python/*
+lcm_python/*
+build/

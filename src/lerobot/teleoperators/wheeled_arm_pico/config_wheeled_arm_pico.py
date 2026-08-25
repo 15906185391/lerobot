@@ -14,9 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+
+from lerobot.robots.wheeled_arm.config_wheeled_arm import (
+    WHEELED_ARM_END_EFFECTOR_TYPES,
+    WheeledArmEndEffector,
+)
 
 from ..config import TeleoperatorConfig
 
@@ -48,6 +53,9 @@ def _validate_cost(name: str, value: float | Sequence[float], expected_len: int 
 class WheeledArmPicoConfig(TeleoperatorConfig):
     # 机器人 URDF 路径。默认使用 teleoperator assets 下的 real_robot.urdf。
     urdf_path: Path | None = None
+
+    # 与 robot.end_effector 保持一致：gripper 输出夹爪位置，suction 输出吸盘开关比例。
+    end_effector: WheeledArmEndEffector = "gripper"
 
     # PICO 手柄位移到末端目标位移的比例。调大更灵敏，调小更稳。
     scale: float = 1.0
@@ -122,12 +130,15 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     recording_stop_button: str = "X"
     # 复位 movej 执行期间按住该按钮会立即停止继续发布复位轨迹。
     emergency_stop_button: str = "X"
-    # trigger=0/1 分别映射到 open/closed；实物夹爪单位不同时改这两个值。
+    # gripper 模式：trigger=0/1 分别映射到 open/closed；实物夹爪单位不同时改这两个值。
     gripper_open_pos: float = 130.0
     gripper_closed_pos: float = 0.0
-    # 夹爪输入的死区，单位是归一化 trigger 比例 [0, 1]。小变化会被忽略。
+    # suction 模式：trigger 输出归一化比例，robot 侧按 suction.lcm 的 mode 编号切换吸取/释放。
+    suction_off_pos: float = 0.0
+    suction_on_pos: float = 1.0
+    # 末端输入的死区，单位是归一化 trigger 比例 [0, 1]。小变化会被忽略。
     gripper_input_deadband: float = 0.02
-    # 夹爪目标的 EMA 平滑系数。越小越稳但越慢。
+    # 末端目标的 EMA 平滑系数。越小越稳但越慢。
     gripper_position_smoothing_alpha: float = 0.35
 
     # 左右末端 FrameTask 权重。可传标量，也可传 3 维列表分别调 xyz / rpy 三轴。
@@ -164,6 +175,11 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
     rerun_robot_axis_length: float = 0.12
 
     def __post_init__(self) -> None:
+        if self.end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES:
+            raise ValueError(
+                f"`end_effector` must be one of {list(WHEELED_ARM_END_EFFECTOR_TYPES)}, "
+                f"got {self.end_effector!r}."
+            )
         _validate_non_negative("scale", self.scale)
         _validate_gain("activation_threshold", self.activation_threshold)
         _validate_non_negative("activation_hysteresis", self.activation_hysteresis)
@@ -195,6 +211,8 @@ class WheeledArmPicoConfig(TeleoperatorConfig):
             "self_collision_safe_displacement_gain", self.self_collision_safe_displacement_gain
         )
         _validate_non_negative("collision_warning_distance", self.collision_warning_distance)
+        _validate_gain("suction_off_pos", self.suction_off_pos)
+        _validate_gain("suction_on_pos", self.suction_on_pos)
         _validate_non_negative("gripper_input_deadband", self.gripper_input_deadband)
         _validate_gain("gripper_position_smoothing_alpha", self.gripper_position_smoothing_alpha)
         _validate_cost("position_cost", self.position_cost, expected_len=3)

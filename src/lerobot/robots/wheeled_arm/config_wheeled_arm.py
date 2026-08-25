@@ -15,11 +15,15 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from lerobot.cameras import CameraConfig
 from lerobot.cameras.lerobot_camera_ros2 import ROS2CameraConfig
 
 from ..config import RobotConfig
+
+WheeledArmEndEffector = Literal["gripper", "suction"]
+WHEELED_ARM_END_EFFECTOR_TYPES: tuple[WheeledArmEndEffector, ...] = ("gripper", "suction")
 
 WHEELED_ARM_ARM_JOINT_NAMES = [
     *(f"left_arm_{idx}" for idx in range(7)),
@@ -28,6 +32,10 @@ WHEELED_ARM_ARM_JOINT_NAMES = [
 WHEELED_ARM_GRIPPER_NAMES = [
     "left_gripper",
     "right_gripper",
+]
+WHEELED_ARM_SUCTION_NAMES = [
+    "left_suction",
+    "right_suction",
 ]
 WHEELED_ARM_JOINT_NAMES = [
     *WHEELED_ARM_ARM_JOINT_NAMES,
@@ -45,6 +53,41 @@ WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY = "__wheeled_arm_active_arms"
 
 
 WHEELED_ARM_DEFAULT_ROS2_CAMERA_TOPIC = "/camera/color/image_raw"
+
+
+def wheeled_arm_end_effector_names(end_effector: WheeledArmEndEffector) -> list[str]:
+    if end_effector == "gripper":
+        return WHEELED_ARM_GRIPPER_NAMES.copy()
+    if end_effector == "suction":
+        return WHEELED_ARM_SUCTION_NAMES.copy()
+    raise ValueError(
+        f"Unknown wheeled_arm end effector {end_effector!r}. "
+        f"Known end effectors are {list(WHEELED_ARM_END_EFFECTOR_TYPES)}."
+    )
+
+
+def wheeled_arm_joint_names(end_effector: WheeledArmEndEffector) -> list[str]:
+    return [*WHEELED_ARM_ARM_JOINT_NAMES, *wheeled_arm_end_effector_names(end_effector)]
+
+
+def wheeled_arm_parts(end_effector: WheeledArmEndEffector) -> tuple[str, ...]:
+    return ("left_arm", "right_arm", *wheeled_arm_end_effector_names(end_effector))
+
+
+def wheeled_arm_suction_operation_mode(
+    side: str,
+    active: bool,
+    *,
+    left_suction_operation_mode: int,
+    right_suction_operation_mode: int,
+    left_release_operation_mode: int,
+    right_release_operation_mode: int,
+) -> int:
+    if side == "left":
+        return left_suction_operation_mode if active else left_release_operation_mode
+    if side == "right":
+        return right_suction_operation_mode if active else right_release_operation_mode
+    raise ValueError(f"Unknown suction side: {side!r}")
 
 
 def wheeled_arm_cameras_config() -> dict[str, CameraConfig]:
@@ -65,6 +108,10 @@ def wheeled_arm_cameras_config() -> dict[str, CameraConfig]:
 @dataclass
 class WheeledArmConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(default_factory=wheeled_arm_cameras_config)
+
+    # Physical end effector mounted on the left/right wrists. This controls the
+    # final two data features and the Manipulation LCM command topics.
+    end_effector: WheeledArmEndEffector = "gripper"
 
     joint_names: list[str] = field(default_factory=lambda: WHEELED_ARM_JOINT_NAMES.copy())
 
@@ -122,8 +169,33 @@ class WheeledArmConfig(RobotConfig):
     # connected and only the robot body/LCM feedback should be simulated.
     mock_cameras: bool = False
 
+    # Suction command mapping aligned with `suction.lcm`.
+    # Legacy single-mode defaults are kept for backward compatibility.
+    suction_on_threshold: float = 0.5
+    suction_off_operation_mode: int = 0
+    suction_on_operation_mode: int = 1
+    suction_activation_threshold: float = 0.05
+    suction_left_suction_operation_mode: int = 11
+    suction_right_suction_operation_mode: int = 12
+    suction_left_release_operation_mode: int = 13
+    suction_right_release_operation_mode: int = 14
+    suction_max_vacuum_pct: float = 70.0
+    suction_detect_vacuum_pct: float = 60.0
+    suction_grip_timeout_100ms: float = 20.0
+
     def __post_init__(self) -> None:
         super().__post_init__()
+
+        if self.end_effector not in WHEELED_ARM_END_EFFECTOR_TYPES:
+            raise ValueError(
+                f"`end_effector` must be one of {list(WHEELED_ARM_END_EFFECTOR_TYPES)}, "
+                f"got {self.end_effector!r}."
+            )
+
+        if self.joint_names == WHEELED_ARM_JOINT_NAMES:
+            self.joint_names = wheeled_arm_joint_names(self.end_effector)
+        if self.controlled_parts == list(WHEELED_ARM_PARTS):
+            self.controlled_parts = list(wheeled_arm_parts(self.end_effector))
 
         if len(self.joint_names) != 16:
             raise ValueError(
@@ -134,11 +206,12 @@ class WheeledArmConfig(RobotConfig):
         if duplicate_names:
             raise ValueError(f"`joint_names` must be unique, got duplicates: {sorted(duplicate_names)}.")
 
-        unknown_parts = set(self.controlled_parts) - set(WHEELED_ARM_PARTS)
+        known_parts = set(wheeled_arm_parts(self.end_effector))
+        unknown_parts = set(self.controlled_parts) - known_parts
         if unknown_parts:
             raise ValueError(
                 f"`controlled_parts` contains unknown parts {sorted(unknown_parts)}. "
-                f"Known parts are {list(WHEELED_ARM_PARTS)}."
+                f"Known parts are {list(wheeled_arm_parts(self.end_effector))}."
             )
 
         if self.feedback_wait_timeout_s < 0:
@@ -158,3 +231,13 @@ class WheeledArmConfig(RobotConfig):
             )
         if self.action_watchdog_timeout_s is not None and self.action_watchdog_timeout_s <= 0:
             raise ValueError("`action_watchdog_timeout_s` must be positive or None.")
+        if not 0.0 <= self.suction_on_threshold <= 1.0:
+            raise ValueError("`suction_on_threshold` must be in [0, 1].")
+        if not 0.0 <= self.suction_activation_threshold <= 1.0:
+            raise ValueError("`suction_activation_threshold` must be in [0, 1].")
+        if not 0.0 <= self.suction_max_vacuum_pct <= 70.0:
+            raise ValueError("`suction_max_vacuum_pct` must be in [0, 70].")
+        if not -1.0 <= self.suction_detect_vacuum_pct <= 70.0:
+            raise ValueError("`suction_detect_vacuum_pct` must be -1 or in [0, 70].")
+        if self.suction_grip_timeout_100ms < -1.0:
+            raise ValueError("`suction_grip_timeout_100ms` must be >= -1.")

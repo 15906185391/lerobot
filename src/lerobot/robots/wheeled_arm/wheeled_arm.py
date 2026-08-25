@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _make_lcm_handler(lcm_url: str) -> LCMHandler:
+def _make_lcm_handler(config: WheeledArmConfig) -> LCMHandler:
     try:
         from .hardware_interface.lcm_handler import LCMHandler
     except ModuleNotFoundError as exc:
@@ -53,11 +53,23 @@ def _make_lcm_handler(lcm_url: str) -> LCMHandler:
         raise
 
     try:
-        return LCMHandler(lcm_url=lcm_url)
+        return LCMHandler(
+            lcm_url=config.lcm_url,
+            end_effector=config.end_effector,
+            suction_on_threshold=config.suction_on_threshold,
+            suction_activation_threshold=config.suction_activation_threshold,
+            suction_left_suction_operation_mode=config.suction_left_suction_operation_mode,
+            suction_right_suction_operation_mode=config.suction_right_suction_operation_mode,
+            suction_left_release_operation_mode=config.suction_left_release_operation_mode,
+            suction_right_release_operation_mode=config.suction_right_release_operation_mode,
+            suction_max_vacuum_pct=config.suction_max_vacuum_pct,
+            suction_detect_vacuum_pct=config.suction_detect_vacuum_pct,
+            suction_grip_timeout_100ms=config.suction_grip_timeout_100ms,
+        )
     except RuntimeError as exc:
         if "Couldn't create LCM" in str(exc):
             raise RuntimeError(
-                f"Could not create wheeled_arm LCM connection for URL '{lcm_url}'. "
+                f"Could not create wheeled_arm LCM connection for URL '{config.lcm_url}'. "
                 "Ensure Linux has a multicast route for LCM. For loopback-only testing, "
                 "run: `sudo ip link set lo multicast on` and "
                 "`sudo ip route add 224.0.0.0/4 dev lo`."
@@ -70,6 +82,8 @@ _PART_SLICES: dict[str, slice] = {
     "right_arm": slice(7, 14),
     "left_gripper": slice(14, 15),
     "right_gripper": slice(15, 16),
+    "left_suction": slice(14, 15),
+    "right_suction": slice(15, 16),
 }
 
 _PART_MOVING_FLAGS: dict[str, str] = {
@@ -77,6 +91,8 @@ _PART_MOVING_FLAGS: dict[str, str] = {
     "right_arm": "right_arm_moving",
     "left_gripper": "left_gripper_moving",
     "right_gripper": "right_gripper_moving",
+    "left_suction": "left_suction_moving",
+    "right_suction": "right_suction_moving",
     "head": "head_moving",
     "waist": "waist_moving",
     "leg": "leg_moving",
@@ -236,7 +252,7 @@ class WheeledArm(Robot):
             )
             return
 
-        self._handler = _make_lcm_handler(self.config.lcm_url)
+        self._handler = _make_lcm_handler(self.config)
         if not self.config.mock_cameras:
             for cam in self.cameras.values():
                 cam.connect()
@@ -246,10 +262,9 @@ class WheeledArm(Robot):
         if not self.wait_for_valid_feedback(wait_timeout_s):
             if self.config.require_fresh_feedback:
                 raise RuntimeError(
-                    "%s did not receive fresh left/right arm LCM state feedback while connecting. "
+                    f"{self} did not receive fresh left/right arm LCM state feedback while connecting. "
                     "为避免实物遥操作初始状态跳变，连接已中止。"
                     "请检查 LCM URL、组播路由和控制器状态发布程序。"
-                    % self
                 )
             logger.warning(
                 "%s has not received fresh left/right arm state feedback. "
@@ -346,24 +361,16 @@ class WheeledArm(Robot):
     def _set_movej_reset_flags(self) -> None:
         assert self._handler is not None
 
+        for flag_name in _PART_MOVING_FLAGS.values():
+            setattr(self._handler, flag_name, False)
         self._handler.left_arm_moving = True
         self._handler.right_arm_moving = True
-        self._handler.left_gripper_moving = False
-        self._handler.right_gripper_moving = False
-        self._handler.head_moving = False
-        self._handler.waist_moving = False
-        self._handler.leg_moving = False
 
     def _stop_all_moving_flags(self) -> None:
         assert self._handler is not None
 
-        self._handler.left_arm_moving = False
-        self._handler.right_arm_moving = False
-        self._handler.left_gripper_moving = False
-        self._handler.right_gripper_moving = False
-        self._handler.head_moving = False
-        self._handler.waist_moving = False
-        self._handler.leg_moving = False
+        for flag_name in _PART_MOVING_FLAGS.values():
+            setattr(self._handler, flag_name, False)
 
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:

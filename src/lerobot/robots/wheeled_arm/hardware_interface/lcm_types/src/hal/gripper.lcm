@@ -1,0 +1,50 @@
+package hal.gripper;
+
+/**
+ * @brief 单个夹爪关节的控制命令
+ */
+struct single_gripper_joint_command_t
+{
+    // 控制字,工作模式
+    int16_t operation_mode; 
+    // 期望位置
+    float pos[1];           
+}
+/**
+ * @brief 单个夹爪关节的状态
+ */
+struct single_gripper_joint_state_t
+{
+    // 状态字
+    int16_t status_word;   
+    // 实际位置
+    float pos[1];   
+    // 实际力矩
+    float toq[1];     
+    // 实际电流
+    float cur[1];     
+    // 错误码
+    int16_t error_code; 
+}
+/**
+ * @brief 整个夹爪控制命令  左0右1
+ */
+struct gripper_command_t
+{
+    // 时间戳（纳秒）
+    int64_t timestamp;          
+    // 所有手部关节的控制命令             
+    single_gripper_joint_command_t cmd;      
+}
+
+
+/**
+ * @brief 整个夹爪状态信息 左0右1
+ */
+struct gripper_state_t
+{
+    // 时间戳（纳秒）
+    int64_t timestamp;                
+    // 所有手部关节状态          
+    single_gripper_joint_state_t state;                 
+}

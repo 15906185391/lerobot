@@ -1,0 +1,23 @@
+package manipulation.head;
+
+/**
+ * @brief 整个头部关节控制数据
+ */
+struct joint_command_t
+{
+
+    int64_t timestamp;    
+
+    manipulation.joint.single_joint_command_t joints[2];   
+}
+
+/**
+ * @brief 整个头部关节状态数据
+ */
+struct joint_state_t
+{
+
+    int64_t timestamp;                
+    
+    manipulation.joint.single_joint_state_t joints[2];  
+}

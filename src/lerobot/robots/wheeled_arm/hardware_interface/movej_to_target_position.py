@@ -15,6 +15,10 @@ if __name__ == "__main__":
     robot.lcm_handler.leg_moving = 1
     robot.lcm_handler.left_gripper_moving = 0
     robot.lcm_handler.right_gripper_moving = 0
+    if hasattr(robot.lcm_handler, "left_suction_moving"):
+        robot.lcm_handler.left_suction_moving = 0
+    if hasattr(robot.lcm_handler, "right_suction_moving"):
+        robot.lcm_handler.right_suction_moving = 0
     # movej_plan_target_position_list: movej模式下的目标位置列表
     # 左臂(7) + 右臂(7) + 左手(1) + 右手(1) + 头(2) + 腰(3) + 腿(2) = 23
     robot.movej_plan_target_position_list  =  [

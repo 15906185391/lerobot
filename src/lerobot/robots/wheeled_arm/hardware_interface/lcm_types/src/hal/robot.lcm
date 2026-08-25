@@ -1,0 +1,28 @@
+package hal.robot;
+
+/**
+ * @brief 通用机器人信息
+ */
+struct robot_info_t
+{
+    // 时间戳（纳秒）
+    int64_t timestamp_ns;
+    // 厂家名称 (e.g. "Rokae", "UR", "ABB")
+    string vendor;
+    // 机器人 ID
+    string robot_id;
+    // 机型名称
+    string robot_type;
+    // 控制器版本
+    string controller_version;
+    // 关节数
+    int32_t joint_num;
+    // 上电状态: 0=off, 1=on, 2=estop, 3=gstop
+    int16_t power_state;
+    // 操作模式: 0=manual, 1=automatic
+    int16_t operate_mode;
+    // 运行状态: 0=idle, 2=rtControlling, 9=moving
+    int16_t operation_state;
+    // 是否已连接
+    int8_t connected;
+}

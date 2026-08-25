@@ -27,6 +27,7 @@ from lerobot.robots.wheeled_arm.config_wheeled_arm import (
     WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY,
     WHEELED_ARM_DEFAULT_ROS2_CAMERA_TOPIC,
     wheeled_arm_cameras_config,
+    wheeled_arm_suction_operation_mode,
 )
 
 
@@ -48,6 +49,8 @@ class FakeLCMHandler:
             "right_arm_moving",
             "left_gripper_moving",
             "right_gripper_moving",
+            "left_suction_moving",
+            "right_suction_moving",
             "head_moving",
             "waist_moving",
             "leg_moving",
@@ -115,6 +118,54 @@ def test_wheeled_arm_config_is_registered():
         WheeledArmConfig(cameras={}, connect_timeout_s=0)), WheeledArm)
 
 
+
+
+def test_wheeled_arm_suction_operation_mode_maps_left_and_right_channels():
+    assert (
+        wheeled_arm_suction_operation_mode(
+            "left",
+            True,
+            left_suction_operation_mode=11,
+            right_suction_operation_mode=12,
+            left_release_operation_mode=13,
+            right_release_operation_mode=14,
+        )
+        == 11
+    )
+    assert (
+        wheeled_arm_suction_operation_mode(
+            "left",
+            False,
+            left_suction_operation_mode=11,
+            right_suction_operation_mode=12,
+            left_release_operation_mode=13,
+            right_release_operation_mode=14,
+        )
+        == 13
+    )
+    assert (
+        wheeled_arm_suction_operation_mode(
+            "right",
+            True,
+            left_suction_operation_mode=11,
+            right_suction_operation_mode=12,
+            left_release_operation_mode=13,
+            right_release_operation_mode=14,
+        )
+        == 12
+    )
+    assert (
+        wheeled_arm_suction_operation_mode(
+            "right",
+            False,
+            left_suction_operation_mode=11,
+            right_suction_operation_mode=12,
+            left_release_operation_mode=13,
+            right_release_operation_mode=14,
+        )
+        == 14
+    )
+
 def test_default_camera_config_uses_ros2_camera():
     cameras = wheeled_arm_cameras_config()
 
@@ -139,6 +190,17 @@ def test_get_observation_reads_left_and_right_arm_joint_positions():
     assert obs["right_arm_6.pos"] == 13.0
     assert obs["left_gripper.pos"] == 14.0
     assert obs["right_gripper.pos"] == 15.0
+
+
+def test_suction_end_effector_switches_joint_names_and_parts():
+    cfg = WheeledArmConfig(cameras={}, end_effector="suction", connect_timeout_s=0)
+    robot = WheeledArm(cfg)
+
+    assert cfg.joint_names[-2:] == ["left_suction", "right_suction"]
+    assert cfg.controlled_parts[-2:] == ["left_suction", "right_suction"]
+    assert "left_suction.pos" in robot.action_features
+    assert "right_suction.pos" in robot.observation_features
+    assert "left_gripper.pos" not in robot.action_features
 
 
 def test_has_valid_feedback_reflects_lcm_arm_state_availability():
@@ -371,6 +433,20 @@ def test_send_action_publishes_23_dim_package_for_arm_joints_only():
     assert handler.head_moving is False
     assert handler.waist_moving is False
     assert handler.leg_moving is False
+
+
+def test_send_action_publishes_suction_end_effector_flags():
+    robot, handler = _make_robot(end_effector="suction")
+
+    returned = robot.send_action({"left_suction.pos": 1.0, "right_suction.pos": 0.0})
+
+    assert returned == {"left_suction.pos": 1.0, "right_suction.pos": 0.0}
+    assert handler.last_package[14] == 1.0
+    assert handler.last_package[15] == 0.0
+    assert handler.left_suction_moving is True
+    assert handler.right_suction_moving is True
+    assert handler.left_gripper_moving is False
+    assert handler.right_gripper_moving is False
 
 
 def test_send_action_respects_pico_active_arm_metadata():

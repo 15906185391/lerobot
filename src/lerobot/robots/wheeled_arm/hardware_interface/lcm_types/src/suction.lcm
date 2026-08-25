@@ -1,0 +1,80 @@
+package manipulation.suction;
+
+/**
+ * @brief 电动吸盘控制命令 (钧舵 EVS08, RS-485 Modbus RTU)
+ *
+ * 控制模式 operation_mode:
+ *   0 = 空闲 (无操作)
+ *   1 = 初始化 (使能 rACT + 写高级模式参数)
+ *   2 = 吸取 (双通道联动; vacuum_pct/detect_vacuum_pct/grip_timeout_100ms 可覆盖配置)
+ *   3 = 释放 (双通道联动, 破真空)
+ *   4 = 停止 (真空发生器停, 阀门保持工件位置)
+ *   5 = 使能 (rACT=1)
+ *   6 = 停止并清故障 (rACT=0)
+ *
+ * EVS08 为双通道控制器 (四吸嘴 2+2 分接 CH1/CH2), 消息结构不变, 枚举扩展单通道控制:
+ *   11 = 仅 CH1 吸取   12 = 仅 CH2 吸取
+ *   13 = 仅 CH1 释放   14 = 仅 CH2 释放
+ *
+ * 真空度换算: 寄存器值 = 100 - 真空度%, 最大 70%
+ * 协议详见《JODELL 钧舵 EVS08 系列电动吸盘通用详细说明书 V1.1》第 6/7 章
+ */
+struct suction_command_t
+{
+    // 时间戳（纳秒）
+    int64_t timestamp;
+    // 控制模式 (见上)
+    int16_t operation_mode;
+    // 目标真空度 % (0~70, operation_mode=2 时有效; <=0 用配置默认值)
+    float vacuum_pct;
+    // 检测工件最小真空度 % (operation_mode=2 时有效; -1 用配置默认值, 0=无最低检测)
+    float detect_vacuum_pct;
+    // 抓取超时 (100ms/单位, operation_mode=2 时有效; -1 用配置默认值, 0=不检测超时)
+    float grip_timeout_100ms;
+}
+
+/**
+ * @brief 电动吸盘状态
+ *
+ * 状态字 status_word (每通道一份):
+ *   bit0 = 使能 (gACT)
+ *   bit1 = 调节真空度中 (gGTO)
+ *   bit2 = 工件已吸住 (仅 gOBJ=01/10; gOBJ=11 丢失/脱落不算, gGTO=0 时 gOBJ 无效)
+ *   bit3 = 存在故障 (fault_code != 0)
+ *
+ * comm_ok = 1 表示本次读取成功; 0 表示 485 通信失败/设备离线,
+ * 此时其余字段为最后有效值 (冻结), 上层应据此判定设备状态不可信。
+ *
+ * EVS08 为双通道控制器 (四吸嘴 2+2 分接 CH1/CH2), channels 数组固定 2 个:
+ *   channels[0] = CH1 状态/压差, channels[1] = CH2 状态/压差
+ * 温度/母线电压/故障为设备级字段, 不随通道复制。
+ *
+ * 故障位 fault_code (EVS08 说明书 §6.3.2, 低 9 位):
+ *   0x001 CH1 吸取超时(红灯慢闪)  0x002 CH2 吸取超时
+ *   0x004 通讯丢失(蓝灯慢闪)      0x008 CH1 掉落(蓝灯快闪)  0x010 CH2 掉落
+ *   0x020 电压故障(红灯快闪)      0x040 电压告警(红蓝交替)  0x080 过温≥85℃(红灯常亮)
+ *   0x100 产品自身故障
+ */
+struct suction_channel_state_t
+{
+    // 状态字 (位定义见上)
+    int16_t status_word;
+    // 实际压差 KPa (负=真空, 正=正压; Pdiff = gPO - 100)
+    float pressure_diff_kpa;
+}
+
+struct suction_state_t
+{
+    // 时间戳（纳秒）
+    int64_t timestamp;
+    // 通道状态 (固定 2 个: [0]=CH1, [1]=CH2; 单通道设备 channels[1] 保持 0)
+    suction_channel_state_t channels[2];
+    // 板上温度 ℃
+    float temperature_c;
+    // 母线电压 V
+    float bus_voltage_v;
+    // 故障寄存器低 9 位 (见上)
+    int16_t fault_code;
+    // 通信在线位 (1=正常, 0=读取失败/设备离线, 其余字段冻结)
+    int8_t comm_ok;
+}

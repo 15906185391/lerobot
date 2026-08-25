@@ -1,0 +1,33 @@
+package manipulation.joint;
+
+/**
+ * @brief 单个关节的控制命令
+ */
+struct single_joint_command_t
+{
+    // 目标位置
+    float pos;     
+    // 目标速度  
+    float vel;       
+}
+
+/**
+ * @brief 单个关节的状态
+ */
+struct single_joint_state_t
+{
+    // 当前关节状态
+    int16_t status_word;  
+    // 当前关节位置, 高编
+    float posH;     
+    // 当前关节位置，低编
+    float posL;     
+    // 当前速度
+    float vel;     
+    // 当前力矩
+    float toq;     
+    // 当前电流
+    float current;     
+    // 错误码
+    int16_t err_code; 
+}

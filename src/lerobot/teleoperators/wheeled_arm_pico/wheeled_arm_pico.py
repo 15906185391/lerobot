@@ -26,8 +26,8 @@ from lerobot.lerobot_types import RobotAction
 from lerobot.robots.wheeled_arm.config_wheeled_arm import (
     WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY,
     WHEELED_ARM_ARM_JOINT_NAMES,
-    WHEELED_ARM_GRIPPER_NAMES,
-    WHEELED_ARM_JOINT_NAMES,
+    wheeled_arm_end_effector_names,
+    wheeled_arm_joint_names,
 )
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
@@ -68,8 +68,9 @@ class WheeledArmPico(Teleoperator):
         super().__init__(config)
         self.config = config
         self.arm_joint_names = WHEELED_ARM_ARM_JOINT_NAMES.copy()
-        self.gripper_names = WHEELED_ARM_GRIPPER_NAMES.copy()
-        self.joint_names = WHEELED_ARM_JOINT_NAMES.copy()
+        self.end_effector_names = wheeled_arm_end_effector_names(self.config.end_effector)
+        self.gripper_names = self.end_effector_names
+        self.joint_names = wheeled_arm_joint_names(self.config.end_effector)
 
         self._connected = False
         self._deps = None
@@ -111,7 +112,7 @@ class WheeledArmPico(Teleoperator):
         self._last_reset_button = False
         self._last_recording_control_buttons: dict[str, bool] = {}
         self._gripper_positions = {
-            f"{name}.pos": self.config.gripper_open_pos for name in self.gripper_names
+            f"{name}.pos": self._end_effector_initial_pos() for name in self.gripper_names
         }
         self._filtered_gripper_positions = self._gripper_positions.copy()
         self._last_action = dict.fromkeys(self.action_features, 0.0)
@@ -598,6 +599,21 @@ class WheeledArmPico(Teleoperator):
         action[WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY] = tuple(sorted(active_arms or set()))
         return action
 
+    def _end_effector_initial_pos(self) -> float:
+        if self.config.end_effector == "suction":
+            return self.config.suction_off_pos
+        return self.config.gripper_open_pos
+
+    def _end_effector_target_pos(self, ratio: float) -> float:
+        ratio = float(np.clip(ratio, 0.0, 1.0))
+        if self.config.end_effector == "suction":
+            return self.config.suction_off_pos + ratio * (
+                self.config.suction_on_pos - self.config.suction_off_pos
+            )
+        return self.config.gripper_open_pos + ratio * (
+            self.config.gripper_closed_pos - self.config.gripper_open_pos
+        )
+
     def _reset_action_filter_from_q(self, q: np.ndarray) -> None:
         assert self._arm_q_indices is not None
         self._filtered_arm_q = np.asarray(q[self._arm_q_indices], dtype=float).copy()
@@ -664,17 +680,13 @@ class WheeledArmPico(Teleoperator):
         self, left_value: float | None, right_value: float | None
     ) -> None:
         values = {
-            "left_gripper.pos": left_value,
-            "right_gripper.pos": right_value,
+            f"{self.gripper_names[0]}.pos": left_value,
+            f"{self.gripper_names[1]}.pos": right_value,
         }
         for key, raw_value in values.items():
             if raw_value is None:
                 continue
-            ratio = float(np.clip(raw_value, 0.0, 1.0))
-            target_pos = (
-                self.config.gripper_open_pos
-                + ratio * (self.config.gripper_closed_pos - self.config.gripper_open_pos)
-            )
+            target_pos = self._end_effector_target_pos(float(raw_value))
             current_pos = self._filtered_gripper_positions[key]
             if abs(target_pos - current_pos) <= self.config.gripper_input_deadband:
                 filtered_pos = current_pos

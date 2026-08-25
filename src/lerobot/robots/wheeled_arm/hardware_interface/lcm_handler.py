@@ -17,18 +17,34 @@ sys.path.insert(0, CURRENT_DIR)
 sys.path.insert(0, os.path.join(CURRENT_DIR, "lcm_data_structure"))
 
 from manipulation.arm.joint_command_t import joint_command_t as arm_joint_command_t
-from manipulation.head.joint_command_t import joint_command_t as head_joint_command_t
-from manipulation.waist.joint_command_t import joint_command_t as waist_joint_command_t
 from manipulation.gripper.gripper_command_t import gripper_command_t
 from manipulation.gripper.single_gripper_joint_command_t import single_gripper_joint_command_t
-from manipulation.leg.joint_command_t import joint_command_t as leg_joint_command_t
+from manipulation.head.joint_command_t import joint_command_t as head_joint_command_t
 from manipulation.joint.single_joint_command_t import single_joint_command_t
+from manipulation.leg.joint_command_t import joint_command_t as leg_joint_command_t
+from manipulation.suction.suction_command_t import suction_command_t
+from manipulation.waist.joint_command_t import joint_command_t as waist_joint_command_t
+
+from ..config_wheeled_arm import wheeled_arm_suction_operation_mode
 
 logger = logging.getLogger(__name__)
 
 
 class LCMHandler:
-    def __init__(self, lcm_url: str = "udpm://239.255.76.67:8880?ttl=1"):
+    def __init__(
+        self,
+        lcm_url: str = "udpm://239.255.76.67:8880?ttl=1",
+        end_effector: str = "gripper",
+        suction_on_threshold: float = 0.5,
+        suction_activation_threshold: float = 0.05,
+        suction_left_suction_operation_mode: int = 11,
+        suction_right_suction_operation_mode: int = 12,
+        suction_left_release_operation_mode: int = 13,
+        suction_right_release_operation_mode: int = 14,
+        suction_max_vacuum_pct: float = 70.0,
+        suction_detect_vacuum_pct: float = 60.0,
+        suction_grip_timeout_100ms: float = 20.0,
+    ):
         self.dim = 23
         self.joint_current_pos = np.zeros(23)
         self.joint_current_speed = np.zeros(23)
@@ -39,6 +55,18 @@ class LCMHandler:
         self.motion_mode = 0
         self.com_mode = 1
         self.num_joints = 16
+        if end_effector not in {"gripper", "suction"}:
+            raise ValueError(f"Unknown end_effector: {end_effector!r}")
+        self.end_effector = end_effector
+        self.suction_on_threshold = suction_on_threshold
+        self.suction_activation_threshold = suction_activation_threshold
+        self.suction_left_suction_operation_mode = suction_left_suction_operation_mode
+        self.suction_right_suction_operation_mode = suction_right_suction_operation_mode
+        self.suction_left_release_operation_mode = suction_left_release_operation_mode
+        self.suction_right_release_operation_mode = suction_right_release_operation_mode
+        self.suction_max_vacuum_pct = suction_max_vacuum_pct
+        self.suction_detect_vacuum_pct = suction_detect_vacuum_pct
+        self.suction_grip_timeout_100ms = suction_grip_timeout_100ms
 
         self.left_arm_FT_original = [0.0 for _ in range(6)]
         self.right_arm_FT_original = [0.0 for _ in range(6)]
@@ -50,6 +78,8 @@ class LCMHandler:
         self.leg_moving = False
         self.left_gripper_moving = False
         self.right_gripper_moving = False
+        self.left_suction_moving = False
+        self.right_suction_moving = False
 
         self.interpolation_period = 2
         self._stop_event = threading.Event()
@@ -71,8 +101,13 @@ class LCMHandler:
         self.manip_lcm.subscribe('MANIP_HEAD_STATE', self.manip_head_state_listener)
         self.manip_lcm.subscribe('MANIP_WAIST_STATE', self.manip_waist_state_listener)
         self.manip_lcm.subscribe('MANIP_LEG_STATE', self.manip_leg_state_listener)
-        self.manip_lcm.subscribe('MANIP_LEFT_GRIPPER_STATE', self.manip_left_gripper_state_listener)
-        self.manip_lcm.subscribe('MANIP_RIGHT_GRIPPER_STATE', self.manip_right_gripper_state_listener)
+        if self.end_effector == 'gripper':
+            self.manip_lcm.subscribe('MANIP_LEFT_GRIPPER_STATE', self.manip_left_gripper_state_listener)
+            self.manip_lcm.subscribe('MANIP_RIGHT_GRIPPER_STATE', self.manip_right_gripper_state_listener)
+        else:
+            self.manip_lcm.subscribe('MANIP_SUCTION_STATE', self.manip_suction_state_listener)
+            self.manip_lcm.subscribe('MANIP_LEFT_SUCTION_STATE', self.manip_left_suction_state_listener)
+            self.manip_lcm.subscribe('MANIP_RIGHT_SUCTION_STATE', self.manip_right_suction_state_listener)
         self.manip_lcm.subscribe('MANIP_ROBOT_INFO', self.manip_robot_info_listener)
 
         # 启动 Manipulation LCM 处理线程
@@ -140,7 +175,7 @@ class LCMHandler:
             from manipulation.gripper.gripper_state_t import gripper_state_t
             msg = gripper_state_t.decode(data)
             with self.joint_current_pos_lock:
-                self.joint_current_pos[14] = msg.pos[0]
+                self.joint_current_pos[14] = self._gripper_state_pos(msg)
         except Exception as exc:
             logger.debug("Failed to decode left gripper state: %s", exc)
 
@@ -149,9 +184,48 @@ class LCMHandler:
             from manipulation.gripper.gripper_state_t import gripper_state_t
             msg = gripper_state_t.decode(data)
             with self.joint_current_pos_lock:
-                self.joint_current_pos[15] = msg.pos[0]
+                self.joint_current_pos[15] = self._gripper_state_pos(msg)
         except Exception as exc:
             logger.debug("Failed to decode right gripper state: %s", exc)
+
+    def _gripper_state_pos(self, msg) -> float:
+        state = getattr(msg, "state", msg)
+        return float(state.pos[0])
+
+    def manip_suction_state_listener(self, channel, data):
+        try:
+            from manipulation.suction.suction_state_t import suction_state_t
+            msg = suction_state_t.decode(data)
+            with self.joint_current_pos_lock:
+                self.joint_current_pos[14] = self._suction_state_value(msg, 0)
+                self.joint_current_pos[15] = self._suction_state_value(msg, 1)
+        except Exception as exc:
+            logger.debug("Failed to decode suction state: %s", exc)
+
+    def manip_left_suction_state_listener(self, channel, data):
+        try:
+            from manipulation.suction.suction_state_t import suction_state_t
+            msg = suction_state_t.decode(data)
+            with self.joint_current_pos_lock:
+                self.joint_current_pos[14] = self._suction_state_value(msg, 0)
+        except Exception as exc:
+            logger.debug("Failed to decode left suction state: %s", exc)
+
+    def manip_right_suction_state_listener(self, channel, data):
+        try:
+            from manipulation.suction.suction_state_t import suction_state_t
+            msg = suction_state_t.decode(data)
+            with self.joint_current_pos_lock:
+                self.joint_current_pos[15] = self._suction_state_value(msg, 0)
+        except Exception as exc:
+            logger.debug("Failed to decode right suction state: %s", exc)
+
+    def _suction_state_value(self, msg, channel_index: int) -> float:
+        channels = list(getattr(msg, "channels", []))
+        if not channels:
+            return 0.0
+        channel = channels[min(channel_index, len(channels) - 1)]
+        return float(getattr(channel, "pressure_diff_kpa", 0.0))
 
     def manip_head_state_listener(self, channel, data):
         try:
@@ -203,6 +277,25 @@ class LCMHandler:
     def manip_robot_info_listener(self, channel, data):
         pass
 
+
+    def _make_suction_command(self, ts: int, side: str, value: float) -> suction_command_t:
+        ratio = float(np.clip(value, 0.0, 1.0))
+        active = ratio >= self.suction_activation_threshold
+        msg = suction_command_t()
+        msg.timestamp = ts
+        msg.operation_mode = wheeled_arm_suction_operation_mode(
+            side,
+            active,
+            left_suction_operation_mode=self.suction_left_suction_operation_mode,
+            right_suction_operation_mode=self.suction_right_suction_operation_mode,
+            left_release_operation_mode=self.suction_left_release_operation_mode,
+            right_release_operation_mode=self.suction_right_release_operation_mode,
+        )
+        msg.vacuum_pct = min(self.suction_max_vacuum_pct, self.suction_max_vacuum_pct * ratio) if active else 0.0
+        msg.detect_vacuum_pct = self.suction_detect_vacuum_pct
+        msg.grip_timeout_100ms = self.suction_grip_timeout_100ms
+        return msg
+
     # ==================== 发布接口 ====================
 
     def upper_body_data_publisher(self, package):
@@ -242,21 +335,32 @@ class LCMHandler:
                 right_arm_msg.joints[i].vel = 0.0
             self.manip_lcm.publish('MANIP_RIGHT_ARM_CMD', right_arm_msg.encode())
 
-        # --- 左夹爪 ---
-        if self.left_gripper_moving:
-            left_gripper_msg = gripper_command_t()
-            left_gripper_msg.timestamp = ts
-            left_gripper_msg.cmd = single_gripper_joint_command_t()
-            left_gripper_msg.cmd.pos = [float(package[14])]
-            self.manip_lcm.publish('MANIP_LEFT_GRIPPER_CMD', left_gripper_msg.encode())
+        if self.end_effector == 'gripper':
+            # --- 左夹爪 ---
+            if self.left_gripper_moving:
+                left_gripper_msg = gripper_command_t()
+                left_gripper_msg.timestamp = ts
+                left_gripper_msg.cmd = single_gripper_joint_command_t()
+                left_gripper_msg.cmd.pos = [float(package[14])]
+                self.manip_lcm.publish('MANIP_LEFT_GRIPPER_CMD', left_gripper_msg.encode())
 
-        # --- 右夹爪 ---
-        if self.right_gripper_moving:
-            right_gripper_msg = gripper_command_t()
-            right_gripper_msg.timestamp = ts
-            right_gripper_msg.cmd = single_gripper_joint_command_t()
-            right_gripper_msg.cmd.pos = [float(package[15])]
-            self.manip_lcm.publish('MANIP_RIGHT_GRIPPER_CMD', right_gripper_msg.encode())
+            # --- 右夹爪 ---
+            if self.right_gripper_moving:
+                right_gripper_msg = gripper_command_t()
+                right_gripper_msg.timestamp = ts
+                right_gripper_msg.cmd = single_gripper_joint_command_t()
+                right_gripper_msg.cmd.pos = [float(package[15])]
+                self.manip_lcm.publish('MANIP_RIGHT_GRIPPER_CMD', right_gripper_msg.encode())
+        else:
+            # --- 左吸盘 ---
+            if self.left_suction_moving:
+                left_suction_msg = self._make_suction_command(ts, "left", float(package[14]))
+                self.manip_lcm.publish('MANIP_LEFT_SUCTION_CMD', left_suction_msg.encode())
+
+            # --- 右吸盘 ---
+            if self.right_suction_moving:
+                right_suction_msg = self._make_suction_command(ts, "right", float(package[15]))
+                self.manip_lcm.publish('MANIP_RIGHT_SUCTION_CMD', right_suction_msg.encode())
 
         # --- 头部 (2 joints) ---
         if self.head_moving:

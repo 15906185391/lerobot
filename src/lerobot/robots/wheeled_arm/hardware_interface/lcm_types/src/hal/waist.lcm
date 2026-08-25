@@ -1,0 +1,23 @@
+package hal.waist;
+
+/**
+ * @brief 整个腰部关节控制命令
+ */
+struct joint_command_t
+{
+    // 时间戳（纳秒）
+    int64_t timestamp;    
+    // 多个关节的状态集合，关节顺序：腰部3关节               
+    hal.joint.single_joint_command_t joints[3];   
+}
+
+/**
+ * @brief 整个腰部关节状态数据
+ */
+struct joint_state_t
+{
+    // 时间戳（纳秒）
+    int64_t timestamp;                
+    // 多个关节的状态集合，关节顺序：腰部3关节
+    hal.joint.single_joint_state_t joints[3];  
+}

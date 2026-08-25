@@ -37,10 +37,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", default=8082, type=int)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--urdf-path", type=Path, default=None)
+    parser.add_argument("--end-effector", choices=("gripper", "suction"), default="gripper")
     parser.add_argument("--scale", default=1.0, type=float)
     parser.add_argument("--activation-threshold", default=0.9, type=float)
     parser.add_argument("--gripper-open-pos", default=0.0, type=float)
     parser.add_argument("--gripper-closed-pos", default=1.0, type=float)
+    parser.add_argument("--suction-off-pos", default=0.0, type=float)
+    parser.add_argument("--suction-on-pos", default=1.0, type=float)
     parser.add_argument("--gripper-input-deadband", default=0.02, type=float)
     parser.add_argument("--gripper-position-smoothing-alpha", default=0.35, type=float)
     parser.add_argument("--position-only", action="store_true")
@@ -59,10 +62,13 @@ def main() -> None:
     args = parse_args()
     cfg = WheeledArmPicoConfig(
         urdf_path=args.urdf_path,
+        end_effector=args.end_effector,
         scale=args.scale,
         activation_threshold=args.activation_threshold,
         gripper_open_pos=args.gripper_open_pos,
         gripper_closed_pos=args.gripper_closed_pos,
+        suction_off_pos=args.suction_off_pos,
+        suction_on_pos=args.suction_on_pos,
         gripper_input_deadband=args.gripper_input_deadband,
         gripper_position_smoothing_alpha=args.gripper_position_smoothing_alpha,
         position_only=args.position_only,
@@ -81,7 +87,7 @@ def main() -> None:
     teleop.connect()
     print(f"Open http://localhost:{args.port}")
     print("PICO control: hold left/right grip to move each arm; press Y to reset baseline.")
-    print("Use left/right trigger to control the left/right gripper.")
+    print(f"Use left/right trigger to control the left/right {args.end_effector}.")
     if args.mock_xr:
         print("Mock XR is enabled, so the simulated controllers will move without a PICO device.")
 
@@ -96,10 +102,11 @@ def main() -> None:
             if now - last_print_t >= 1.0:
                 left = [action[f"left_arm_{idx}.pos"] for idx in range(7)]
                 right = [action[f"right_arm_{idx}.pos"] for idx in range(7)]
-                grippers = [action["left_gripper.pos"], action["right_gripper.pos"]]
+                end_effector_keys = [f"{name}.pos" for name in teleop.gripper_names]
+                end_effectors = [action[key] for key in end_effector_keys]
                 print(f"left={left!r}")
                 print(f"right={right!r}")
-                print(f"grippers={grippers!r}")
+                print(f"{args.end_effector}s={end_effectors!r}")
                 last_print_t = now
             time.sleep(max(0.0, period_s - (time.perf_counter() - loop_t)))
     except KeyboardInterrupt:

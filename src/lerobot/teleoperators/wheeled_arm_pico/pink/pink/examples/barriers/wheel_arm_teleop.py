@@ -293,6 +293,10 @@ def create_hardware_interface():
     handler.leg_moving = False
     handler.left_gripper_moving = False
     handler.right_gripper_moving = False
+    if hasattr(handler, "left_suction_moving"):
+        handler.left_suction_moving = False
+    if hasattr(handler, "right_suction_moving"):
+        handler.right_suction_moving = False
     return handler
 
 

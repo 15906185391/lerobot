@@ -1,0 +1,24 @@
+package manipulation.arm;
+
+
+/**
+ * @brief 单个手臂关节控制命令
+ */
+struct joint_command_t
+{
+    // 时间戳（纳秒）
+    int64_t timestamp;
+    // 多个关节的状态集合，关节顺序：手臂7关节             
+    manipulation.joint.single_joint_command_t joints[7];   
+}
+
+/**
+ * @brief 单个手臂臂关节状态数据
+ */
+struct joint_state_t
+{
+    // 时间戳（纳秒）
+    int64_t timestamp;                
+    // 多个关节的状态集合，关节顺序：手臂7关节
+    manipulation.joint.single_joint_state_t joints[7];  
+}

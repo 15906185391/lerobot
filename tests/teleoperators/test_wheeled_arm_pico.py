@@ -68,6 +68,9 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
         rerun_robot_update_hz=5.0,
         rerun_robot_prefix="ik_robot",
         rerun_robot_axis_length=0.2,
+        end_effector="suction",
+        suction_off_pos=0.1,
+        suction_on_pos=0.9,
     )
 
     assert cfg.position_cost == [5.0, 4.0, 3.0]
@@ -99,6 +102,9 @@ def test_wheeled_arm_pico_config_exposes_ik_parameters():
     assert cfg.rerun_robot_update_hz == 5.0
     assert cfg.rerun_robot_prefix == "ik_robot"
     assert cfg.rerun_robot_axis_length == 0.2
+    assert cfg.end_effector == "suction"
+    assert cfg.suction_off_pos == 0.1
+    assert cfg.suction_on_pos == 0.9
 
 
 def test_action_features_match_wheeled_arm_arm_and_gripper_joints():
@@ -110,6 +116,13 @@ def test_action_features_match_wheeled_arm_arm_and_gripper_joints():
         "left_gripper.pos",
         "right_gripper.pos",
     ]
+
+
+def test_action_features_can_switch_to_suction_end_effector():
+    teleop = WheeledArmPico(WheeledArmPicoConfig(end_effector="suction"))
+
+    assert list(teleop.action_features)[-2:] == ["left_suction.pos", "right_suction.pos"]
+    assert "left_gripper.pos" not in teleop.action_features
 
 
 def test_relative_teleop_target_uses_reference_end_effector_baseline():
@@ -366,6 +379,19 @@ def test_make_action_marks_only_active_arms_without_changing_action_features():
     assert "right_arm_6.pos" in action
     assert "left_gripper.pos" in action
     assert "right_gripper.pos" in action
+
+
+def test_make_action_uses_suction_feature_names_when_configured():
+    teleop = WheeledArmPico(WheeledArmPicoConfig(end_effector="suction"))
+    teleop._arm_q_indices = np.arange(14)
+    q = np.arange(14, dtype=float)
+
+    action = teleop._make_action(q, {"left_arm"})
+
+    assert action[WHEELED_ARM_ACTIVE_ARMS_ACTION_KEY] == ("left_arm",)
+    assert "left_suction.pos" in action
+    assert "right_suction.pos" in action
+    assert "left_gripper.pos" not in action
 
 
 def test_pico_recording_controls_are_edge_triggered():
