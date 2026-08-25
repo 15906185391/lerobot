@@ -5,11 +5,11 @@
  */
 
 package manipulation.gripper;
-
+ 
 import java.io.*;
 import java.util.*;
 import lcm.lcm.*;
-
+ 
 /**
  * @brief 整个夹爪控制命令  左0右1
  *
@@ -22,27 +22,27 @@ public final class gripper_command_t implements lcm.lcm.LCMEncodable
     public long timestamp;
 
     /**
-     * 所有手部关节的控制命令
+     * 所有手部关节的控制命令             
      */
     public manipulation.gripper.single_gripper_joint_command_t cmd;
 
-
+ 
     public gripper_command_t()
     {
     }
-
+ 
     public static final long LCM_FINGERPRINT;
     public static final long LCM_FINGERPRINT_BASE = 0x5f3db484a00a4b50L;
-
+ 
     static {
         LCM_FINGERPRINT = _hashRecursive(new ArrayList<Class<?>>());
     }
-
+ 
     public static long _hashRecursive(ArrayList<Class<?>> classes)
     {
         if (classes.contains(manipulation.gripper.gripper_command_t.class))
             return 0L;
-
+ 
         classes.add(manipulation.gripper.gripper_command_t.class);
         long hash = LCM_FINGERPRINT_BASE
              + manipulation.gripper.single_gripper_joint_command_t._hashRecursive(classes)
@@ -50,58 +50,58 @@ public final class gripper_command_t implements lcm.lcm.LCMEncodable
         classes.remove(classes.size() - 1);
         return (hash<<1) + ((hash>>63)&1);
     }
-
+ 
     public void encode(DataOutput outs) throws IOException
     {
         outs.writeLong(LCM_FINGERPRINT);
         _encodeRecursive(outs);
     }
-
+ 
     public void _encodeRecursive(DataOutput outs) throws IOException
     {
-        outs.writeLong(this.timestamp);
-
-        this.cmd._encodeRecursive(outs);
-
+        outs.writeLong(this.timestamp); 
+ 
+        this.cmd._encodeRecursive(outs); 
+ 
     }
-
+ 
     public gripper_command_t(byte[] data) throws IOException
     {
         this(new LCMDataInputStream(data));
     }
-
+ 
     public gripper_command_t(DataInput ins) throws IOException
     {
         if (ins.readLong() != LCM_FINGERPRINT)
             throw new IOException("LCM Decode error: bad fingerprint");
-
+ 
         _decodeRecursive(ins);
     }
-
+ 
     public static manipulation.gripper.gripper_command_t _decodeRecursiveFactory(DataInput ins) throws IOException
     {
         manipulation.gripper.gripper_command_t o = new manipulation.gripper.gripper_command_t();
         o._decodeRecursive(ins);
         return o;
     }
-
+ 
     public void _decodeRecursive(DataInput ins) throws IOException
     {
         this.timestamp = ins.readLong();
-
+ 
         this.cmd = manipulation.gripper.single_gripper_joint_command_t._decodeRecursiveFactory(ins);
-
+ 
     }
-
+ 
     public manipulation.gripper.gripper_command_t copy()
     {
         manipulation.gripper.gripper_command_t outobj = new manipulation.gripper.gripper_command_t();
         outobj.timestamp = this.timestamp;
-
+ 
         outobj.cmd = this.cmd.copy();
-
+ 
         return outobj;
     }
-
+ 
 }
 
