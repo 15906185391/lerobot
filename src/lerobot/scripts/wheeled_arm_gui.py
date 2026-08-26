@@ -640,6 +640,22 @@ class RuntimeFailure:
     details: str
 
 
+@dataclass(frozen=True)
+class RobotRuntimeStatus:
+    lcm_url: str
+    timestamp_ns: int
+    vendor: str
+    robot_id: str
+    robot_type: str
+    controller_version: str
+    joint_num: int
+    power_state: int
+    operate_mode: int
+    operation_state: int
+    connected: bool
+    received_at_s: float
+
+
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 PYTHON_TRACEBACK_START = "Traceback (most recent call last):"
@@ -1215,6 +1231,45 @@ def _compact_lcm_summary(summary: str, max_chars: int) -> str:
     return summary[: max(0, max_chars - 3)] + "..."
 
 
+ROBOT_POWER_STATE_LABELS = {
+    0: "未上电",
+    1: "已上电",
+    2: "急停",
+    3: "保护停止",
+}
+ROBOT_OPERATE_MODE_LABELS = {
+    0: "手动",
+    1: "自动",
+}
+ROBOT_OPERATION_STATE_LABELS = {
+    0: "空闲",
+    2: "实时控制",
+    9: "运动中",
+}
+
+
+def _enum_label(labels: dict[int, str], value: int) -> str:
+    return labels.get(value, f"未知({value})")
+
+
+def _format_elapsed(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
+def _compact_status_value(value: str, max_chars: int = 34) -> str:
+    value = " ".join(value.split())
+    if len(value) <= max_chars:
+        return value
+    return value[: max(0, max_chars - 3)] + "..."
+
+
 class LcmMessageMonitor(QObject):
     output = Signal(str)
     started = Signal(str)
@@ -1329,6 +1384,100 @@ class LcmMessageMonitor(QObject):
         finally:
             self._is_running = False
             self.finished.emit(code)
+
+
+class RobotStatusMonitor(QObject):
+    status_changed = Signal(object)
+    started = Signal(str)
+    stopped = Signal()
+    failed = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._is_running = False
+        self._lcm_url = ""
+
+    @property
+    def is_running(self) -> bool:
+        return self._is_running and self._thread is not None and self._thread.is_alive()
+
+    @property
+    def lcm_url(self) -> str:
+        return self._lcm_url
+
+    def start(self, lcm_url: str) -> bool:
+        lcm_url = lcm_url.strip()
+        if not lcm_url:
+            self.failed.emit("机器人状态监听需要 LCM URL。")
+            return False
+        if self.is_running:
+            if self._lcm_url == lcm_url:
+                return True
+            self.failed.emit("机器人状态监听已在运行；请先停止监听，再切换 LCM URL。")
+            return False
+
+        self._stop_event.clear()
+        self._lcm_url = lcm_url
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(lcm_url,),
+            name="robot-status-monitor",
+            daemon=True,
+        )
+        self._is_running = True
+        self.started.emit(f"Robot status monitor --lcm-url {shlex.quote(lcm_url)} --channel MANIP_ROBOT_INFO")
+        self._thread.start()
+        return True
+
+    def interrupt(self) -> None:
+        self._stop_event.set()
+
+    def _run(self, lcm_url: str) -> None:
+        try:
+            import lcm
+
+            robot_info_type = _load_lcm_message_types().get("MANIP_ROBOT_INFO")
+            if robot_info_type is None:
+                raise RuntimeError("无法加载 MANIP_ROBOT_INFO LCM 类型。")
+
+            lc = lcm.LCM(lcm_url)
+
+            def callback(_channel: str, data: bytes) -> None:
+                try:
+                    msg = robot_info_type.decode(data)
+                except Exception as exc:
+                    self.failed.emit(f"机器人状态解码失败: {exc}")
+                    return
+                self.status_changed.emit(
+                    RobotRuntimeStatus(
+                        lcm_url=lcm_url,
+                        timestamp_ns=int(getattr(msg, "timestamp_ns", 0)),
+                        vendor=str(getattr(msg, "vendor", "")),
+                        robot_id=str(getattr(msg, "robot_id", "")),
+                        robot_type=str(getattr(msg, "robot_type", "")),
+                        controller_version=str(getattr(msg, "controller_version", "")),
+                        joint_num=int(getattr(msg, "joint_num", 0)),
+                        power_state=int(getattr(msg, "power_state", 0)),
+                        operate_mode=int(getattr(msg, "operate_mode", 0)),
+                        operation_state=int(getattr(msg, "operation_state", 0)),
+                        connected=bool(getattr(msg, "connected", 0)),
+                        received_at_s=time.monotonic(),
+                    )
+                )
+
+            lc.subscribe("MANIP_ROBOT_INFO", callback)
+            while not self._stop_event.is_set():
+                if hasattr(lc, "handle_timeout"):
+                    lc.handle_timeout(100)
+                else:
+                    lc.handle()
+        except Exception as exc:
+            self.failed.emit(f"机器人状态监听失败: {exc}")
+        finally:
+            self._is_running = False
+            self.stopped.emit()
 
 
 class DatasetImageLabel(QLabel):
@@ -2473,12 +2622,17 @@ class WheeledArmGui(QMainWindow):
         self.common_runner = ProcessRunner("常用命令")
         self.lcm_spy_runner = ProcessRunner("LCM 监视")
         self.lcm_monitor = LcmMessageMonitor()
+        self.robot_status_monitor = RobotStatusMonitor()
         self.joint_jog_runner = ProcessRunner("关节点动")
         self._last_record_base_repo_id = ""
         self._last_record_root = ""
         self._last_record_no_stamp = False
         self._last_record_resume = False
         self._last_record_started_at_s = 0.0
+        self._active_process_started_at_s: float | None = None
+        self._robot_status: RobotRuntimeStatus | None = None
+        self._robot_status_url = ""
+        self._robot_status_monitor_started_at_s: float | None = None
         self._runtime_alerts: dict[str, RuntimeAlert] = {}
         self._runtime_failures: dict[str, RuntimeFailure] = {}
         self._traceback_buffers: dict[str, list[str]] = {}
@@ -2493,6 +2647,10 @@ class WheeledArmGui(QMainWindow):
         self._build_ui()
         self._connect_runners()
         self._load_settings()
+        self._status_refresh_timer = QTimer(self)
+        self._status_refresh_timer.setInterval(1000)
+        self._status_refresh_timer.timeout.connect(self._refresh_status_panel)
+        self._status_refresh_timer.start()
         self.update_record_preview()
         self.update_viewer_preview()
         self.update_edit_preview()
@@ -2510,12 +2668,14 @@ class WheeledArmGui(QMainWindow):
             or self.common_runner.is_running
             or self.lcm_monitor.is_running
             or self.lcm_spy_runner.is_running
+            or self.robot_status_monitor.is_running
             or self.joint_jog_runner.is_running
         ):
             answer = QMessageBox.question(
                 self,
                 "仍有任务运行",
-                "采集、查看、编辑、转换、常用命令、LCM 监视或关节点动进程仍在运行。"
+                "采集、查看、编辑、转换、常用命令、LCM/机器人状态监视"
+                "或关节点动进程仍在运行。"
                 "是否先发送停止信号并关闭窗口？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
@@ -2529,6 +2689,7 @@ class WheeledArmGui(QMainWindow):
             self.common_runner.interrupt()
             self.lcm_monitor.interrupt()
             self.lcm_spy_runner.interrupt()
+            self.robot_status_monitor.interrupt()
             self.joint_jog_runner.interrupt()
         self._save_settings()
         super().closeEvent(event)
@@ -4226,6 +4387,36 @@ class WheeledArmGui(QMainWindow):
         status_header.addWidget(self.status_orb, 0, Qt.AlignmentFlag.AlignVCenter)
         status_header.addWidget(self.status_label, 1)
         self.activity_strip = ActivityStrip()
+        robot_status_grid = QGridLayout()
+        robot_status_grid.setContentsMargins(0, 2, 0, 0)
+        robot_status_grid.setHorizontalSpacing(8)
+        robot_status_grid.setVerticalSpacing(8)
+        self.robot_connection_label = self._make_robot_status_value("连接：未监听", "idle")
+        self.robot_run_state_label = self._make_robot_status_value("运行：未知", "idle")
+        self.robot_power_label = self._make_robot_status_value("上电：未知", "idle")
+        self.robot_mode_label = self._make_robot_status_value("模式：未知", "idle")
+        self.robot_identity_label = self._make_robot_status_value("机器人：未知", "idle")
+        self.robot_heartbeat_label = self._make_robot_status_value("心跳：无", "idle")
+        robot_status_grid.addWidget(self.robot_connection_label, 0, 0)
+        robot_status_grid.addWidget(self.robot_run_state_label, 0, 1)
+        robot_status_grid.addWidget(self.robot_power_label, 1, 0)
+        robot_status_grid.addWidget(self.robot_mode_label, 1, 1)
+        robot_status_grid.addWidget(self.robot_identity_label, 2, 0, 1, 2)
+        robot_status_grid.addWidget(self.robot_heartbeat_label, 3, 0, 1, 2)
+        self.robot_status_url_label = QLabel("状态 LCM：未监听")
+        self.robot_status_url_label.setWordWrap(True)
+        self.robot_status_url_label.setObjectName("MutedLabel")
+        robot_status_buttons = QHBoxLayout()
+        robot_status_buttons.setContentsMargins(0, 0, 0, 0)
+        self.start_robot_status_btn = QPushButton("监听机器人")
+        self.stop_robot_status_btn = QPushButton("停止监听")
+        self.stop_robot_status_btn.setObjectName("DangerButton")
+        self.stop_robot_status_btn.setEnabled(False)
+        self.start_robot_status_btn.clicked.connect(self.start_robot_status_monitor)
+        self.stop_robot_status_btn.clicked.connect(self.stop_robot_status_monitor)
+        robot_status_buttons.addWidget(self.start_robot_status_btn)
+        robot_status_buttons.addWidget(self.stop_robot_status_btn)
+        robot_status_buttons.addStretch(1)
         self.dataset_hint = QLabel(f"默认数据目录：{HF_LEROBOT_HOME}")
         self.dataset_hint.setWordWrap(True)
         self.dataset_hint.setObjectName("MutedLabel")
@@ -4235,6 +4426,9 @@ class WheeledArmGui(QMainWindow):
         self.runtime_alert_label.hide()
         status_layout.addLayout(status_header)
         status_layout.addWidget(self.activity_strip)
+        status_layout.addLayout(robot_status_grid)
+        status_layout.addWidget(self.robot_status_url_label)
+        status_layout.addLayout(robot_status_buttons)
         status_layout.addWidget(self.dataset_hint)
         status_layout.addWidget(self.runtime_alert_label)
         layout.addWidget(status_box)
@@ -4306,6 +4500,14 @@ class WheeledArmGui(QMainWindow):
         spin.setRange(minimum, maximum)
         spin.setValue(value)
         return spin
+
+    def _make_robot_status_value(self, text: str, state: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("RobotStatusValue")
+        label.setWordWrap(True)
+        label.setProperty("state", state)
+        label.setMinimumHeight(32)
+        return label
 
     def _double_spin(
         self, minimum: float, maximum: float, value: float, decimals: int = 1
@@ -4666,6 +4868,11 @@ class WheeledArmGui(QMainWindow):
         self.lcm_spy_runner.output.connect(lambda line: self.handle_runner_output("LCM", line))
         self.lcm_spy_runner.failed.connect(lambda message: self.handle_runner_failure("LCM", message))
         self.lcm_spy_runner.finished.connect(self._on_lcm_spy_finished)
+
+        self.robot_status_monitor.status_changed.connect(self._on_robot_status_changed)
+        self.robot_status_monitor.started.connect(self._on_robot_status_monitor_started)
+        self.robot_status_monitor.stopped.connect(self._on_robot_status_monitor_stopped)
+        self.robot_status_monitor.failed.connect(self.handle_robot_status_failure)
 
         self.joint_jog_runner.started.connect(lambda command: self._on_started("点动", command))
         self.joint_jog_runner.output.connect(lambda line: self.handle_runner_output("点动", line))
@@ -6317,6 +6524,8 @@ class WheeledArmGui(QMainWindow):
             self.stop_record_btn.setEnabled(True)
             self.status_label.setText("采集中")
             self.preview_tabs.setCurrentWidget(self.record_command_preview)
+            if not self.mock_robot.isChecked():
+                self._ensure_robot_status_monitor(self.lcm_url.text().strip())
 
     @Slot()
     def stop_recording(self) -> None:
@@ -6397,7 +6606,8 @@ class WheeledArmGui(QMainWindow):
             return
         self._save_settings()
         env_overrides = None
-        if COMMON_COMMAND_LABELS[self.common_command.currentText()] == "pico_usb_service":
+        command_type = COMMON_COMMAND_LABELS[self.common_command.currentText()]
+        if command_type == "pico_usb_service":
             env_overrides = {"LD_LIBRARY_PATH": None}
         if self.common_runner.start(self.build_common_command(), env_overrides=env_overrides):
             self.start_common_btn.setEnabled(False)
@@ -6405,6 +6615,17 @@ class WheeledArmGui(QMainWindow):
             self.common_enter_btn.setEnabled(True)
             self.status_label.setText("常用命令运行中")
             self.preview_tabs.setCurrentWidget(self.common_command_preview)
+            if command_type == "teleoperate" and not self.common_teleop_mock_robot.isChecked():
+                self._ensure_robot_status_monitor(self.common_teleop_lcm_url.text().strip())
+            elif command_type == "replay":
+                self._ensure_robot_status_monitor(self.common_replay_lcm_url.text().strip())
+            elif command_type == "find_joint_limits":
+                self._ensure_robot_status_monitor(self.common_joint_lcm_url.text().strip())
+            elif (
+                command_type == "rollout"
+                and self.common_rollout_robot_type.text().strip() == "wheeled_arm"
+            ):
+                self._ensure_robot_status_monitor(self.lcm_url.text().strip())
 
     @Slot()
     def stop_common_command(self) -> None:
@@ -6428,6 +6649,7 @@ class WheeledArmGui(QMainWindow):
             self.stop_lcm_monitor_btn.setEnabled(True)
             self.status_label.setText("LCM 监听中")
             self.preview_tabs.setCurrentWidget(self.lcm_spy_command_preview)
+            self._ensure_robot_status_monitor(self.lcm_spy_url.text().strip())
 
     @Slot()
     def stop_lcm_monitor(self) -> None:
@@ -6439,6 +6661,7 @@ class WheeledArmGui(QMainWindow):
         self._stop_requested_sources.add("LCM")
         self.lcm_monitor.interrupt()
         self.lcm_spy_runner.interrupt()
+        self.robot_status_monitor.interrupt()
         QTimer.singleShot(3000, self._offer_lcm_spy_kill_if_running)
 
     @Slot()
@@ -6455,6 +6678,7 @@ class WheeledArmGui(QMainWindow):
             self.stop_lcm_spy_btn.setEnabled(True)
             self.status_label.setText("LCM 监视运行中")
             self.preview_tabs.setCurrentWidget(self.lcm_spy_command_preview)
+            self._ensure_robot_status_monitor(self.lcm_spy_url.text().strip())
 
     @Slot()
     def stop_lcm_spy(self) -> None:
@@ -6479,6 +6703,7 @@ class WheeledArmGui(QMainWindow):
             self.stop_joint_jog_btn.setEnabled(True)
             self.status_label.setText("关节点动控制台运行中")
             self.preview_tabs.setCurrentWidget(self.joint_jog_command_preview)
+            self._ensure_robot_status_monitor(self.joint_jog_lcm_url.text().strip())
 
     @Slot()
     def stop_joint_jog(self) -> None:
@@ -6552,11 +6777,177 @@ class WheeledArmGui(QMainWindow):
 
     def _on_started(self, name: str, command: str) -> None:
         self.clear_runtime_alert()
+        self._active_process_started_at_s = time.monotonic()
         self._stop_requested_sources.discard(name)
         self._shown_failure_dialogs.discard(name)
         self.append_log(name, f"$ {command}")
         self.statusBar().showMessage(f"{name} 已启动")
+        self._refresh_status_panel()
         self._refresh_visual_state()
+
+    def _current_robot_status_lcm_url(self) -> str:
+        if self.tabs.currentWidget() is self.common_tab:
+            command_type = COMMON_COMMAND_LABELS[self.common_command.currentText()]
+            if command_type == "teleoperate":
+                return self.common_teleop_lcm_url.text().strip()
+            if command_type == "replay":
+                return self.common_replay_lcm_url.text().strip()
+            if command_type == "find_joint_limits":
+                return self.common_joint_lcm_url.text().strip()
+            if command_type == "rollout":
+                return self.lcm_url.text().strip()
+        if self.tabs.currentWidget() is self.lcm_spy_tab:
+            return self.lcm_spy_url.text().strip()
+        if self.tabs.currentWidget() is self.joint_jog_tab:
+            return self.joint_jog_lcm_url.text().strip()
+        return self.lcm_url.text().strip()
+
+    def _ensure_robot_status_monitor(self, lcm_url: str) -> None:
+        if self.robot_status_monitor.start(lcm_url):
+            self._robot_status_url = lcm_url.strip()
+            self._refresh_status_panel()
+
+    @Slot()
+    def start_robot_status_monitor(self) -> None:
+        self._ensure_robot_status_monitor(self._current_robot_status_lcm_url())
+
+    @Slot()
+    def stop_robot_status_monitor(self) -> None:
+        self.robot_status_monitor.interrupt()
+        self.statusBar().showMessage("已停止机器人状态监听", 3000)
+
+    @Slot(str)
+    def _on_robot_status_monitor_started(self, command: str) -> None:
+        self._robot_status_monitor_started_at_s = time.monotonic()
+        self.start_robot_status_btn.setEnabled(False)
+        self.stop_robot_status_btn.setEnabled(True)
+        self.append_log("LCM", f"$ {command}")
+        self.statusBar().showMessage("机器人状态监听已启动")
+        self._refresh_status_panel()
+        self._refresh_visual_state()
+
+    @Slot()
+    def _on_robot_status_monitor_stopped(self) -> None:
+        self._robot_status_monitor_started_at_s = None
+        self.start_robot_status_btn.setEnabled(True)
+        self.stop_robot_status_btn.setEnabled(False)
+        self._refresh_status_panel()
+        self._refresh_visual_state()
+
+    @Slot(object)
+    def _on_robot_status_changed(self, status: RobotRuntimeStatus) -> None:
+        self._robot_status = status
+        self._robot_status_url = status.lcm_url
+        self._refresh_status_panel()
+
+    def handle_robot_status_failure(self, message: str) -> None:
+        self.append_log("LCM", message)
+        self.statusBar().showMessage(message, 7000)
+        if hasattr(self, "robot_connection_label"):
+            self._set_status_value(self.robot_connection_label, "连接：监听异常", "alert")
+            self._set_status_value(self.robot_heartbeat_label, f"心跳：{message}", "alert")
+
+    def _set_status_value(self, label: QLabel, text: str, state: str) -> None:
+        label.setText(text)
+        label.setProperty("state", state)
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def _refresh_status_panel(self) -> None:
+        if not hasattr(self, "robot_connection_label"):
+            return
+
+        base_status = self._current_status_text()
+        task_active = self._has_running_task()
+        if task_active and self._active_process_started_at_s is not None:
+            elapsed = _format_elapsed(time.monotonic() - self._active_process_started_at_s)
+            self.status_label.setText(f"{base_status} · {elapsed}")
+        elif self.robot_status_monitor.is_running and self._robot_status_monitor_started_at_s is not None:
+            elapsed = _format_elapsed(time.monotonic() - self._robot_status_monitor_started_at_s)
+            self.status_label.setText(f"{base_status} · {elapsed}")
+        else:
+            self.status_label.setText(base_status)
+        if not task_active:
+            self._active_process_started_at_s = None
+
+        monitor_running = self.robot_status_monitor.is_running
+        status = self._robot_status
+        now_s = time.monotonic()
+
+        if status is None:
+            if monitor_running:
+                started_at = self._robot_status_monitor_started_at_s or now_s
+                elapsed = _format_elapsed(now_s - started_at)
+                self._set_status_value(self.robot_connection_label, "连接：等待心跳", "active")
+                self._set_status_value(self.robot_run_state_label, "运行：未知", "idle")
+                self._set_status_value(self.robot_power_label, "上电：未知", "idle")
+                self._set_status_value(self.robot_mode_label, "模式：未知", "idle")
+                self._set_status_value(self.robot_identity_label, "机器人：未知", "idle")
+                self._set_status_value(self.robot_heartbeat_label, f"心跳：监听 {elapsed}", "active")
+                status_url = self._robot_status_url or self.robot_status_monitor.lcm_url
+                self.robot_status_url_label.setText(f"状态 LCM：{status_url}")
+            else:
+                self._set_status_value(self.robot_connection_label, "连接：未监听", "idle")
+                self._set_status_value(self.robot_run_state_label, "运行：未知", "idle")
+                self._set_status_value(self.robot_power_label, "上电：未知", "idle")
+                self._set_status_value(self.robot_mode_label, "模式：未知", "idle")
+                self._set_status_value(self.robot_identity_label, "机器人：未知", "idle")
+                self._set_status_value(self.robot_heartbeat_label, "心跳：无", "idle")
+                self.robot_status_url_label.setText("状态 LCM：未监听")
+            return
+
+        age_s = now_s - status.received_at_s
+        stale = age_s > 3.0
+        connection_state = "alert" if stale or not status.connected else "connected"
+        if stale:
+            connection_text = "连接：心跳超时"
+        else:
+            connection_text = "连接：已连接" if status.connected else "连接：未连接"
+        self._set_status_value(self.robot_connection_label, connection_text, connection_state)
+
+        operation_state = _enum_label(ROBOT_OPERATION_STATE_LABELS, status.operation_state)
+        run_state = "active" if status.operation_state in {2, 9} and not stale else "idle"
+        if stale:
+            run_state = "alert"
+        self._set_status_value(self.robot_run_state_label, f"运行：{operation_state}", run_state)
+
+        power_state = _enum_label(ROBOT_POWER_STATE_LABELS, status.power_state)
+        power_bad = status.power_state in {2, 3} or stale
+        power_state_key = "alert" if power_bad else "connected" if status.power_state == 1 else "idle"
+        self._set_status_value(self.robot_power_label, f"上电：{power_state}", power_state_key)
+
+        mode_state = "alert" if stale else "connected" if status.operate_mode == 1 else "idle"
+        self._set_status_value(
+            self.robot_mode_label,
+            f"模式：{_enum_label(ROBOT_OPERATE_MODE_LABELS, status.operate_mode)}",
+            mode_state,
+        )
+
+        identity = " ".join(
+            item
+            for item in (status.vendor, status.robot_type, status.robot_id)
+            if item.strip()
+        )
+        if not identity:
+            identity = "未知"
+        if status.joint_num:
+            identity = f"{identity} · {status.joint_num} joints"
+        self._set_status_value(
+            self.robot_identity_label,
+            f"机器人：{_compact_status_value(identity)}",
+            "alert" if stale else "connected" if status.connected else "idle",
+        )
+
+        heartbeat = f"心跳：{age_s:.1f}s 前"
+        if status.controller_version:
+            heartbeat += f" · {status.controller_version}"
+        self._set_status_value(
+            self.robot_heartbeat_label,
+            _compact_status_value(heartbeat, max_chars=64),
+            "alert" if stale else "connected",
+        )
+        monitor_text = "监听中" if monitor_running else "已停止"
+        self.robot_status_url_label.setText(f"状态 LCM：{monitor_text} · {status.lcm_url}")
 
     @Slot(int)
     def _on_record_finished(self, code: int) -> None:
@@ -6718,9 +7109,17 @@ class WheeledArmGui(QMainWindow):
             return "LCM 监视运行中"
         if self.joint_jog_runner.is_running:
             return "关节点动控制台运行中"
+        if self.robot_status_monitor.is_running:
+            return "机器人状态监听中"
         return "未运行"
 
     def _has_running_process(self) -> bool:
+        return (
+            self._has_running_task()
+            or self.robot_status_monitor.is_running
+        )
+
+    def _has_running_task(self) -> bool:
         return (
             self.record_runner.is_running
             or self.viewer_runner.is_running
@@ -7313,6 +7712,29 @@ QMenuBar::item:selected {
     border-color: #b8cdfb;
 }
 #StatusPill[state="alert"] {
+    background: #fff4d6;
+    color: #8a4b08;
+    border-color: #f2c56b;
+}
+#RobotStatusValue {
+    background: #f7fafc;
+    color: #526174;
+    border: 1px solid #d5e0eb;
+    border-radius: 8px;
+    padding: 7px 9px;
+    font-weight: 650;
+}
+#RobotStatusValue[state="connected"] {
+    background: #eaf8ee;
+    color: #166534;
+    border-color: #bbebc8;
+}
+#RobotStatusValue[state="active"] {
+    background: #e8f0ff;
+    color: #1d4ed8;
+    border-color: #b8cdfb;
+}
+#RobotStatusValue[state="alert"] {
     background: #fff4d6;
     color: #8a4b08;
     border-color: #f2c56b;
