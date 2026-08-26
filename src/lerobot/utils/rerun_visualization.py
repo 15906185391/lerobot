@@ -29,13 +29,13 @@ import time
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
-
 from lerobot.configs import DEPTH_MILLIMETER_UNIT, infer_depth_unit
 from lerobot.lerobot_types import RobotAction, RobotObservation
 
 from .constants import ACTION, ACTION_PREFIX, OBS_PREFIX, OBS_STR
 from .import_utils import require_package
+
+logger = logging.getLogger(__name__)
 
 _RERUN_VIEWER_PID: int | None = None
 _RERUN_ENABLED = True
@@ -66,6 +66,7 @@ def init_rerun(
     _RERUN_ENABLED = True
     _RERUN_VIEWER_PID = None
     log_rerun_data.blueprint = None  # Reset blueprint cache for new session
+    log_rerun_data.blueprint_paths = None
 
     batch_size = os.getenv("RERUN_FLUSH_NUM_BYTES", "8000")
     os.environ["RERUN_FLUSH_NUM_BYTES"] = batch_size
@@ -197,6 +198,21 @@ def _find_free_tcp_port() -> int:
         return random.randint(20000, 60999)
 
 
+def _is_end_effector_path(path: str) -> bool:
+    tokens = path.lower().replace("/", ".").split(".")
+    return any(
+        token in {"gripper", "suction"}
+        or token.endswith("_gripper")
+        or token.endswith("_suction")
+        for token in tokens
+    )
+
+
+def _split_end_effector_paths(paths: set[str]) -> tuple[set[str], set[str]]:
+    end_effector_paths = {path for path in paths if _is_end_effector_path(path)}
+    return paths - end_effector_paths, end_effector_paths
+
+
 def _build_blueprint(
     observation_paths: set[str],
     action_paths: set[str],
@@ -214,14 +230,34 @@ def _build_blueprint(
     views = [rrb.Spatial3DView(origin="robot", name="robot")]
     views.extend(rrb.Spatial2DView(origin=path, name=path) for path in sorted(image_paths))
 
+    observation_paths, observation_end_effector_paths = _split_end_effector_paths(observation_paths)
+    action_paths, action_end_effector_paths = _split_end_effector_paths(action_paths)
+    end_effector_paths = observation_end_effector_paths | action_end_effector_paths
+
     if observation_paths:
         views.append(rrb.TimeSeriesView(name="observation", contents=sorted(observation_paths)))
     if action_paths:
         views.append(rrb.TimeSeriesView(name="action", contents=sorted(action_paths)))
+    if end_effector_paths:
+        views.append(rrb.TimeSeriesView(name="end_effector", contents=sorted(end_effector_paths)))
     if metadata_paths:
         views.append(rrb.TimeSeriesView(name="recording", contents=sorted(metadata_paths)))
 
     return rrb.Blueprint(rrb.Grid(*views))
+
+
+def _blueprint_paths(
+    observation_paths: set[str],
+    action_paths: set[str],
+    image_paths: set[str],
+    metadata_paths: set[str],
+) -> tuple[frozenset[str], frozenset[str], frozenset[str], frozenset[str]]:
+    return (
+        frozenset(observation_paths),
+        frozenset(action_paths),
+        frozenset(image_paths),
+        frozenset(metadata_paths),
+    )
 
 
 def _ensure_blueprint(
@@ -230,18 +266,28 @@ def _ensure_blueprint(
     image_paths: set[str],
     metadata_paths: set[str],
 ) -> None:
-    """Build and send the blueprint once, from the first observation and action data."""
-    if getattr(log_rerun_data, "blueprint", None) is not None:
+    """Build and send a blueprint when the visible data paths change."""
+    new_paths = _blueprint_paths(observation_paths, action_paths, image_paths, metadata_paths)
+    previous_paths = getattr(log_rerun_data, "blueprint_paths", None)
+    current_paths = (
+        new_paths
+        if previous_paths is None
+        else tuple(previous | new for previous, new in zip(previous_paths, new_paths, strict=True))
+    )
+    if previous_paths == current_paths:
         return
 
-    if not (observation_paths or action_paths or image_paths or metadata_paths):
+    if not any(current_paths):
         return
+
+    observation_paths, action_paths, image_paths, metadata_paths = (set(paths) for paths in current_paths)
 
     # Safe + zero-overhead: `log_rerun_data` already ran the `require_package` guard and imported rerun.
     import rerun as rr
 
     blueprint = _build_blueprint(observation_paths, action_paths, image_paths, metadata_paths)
     log_rerun_data.blueprint = blueprint
+    log_rerun_data.blueprint_paths = current_paths
     rr.send_blueprint(blueprint)
 
 

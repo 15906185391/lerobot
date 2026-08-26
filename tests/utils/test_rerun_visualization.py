@@ -321,6 +321,27 @@ def test_log_rerun_data_blueprint_sent_only_once(mock_rerun):
     assert rv.log_rerun_data.blueprint is first_blueprint
 
 
+def test_log_rerun_data_updates_blueprint_for_new_end_effector_paths(mock_rerun):
+    rv, _calls, blueprints, _time_calls = mock_rerun
+
+    rv.log_rerun_data(observation={"temp": 1.0}, action={"left_arm_0.pos": 0.1})
+    assert len(blueprints) == 1
+
+    rv.log_rerun_data(
+        observation={"temp": 2.0, "left_suction.pos": 1.0},
+        action={"right_gripper.pos": 42.0},
+    )
+
+    assert len(blueprints) == 2
+    ts_views = {v.name: v for v in _views_by_kind(blueprints[-1], "TimeSeriesView")}
+    assert ts_views["observation"].contents == ["observation.temp"]
+    assert ts_views["action"].contents == ["action.left_arm_0.pos"]
+    assert ts_views["end_effector"].contents == [
+        "action.right_gripper.pos",
+        "observation.left_suction.pos",
+    ]
+
+
 def test_log_rerun_data_metadata_and_timelines(mock_rerun):
     rv, calls, blueprints, time_calls = mock_rerun
 
