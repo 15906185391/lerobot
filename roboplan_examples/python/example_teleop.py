@@ -45,10 +45,9 @@ import xacro
 from pinocchio.visualize import ViserVisualizer
 from pynput import keyboard
 
-from common import get_home_configuration, get_model_data
+from common import get_home_configuration, get_model_data, get_package_paths
 from roboplan.visualization import se3_to_viser_wxyz
 from roboplan.core import CartesianConfiguration, Scene
-from roboplan.example_models import get_package_share_dir
 from roboplan.filters import SE3LowPassFilter
 from roboplan.optimal_ik import (
     ConfigurationTask,
@@ -327,7 +326,7 @@ def main(
     if control_freq <= 0.0:
         raise ValueError("control_freq must be positive.")
 
-    package_paths = [get_package_share_dir()]
+    package_paths = get_package_paths()
     urdf_xml = xacro.process_file(model_data.urdf_path).toxml()
     srdf_xml = xacro.process_file(model_data.srdf_path).toxml()
 

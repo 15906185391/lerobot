@@ -3,25 +3,41 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pinocchio as pin
 import tyro
 import xacro
-
-from common import get_home_configuration, get_model_data
+from common import get_home_configuration, get_model_data, get_package_paths
 from preview_visualization import make_static_and_preview_visualizers
 from roboplan.core import JointPath, Scene, collapseContinuousJointPositions
-from roboplan.example_models import get_package_models_dir, get_package_share_dir
 from roboplan.toppra import PathParameterizerTOPPRA, SplineFittingMode, TOPPRAOptions
 from roboplan.visualization import plotJointTrajectory, visualizeJointTrajectory
 
 
 def _pump_matplotlib(delay: float = 0.001) -> None:
     plt.pause(delay)
+
+
+def _plot_joint_trajectory_from_main_thread(traj, scene: Scene, group_name: str) -> None:
+    if threading.current_thread() is not threading.main_thread():
+        print("Skipping Matplotlib trajectory plot because Viser callbacks run outside the main thread.")
+        return
+
+    fig = plotJointTrajectory(
+        traj,
+        scene,
+        group_name=group_name,
+        title="TOPPRA Joint-Space Trajectory",
+        positions=True,
+        velocities=True,
+        accelerations=True,
+    )
+    fig.canvas.draw()
+    fig.canvas.flush_events()
 
 
 def _orthogonal_unit_vector(reference: np.ndarray) -> np.ndarray:
@@ -248,12 +264,7 @@ def main(
 
     urdf_xml = xacro.process_file(model_data.urdf_path).toxml()
     srdf_xml = xacro.process_file(model_data.srdf_path).toxml()
-    source_models_dir = (
-        Path(__file__).resolve().parents[2] / "roboplan_example_models" / "models"
-    )
-    package_paths = [get_package_models_dir(), get_package_share_dir()]
-    if source_models_dir.exists() and source_models_dir not in package_paths:
-        package_paths.insert(0, source_models_dir)
+    package_paths = get_package_paths()
 
     scene = Scene(
         "toppra_joint_space_scene",
@@ -349,7 +360,7 @@ def main(
             q_goal = collapseContinuousJointPositions(
                 scene, group_name, q_home_full[np.asarray(group_info.q_indices)]
             )
-            for slider, value in zip(sliders, q_goal):
+            for slider, value in zip(sliders, q_goal, strict=True):
                 slider.value = float(value)
             preview_goal()
             status_text.value = "目标已重置到 home。"
@@ -406,17 +417,7 @@ def main(
                     (0, 140, 220),
                     "/toppra_joint_space/trajectory",
                 )
-                fig = plotJointTrajectory(
-                    traj,
-                    scene,
-                    group_name=group_name,
-                    title="TOPPRA Joint-Space Trajectory",
-                    positions=True,
-                    velocities=True,
-                    accelerations=True,
-                )
-                fig.canvas.draw()
-                fig.canvas.flush_events()
+                _plot_joint_trajectory_from_main_thread(traj, scene, group_name)
                 status_text.value = (
                     "规划完成。若需动画播放，可点击 Animate once。"
                     if not preview_only
@@ -497,17 +498,7 @@ def main(
 
     plt.figure()
     plt.ion()
-    fig = plotJointTrajectory(
-        traj,
-        scene,
-        group_name=group_name,
-        title="TOPPRA Joint-Space Trajectory",
-        positions=True,
-        velocities=True,
-        accelerations=True,
-    )
-    fig.canvas.draw()
-    fig.canvas.flush_events()
+    _plot_joint_trajectory_from_main_thread(traj, scene, group_name)
     plt.show(block=False)
     _pump_matplotlib()
 

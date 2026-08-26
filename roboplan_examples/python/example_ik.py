@@ -10,9 +10,8 @@ import numpy as np
 import pinocchio as pin
 from pinocchio.visualize import ViserVisualizer
 
-from common import get_model_data
+from common import get_model_data, get_package_paths
 from roboplan.core import Scene, JointConfiguration, CartesianConfiguration
-from roboplan.example_models import get_package_share_dir
 from roboplan.simple_ik import SimpleIkOptions, SimpleIk
 
 
@@ -48,7 +47,7 @@ def main(
     # Pre-process with xacro. This is not necessary for raw URDFs.
     urdf_xml = xacro.process_file(model_data.urdf_path).toxml()
     srdf_xml = xacro.process_file(model_data.srdf_path).toxml()
-    package_paths = [get_package_share_dir()]
+    package_paths = get_package_paths()
 
     # Specify argument names to distinguish overloaded Scene constructors from python.
     scene = Scene(

@@ -14,7 +14,7 @@ import numpy as np
 import pinocchio as pin
 from pinocchio.visualize import ViserVisualizer
 
-from common import ObstacleConfig, get_model_data
+from common import ObstacleConfig, get_model_data, get_package_paths
 from preview_visualization import make_static_and_preview_visualizers
 
 try:
@@ -23,7 +23,6 @@ except ModuleNotFoundError:
     import hppfcl as coal
 
 from roboplan.core import CartesianConfiguration, JointConfiguration, Scene
-from roboplan.example_models import get_package_share_dir
 from roboplan.rrt import (
     ConstraintProjector,
     ConstraintProjectorOptions,
@@ -256,7 +255,7 @@ def main(
 
     urdf_xml = xacro.process_file(model_data.urdf_path).toxml()
     srdf_xml = xacro.process_file(model_data.srdf_path).toxml()
-    package_paths = [get_package_share_dir()]
+    package_paths = get_package_paths()
     scene = Scene(
         "constrained_rrt_scene",
         urdf=urdf_xml,

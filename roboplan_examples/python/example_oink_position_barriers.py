@@ -11,10 +11,9 @@ import numpy as np
 import pinocchio as pin
 from pinocchio.visualize import ViserVisualizer
 
-from common import get_model_data
+from common import get_model_data, get_package_paths
 from roboplan.filters import SE3LowPassFilter
 from roboplan.core import Scene, CartesianConfiguration
-from roboplan.example_models import get_package_share_dir
 from roboplan.optimal_ik import (
     ConfigurationTask,
     ConfigurationTaskOptions,
@@ -81,7 +80,7 @@ def main(
         print(f"Invalid reference_filter_tau: {reference_filter_tau} (must be >= 0)")
         sys.exit(1)
 
-    package_paths = [get_package_share_dir()]
+    package_paths = get_package_paths()
 
     # Pre-process with xacro. This is not necessary for raw URDFs.
     urdf_xml = xacro.process_file(model_data.urdf_path).toxml()

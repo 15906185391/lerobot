@@ -34,7 +34,7 @@ import tyro
 import xacro
 from pinocchio.visualize import ViserVisualizer
 
-from common import get_home_configuration, get_model_data
+from common import get_home_configuration, get_model_data, get_package_paths
 from preview_visualization import make_static_and_preview_visualizers
 from roboplan.core import (
     CartesianConfiguration,
@@ -42,7 +42,6 @@ from roboplan.core import (
     JointTrajectory,
     Scene,
 )
-from roboplan.example_models import get_package_share_dir
 from roboplan.interpolation import (
     interpolateCartesianTrajectory,
     interpolateJointTrajectory,
@@ -323,7 +322,7 @@ def main(
     if playback_speed <= 0.0:
         raise ValueError("playback_speed must be positive.")
 
-    package_paths = [get_package_share_dir()]
+    package_paths = get_package_paths()
 
     urdf_xml = xacro.process_file(model_data.urdf_path).toxml()
     srdf_xml = xacro.process_file(model_data.srdf_path).toxml()

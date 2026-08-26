@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import html
+import http.client
 import importlib
 import json
 import os
@@ -146,6 +147,7 @@ try:
         QPushButton,
         QScrollArea,
         QSizePolicy,
+        QSplitter,
         QSpinBox,
         QStackedWidget,
         QTabWidget,
@@ -345,10 +347,15 @@ LCM_TYPES_DIR = PROJECT_ROOT / "src/lerobot/robots/wheeled_arm/hardware_interfac
 LCM_SPY_SCRIPT = LCM_TYPES_DIR / "launch_lcm_spy.sh"
 LCM_SPY_JAVA_DIR = LCM_TYPES_DIR / "java"
 DEFAULT_LCM_SPY_URL = "udpm://239.255.76.67:8880?ttl=255"
-ROBOPLAN_EXAMPLE_DIR = PROJECT_ROOT / "roboplan_examples" / "python"
-ROBOPLAN_EXAMPLE_RUNNER = ROBOPLAN_EXAMPLE_DIR / "example_runner.py"
-ROBOPLAN_JOINT_PLANNER_MODULE = "example_toppra_joint_planning"
+DEFAULT_WHEELED_ARM_LCM_URL = "udpm://239.255.76.67:8880?ttl=1"
+DEFAULT_JOINT_PLAN_INITIAL_POSITION = (
+    "0.0,-0.6,0.0,1.2,0.0,0.5,0.0,"
+    "0.0,-0.6,0.0,1.2,0.0,0.5,0.0"
+)
+TOPPRA_JOINT_PLANNER_MODULE = "lerobot.scripts.wheeled_arm_toppra_joint_planning"
 TOPPRA_MODE_CHOICES = ("Adaptive", "Hermite", "Cubic", "LinearBlend")
+JOINT_PLAN_VISER_REFRESH_INTERVAL_MS = 1500
+JOINT_PLAN_VISER_REFRESH_ATTEMPTS = 12
 
 
 def _cmeel_site_packages() -> Path:
@@ -377,8 +384,8 @@ def _shared_library_paths() -> list[str]:
     return unique_paths
 
 
-def _roboplan_env_overrides() -> dict[str, str]:
-    python_paths = [str(ROBOPLAN_EXAMPLE_DIR)]
+def _toppra_env_overrides() -> dict[str, str]:
+    python_paths = [str(PROJECT_ROOT / "src")]
     cmeel_site = _cmeel_site_packages()
     if cmeel_site.exists():
         python_paths.append(str(cmeel_site))
@@ -395,17 +402,18 @@ def _roboplan_env_overrides() -> dict[str, str]:
     return env
 
 
-def _roboplan_available_models() -> tuple[str, ...]:
+def _toppra_available_models() -> tuple[str, ...]:
     try:
-        if str(ROBOPLAN_EXAMPLE_DIR) not in sys.path:
-            sys.path.insert(0, str(ROBOPLAN_EXAMPLE_DIR))
+        source_dir = PROJECT_ROOT / "src"
+        if str(source_dir) not in sys.path:
+            sys.path.insert(0, str(source_dir))
         cmeel_site = _cmeel_site_packages()
         if cmeel_site.exists() and str(cmeel_site) not in sys.path:
             sys.path.insert(0, str(cmeel_site))
-        common = importlib.import_module("common")
-        models = tuple(common.get_model_data().keys())
+        planner = importlib.import_module(TOPPRA_JOINT_PLANNER_MODULE)
+        models = tuple(planner.available_models())
     except Exception:
-        models = ("real_robot", "ur5", "franka", "dual", "kinova", "stretch", "so101")
+        models = ("real_robot",)
     if "real_robot" in models:
         return ("real_robot", *(model for model in models if model != "real_robot"))
     return models
@@ -488,6 +496,21 @@ def _find_free_tcp_port() -> int:
             return int(sock.getsockname()[1])
     except OSError:
         return random.randint(20000, 60999)
+
+
+def _http_endpoint_ready(host: str, port: int, timeout_s: float = 0.4) -> bool:
+    local_hosts = {"", "localhost", "0.0.0.0", "::"}
+    connect_host = "127.0.0.1" if host.strip() in local_hosts else host.strip()
+    connection = http.client.HTTPConnection(connect_host, port, timeout=timeout_s)
+    try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        response.read(128)
+        return response.status < 500
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
 
 
 def _split_csv(value: str) -> list[str]:
@@ -2728,6 +2751,7 @@ class WheeledArmGui(QMainWindow):
         self._stop_traceback_buffers: dict[str, list[str]] = {}
         self._recent_log_lines: list[tuple[str, str]] = []
         self._shown_failure_dialogs: set[str] = set()
+        self._joint_plan_viser_refresh_generation = 0
         self._stop_requested_sources: set[str] = set()
 
         self.setWindowTitle("LeRobot Wheeled Arm 控制台")
@@ -3586,16 +3610,17 @@ class WheeledArmGui(QMainWindow):
         safety_box = QGroupBox("RoboPlan TOPPRA 关节规划")
         safety_layout = QVBoxLayout(safety_box)
         safety_text = QLabel(
-            "该页面启动 roboplan_examples/python/example_toppra_joint_planning.py。"
+            "该页面启动 lerobot-wheeled-arm-toppra-joint-planning。"
             "默认使用 real_robot 双臂模型，在 Viser 中通过关节滑条设置目标、点击 Plan trajectory 生成轨迹，"
-            "预览确认后再执行动画。"
+            "未连接实物时使用指定初始关节，仅做可视化规划；勾选连接实物后才会读取 LCM 初始状态并允许发送控制命令。"
         )
         safety_text.setWordWrap(True)
         safety_text.setObjectName("MutedLabel")
         safety_layout.addWidget(safety_text)
         layout.addWidget(safety_box)
 
-        main_split = QHBoxLayout()
+        main_split = QSplitter(Qt.Orientation.Horizontal)
+        main_split.setChildrenCollapsible(False)
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -3605,7 +3630,7 @@ class WheeledArmGui(QMainWindow):
         form = QFormLayout(config_box)
         self._setup_form_layout(form)
         self.joint_plan_model = QComboBox()
-        self.joint_plan_model.addItems(_roboplan_available_models())
+        self.joint_plan_model.addItems(_toppra_available_models())
         self.joint_plan_toppra_mode = QComboBox()
         self.joint_plan_toppra_mode.addItems(TOPPRA_MODE_CHOICES)
         self.joint_plan_waypoint_count = self._spin(2, 50, 6)
@@ -3616,6 +3641,19 @@ class WheeledArmGui(QMainWindow):
         self.joint_plan_acceleration_scale = self._double_spin(0.01, 1.0, 1.0, 2)
         self.joint_plan_interactive_goal = QCheckBox("交互式目标滑条")
         self.joint_plan_interactive_goal.setChecked(True)
+        self.joint_plan_lcm_url = QLineEdit(DEFAULT_WHEELED_ARM_LCM_URL)
+        self.joint_plan_lcm_feedback_timeout = self._double_spin(0.1, 30.0, 1.0, 1)
+        self.joint_plan_lcm_start_timeout = self._double_spin(0.1, 60.0, 5.0, 1)
+        self.joint_plan_execute_command_hz = self._double_spin(1.0, 500.0, 250.0, 1)
+        self.joint_plan_execution_duration = self._double_spin(0.0, 600.0, 0.0, 2)
+        self.joint_plan_execution_duration.setSpecialValueText("自动")
+        self.joint_plan_execution_duration.setSuffix(" s")
+        self.joint_plan_connect_robot = QCheckBox("连接机器人实物")
+        self.joint_plan_connect_robot.setChecked(False)
+        self.joint_plan_initial_joint_position = QLineEdit(DEFAULT_JOINT_PLAN_INITIAL_POSITION)
+        self.joint_plan_initial_joint_position.setPlaceholderText("14 个双臂关节或 21 个全身关节，逗号分隔，单位 rad")
+        self.joint_plan_left_end_effector = self._end_effector_combo(WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR)
+        self.joint_plan_right_end_effector = self._end_effector_combo(WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR)
         form.addRow("机器人模型", self.joint_plan_model)
         form.addRow("TOPPRA 模式", self.joint_plan_toppra_mode)
         form.addRow("路点数量", self.joint_plan_waypoint_count)
@@ -3625,6 +3663,15 @@ class WheeledArmGui(QMainWindow):
         form.addRow("速度缩放", self.joint_plan_velocity_scale)
         form.addRow("加速度缩放", self.joint_plan_acceleration_scale)
         form.addRow("", self.joint_plan_interactive_goal)
+        form.addRow("LCM URL", self.joint_plan_lcm_url)
+        form.addRow("反馈新鲜度", self.joint_plan_lcm_feedback_timeout)
+        form.addRow("初始等待", self.joint_plan_lcm_start_timeout)
+        form.addRow("发布频率", self.joint_plan_execute_command_hz)
+        form.addRow("执行时长", self.joint_plan_execution_duration)
+        form.addRow("", self.joint_plan_connect_robot)
+        form.addRow("指定初始关节", self.joint_plan_initial_joint_position)
+        form.addRow("左臂末端", self.joint_plan_left_end_effector)
+        form.addRow("右臂末端", self.joint_plan_right_end_effector)
         left_layout.addWidget(config_box)
 
         advanced_box = QGroupBox("高级 TOPPRA 参数")
@@ -3651,14 +3698,16 @@ class WheeledArmGui(QMainWindow):
             "1. 点击“预览规划”，等待右侧 Viser 连接。\n"
             "2. 在 Viser 中调整关节滑条，并点击 Plan trajectory。\n"
             "3. 检查轨迹曲线、碰撞提示和透明预览机器人。\n"
-            "4. 需要动画回放时再点击“执行规划”，并在 Viser 中 Animate once。"
+            "4. 需要实物运动时先勾选“连接机器人实物”，点击“执行规划”，确认后在 Viser 中点击 Execute on robot。"
         )
         workflow.setWordWrap(True)
         workflow.setObjectName("MutedLabel")
         workflow_layout.addWidget(workflow)
         left_layout.addWidget(workflow_box)
 
-        button_row = QHBoxLayout()
+        button_row = QGridLayout()
+        button_row.setHorizontalSpacing(8)
+        button_row.setVerticalSpacing(8)
         self.preview_joint_plan_btn = QPushButton("预览规划")
         self.preview_joint_plan_btn.setObjectName("PrimaryButton")
         self.start_joint_plan_btn = QPushButton("执行规划")
@@ -3674,17 +3723,20 @@ class WheeledArmGui(QMainWindow):
         self.copy_joint_plan_btn.clicked.connect(
             lambda: self.copy_command(self.joint_plan_command_preview.toPlainText())
         )
-        button_row.addWidget(self.preview_joint_plan_btn)
-        button_row.addWidget(self.start_joint_plan_btn)
-        button_row.addWidget(self.stop_joint_plan_btn)
-        button_row.addWidget(self.open_joint_plan_viser_btn)
-        button_row.addWidget(self.copy_joint_plan_btn)
-        button_row.addStretch(1)
+        button_row.addWidget(self.preview_joint_plan_btn, 0, 0)
+        button_row.addWidget(self.start_joint_plan_btn, 0, 1)
+        button_row.addWidget(self.stop_joint_plan_btn, 0, 2)
+        button_row.addWidget(self.open_joint_plan_viser_btn, 1, 0)
+        button_row.addWidget(self.copy_joint_plan_btn, 1, 1)
+        button_row.setColumnStretch(2, 1)
         left_layout.addLayout(button_row)
         left_layout.addStretch(1)
 
         right_panel = QGroupBox("Viser 预览")
+        right_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(10, 12, 10, 10)
+        right_layout.setSpacing(8)
         viser_header = QHBoxLayout()
         self.joint_plan_viser_hint = QLabel("启动规划后可在这里查看 Viser，或用浏览器打开同一地址。")
         self.joint_plan_viser_hint.setObjectName("MutedLabel")
@@ -3700,7 +3752,7 @@ class WheeledArmGui(QMainWindow):
         self.joint_plan_viser_placeholder.setObjectName("MutedLabel")
         self.joint_plan_viser_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.joint_plan_viser_placeholder.setWordWrap(True)
-        self.joint_plan_viser_placeholder.setMinimumHeight(360)
+        self.joint_plan_viser_placeholder.setMinimumSize(QSize(640, 620))
         self.joint_plan_viser_stack.addWidget(self.joint_plan_viser_placeholder)
         self.joint_plan_viser_view: QWidget | None = None
         if QWebEngineView is not None:
@@ -3708,6 +3760,8 @@ class WheeledArmGui(QMainWindow):
             if QuietWebEnginePage is not None:
                 viewer.setPage(QuietWebEnginePage(viewer))
             viewer.setUrl(QUrl("about:blank"))
+            viewer.setMinimumSize(QSize(640, 620))
+            viewer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self.joint_plan_viser_view = viewer
             self.joint_plan_viser_stack.addWidget(viewer)
         else:
@@ -3715,13 +3769,26 @@ class WheeledArmGui(QMainWindow):
             fallback.setObjectName("MutedLabel")
             fallback.setAlignment(Qt.AlignmentFlag.AlignCenter)
             fallback.setWordWrap(True)
-            fallback.setMinimumHeight(360)
+            fallback.setMinimumSize(QSize(640, 620))
             self.joint_plan_viser_stack.addWidget(fallback)
+        self.joint_plan_viser_stack.setMinimumSize(QSize(640, 620))
+        self.joint_plan_viser_stack.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         right_layout.addWidget(self.joint_plan_viser_stack, 1)
 
-        main_split.addWidget(left_panel, 1)
-        main_split.addWidget(right_panel, 1)
-        layout.addLayout(main_split, 1)
+        left_scroll = self._scrollable(left_panel)
+        left_panel.setMinimumWidth(430)
+        left_scroll.setMinimumWidth(360)
+        left_scroll.setMaximumWidth(560)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        main_split.addWidget(left_scroll)
+        main_split.addWidget(right_panel)
+        main_split.setStretchFactor(0, 1)
+        main_split.setStretchFactor(1, 3)
+        main_split.setSizes([360, 1080])
+        layout.addWidget(main_split, 1)
 
         for widget in (
             self.joint_plan_model,
@@ -3733,6 +3800,15 @@ class WheeledArmGui(QMainWindow):
             self.joint_plan_velocity_scale,
             self.joint_plan_acceleration_scale,
             self.joint_plan_interactive_goal,
+            self.joint_plan_lcm_url,
+            self.joint_plan_lcm_feedback_timeout,
+            self.joint_plan_lcm_start_timeout,
+            self.joint_plan_execute_command_hz,
+            self.joint_plan_execution_duration,
+            self.joint_plan_connect_robot,
+            self.joint_plan_initial_joint_position,
+            self.joint_plan_left_end_effector,
+            self.joint_plan_right_end_effector,
             self.joint_plan_max_adaptive_iterations,
             self.joint_plan_max_adaptive_step_size,
             self.joint_plan_max_blend_deviation,
@@ -3741,7 +3817,8 @@ class WheeledArmGui(QMainWindow):
             self.joint_plan_auto_refresh,
         ):
             self._connect_preview_signal(widget, self.update_joint_plan_preview)
-        return self._scrollable(page)
+        page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        return page
 
     def _make_joint_jog_tab(self) -> QWidget:
         page = QWidget()
@@ -5467,6 +5544,61 @@ class WheeledArmGui(QMainWindow):
                 self.joint_plan_interactive_goal.isChecked(),
             )
         )
+        self.joint_plan_lcm_url.setText(
+            self.settings.value("joint_plan/lcm_url", self.joint_plan_lcm_url.text())
+        )
+        self.joint_plan_lcm_feedback_timeout.setValue(
+            float(
+                self.settings.value(
+                    "joint_plan/lcm_feedback_timeout_s",
+                    self.joint_plan_lcm_feedback_timeout.value(),
+                )
+            )
+        )
+        self.joint_plan_lcm_start_timeout.setValue(
+            float(
+                self.settings.value(
+                    "joint_plan/lcm_start_timeout_s",
+                    self.joint_plan_lcm_start_timeout.value(),
+                )
+            )
+        )
+        self.joint_plan_execute_command_hz.setValue(
+            float(
+                self.settings.value(
+                    "joint_plan/execute_command_hz",
+                    self.joint_plan_execute_command_hz.value(),
+                )
+            )
+        )
+        self.joint_plan_execution_duration.setValue(
+            float(
+                self.settings.value(
+                    "joint_plan/execution_duration_s",
+                    self.joint_plan_execution_duration.value(),
+                )
+            )
+        )
+        self.joint_plan_connect_robot.setChecked(
+            _settings_bool(
+                self.settings.value(
+                    "joint_plan/connect_robot",
+                    self.settings.value(
+                        "joint_plan/lcm_initial_state",
+                        self.joint_plan_connect_robot.isChecked(),
+                    ),
+                ),
+                self.joint_plan_connect_robot.isChecked(),
+            )
+        )
+        self.joint_plan_initial_joint_position.setText(
+            self.settings.value(
+                "joint_plan/initial_joint_position",
+                self.joint_plan_initial_joint_position.text(),
+            )
+        )
+        self._load_end_effector_setting(self.joint_plan_left_end_effector, "joint_plan/left_end_effector")
+        self._load_end_effector_setting(self.joint_plan_right_end_effector, "joint_plan/right_end_effector")
         self.joint_plan_max_adaptive_iterations.setValue(
             int(
                 self.settings.value(
@@ -5683,6 +5815,23 @@ class WheeledArmGui(QMainWindow):
         self.settings.setValue("joint_plan/velocity_scale", self.joint_plan_velocity_scale.value())
         self.settings.setValue("joint_plan/acceleration_scale", self.joint_plan_acceleration_scale.value())
         self.settings.setValue("joint_plan/interactive_goal", self.joint_plan_interactive_goal.isChecked())
+        self.settings.setValue("joint_plan/lcm_url", self.joint_plan_lcm_url.text())
+        self.settings.setValue(
+            "joint_plan/lcm_feedback_timeout_s", self.joint_plan_lcm_feedback_timeout.value()
+        )
+        self.settings.setValue("joint_plan/lcm_start_timeout_s", self.joint_plan_lcm_start_timeout.value())
+        self.settings.setValue("joint_plan/execute_command_hz", self.joint_plan_execute_command_hz.value())
+        self.settings.setValue("joint_plan/execution_duration_s", self.joint_plan_execution_duration.value())
+        self.settings.setValue("joint_plan/connect_robot", self.joint_plan_connect_robot.isChecked())
+        self.settings.setValue(
+            "joint_plan/initial_joint_position", self.joint_plan_initial_joint_position.text()
+        )
+        self.settings.setValue(
+            "joint_plan/left_end_effector", self.joint_plan_left_end_effector.currentText()
+        )
+        self.settings.setValue(
+            "joint_plan/right_end_effector", self.joint_plan_right_end_effector.currentText()
+        )
         self.settings.setValue(
             "joint_plan/max_adaptive_iterations", self.joint_plan_max_adaptive_iterations.value()
         )
@@ -6412,6 +6561,15 @@ class WheeledArmGui(QMainWindow):
             "max_blend_deviation": self.joint_plan_max_blend_deviation.value(),
             "preview_only": preview_only,
             "interactive_goal": self.joint_plan_interactive_goal.isChecked(),
+            "connect_robot": self.joint_plan_connect_robot.isChecked(),
+            "initial_joint_position": self.joint_plan_initial_joint_position.text().strip(),
+            "lcm_url": self.joint_plan_lcm_url.text().strip(),
+            "lcm_feedback_timeout_s": self.joint_plan_lcm_feedback_timeout.value(),
+            "lcm_start_timeout_s": self.joint_plan_lcm_start_timeout.value(),
+            "execute_command_hz": self.joint_plan_execute_command_hz.value(),
+            "execution_duration_s": self.joint_plan_execution_duration.value(),
+            "left_end_effector": self.joint_plan_left_end_effector.currentText(),
+            "right_end_effector": self.joint_plan_right_end_effector.currentText(),
             "host": self.joint_plan_host.text().strip() or "localhost",
             "port": str(self.joint_plan_port.value()),
         }
@@ -6420,22 +6578,60 @@ class WheeledArmGui(QMainWindow):
         if preview_only is None:
             preview_only = True
         params = self._joint_plan_params(preview_only)
-        return [
-            sys.executable,
-            str(ROBOPLAN_EXAMPLE_RUNNER),
-            ROBOPLAN_JOINT_PLANNER_MODULE,
-            "--params-json",
-            json.dumps(params, ensure_ascii=False),
-        ]
+        command = _module_command(TOPPRA_JOINT_PLANNER_MODULE)
+        for name, value in params.items():
+            option = "--" + name.replace("_", "-")
+            if isinstance(value, bool):
+                command.append(option if value else "--no-" + name.replace("_", "-"))
+            else:
+                command.extend([option, str(value)])
+        return command
 
     def _joint_plan_viser_url(self) -> QUrl:
         host = self.joint_plan_host.text().strip() or "localhost"
         return QUrl(f"http://{host}:{self.joint_plan_port.value()}")
 
-    def refresh_joint_plan_viser_view(self) -> None:
+    def _schedule_joint_plan_viser_refresh(self, delay_ms: int = JOINT_PLAN_VISER_REFRESH_INTERVAL_MS) -> None:
+        self._joint_plan_viser_refresh_generation += 1
+        generation = self._joint_plan_viser_refresh_generation
+        QTimer.singleShot(delay_ms, lambda: self._retry_joint_plan_viser_refresh(generation, 1))
+
+    def _retry_joint_plan_viser_refresh(self, generation: int, attempt: int) -> None:
+        if generation != self._joint_plan_viser_refresh_generation:
+            return
+        if not self.joint_plan_runner.is_running:
+            return
+
+        host = self.joint_plan_host.text().strip() or "localhost"
+        port = self.joint_plan_port.value()
+        if _http_endpoint_ready(host, port):
+            self.refresh_joint_plan_viser_view(wait_for_server=False)
+            return
+
+        self.joint_plan_viser_hint.setText(
+            f"等待 Viser 启动中... ({attempt}/{JOINT_PLAN_VISER_REFRESH_ATTEMPTS})"
+        )
+        if attempt >= JOINT_PLAN_VISER_REFRESH_ATTEMPTS:
+            url = self._joint_plan_viser_url().toString()
+            self.joint_plan_viser_hint.setText(
+                f"Viser 暂未响应，请稍后点击“刷新预览”或在浏览器打开 {url}。"
+            )
+            return
+        QTimer.singleShot(
+            JOINT_PLAN_VISER_REFRESH_INTERVAL_MS,
+            lambda: self._retry_joint_plan_viser_refresh(generation, attempt + 1),
+        )
+
+    def refresh_joint_plan_viser_view(self, wait_for_server: bool = False) -> None:
         url = self._joint_plan_viser_url()
         if self.joint_plan_viser_view is None:
             self.joint_plan_viser_hint.setText(f"Qt WebEngine 不可用，请在浏览器打开 {url.toString()}。")
+            return
+        if wait_for_server and not _http_endpoint_ready(
+            self.joint_plan_host.text().strip() or "localhost",
+            self.joint_plan_port.value(),
+        ):
+            self.joint_plan_viser_hint.setText(f"Viser 还在启动，请稍后重试：{url.toString()}")
             return
         self.joint_plan_viser_view.setUrl(url)
         self.joint_plan_viser_stack.setCurrentWidget(self.joint_plan_viser_view)
@@ -6871,30 +7067,44 @@ class WheeledArmGui(QMainWindow):
         return True
 
     def validate_joint_plan_form(self, *, preview_only: bool) -> bool:
-        if not ROBOPLAN_EXAMPLE_RUNNER.exists():
+        if importlib.util.find_spec(TOPPRA_JOINT_PLANNER_MODULE) is None:
             QMessageBox.warning(
                 self,
-                "缺少 RoboPlan 启动器",
-                f"未找到示例启动器：\n{ROBOPLAN_EXAMPLE_RUNNER}",
-            )
-            return False
-        if not (ROBOPLAN_EXAMPLE_DIR / f"{ROBOPLAN_JOINT_PLANNER_MODULE}.py").exists():
-            QMessageBox.warning(
-                self,
-                "缺少关节规划示例",
-                f"未找到示例程序：\n{ROBOPLAN_EXAMPLE_DIR / f'{ROBOPLAN_JOINT_PLANNER_MODULE}.py'}",
+                "缺少关节规划模块",
+                f"未找到 LeRobot 关节规划模块：\n{TOPPRA_JOINT_PLANNER_MODULE}",
             )
             return False
         if not self.joint_plan_host.text().strip():
             QMessageBox.warning(self, "缺少 viser host", "请填写 Viser host。")
             return False
+        if self.joint_plan_connect_robot.isChecked():
+            if not self.joint_plan_lcm_url.text().strip():
+                QMessageBox.warning(self, "缺少 LCM URL", "连接机器人实物时需要填写机器人 LCM URL。")
+                return False
+        else:
+            initial_text = self.joint_plan_initial_joint_position.text().strip()
+            if initial_text:
+                try:
+                    values = [float(item.strip()) for item in initial_text.replace(";", ",").split(",") if item.strip()]
+                except ValueError:
+                    QMessageBox.warning(self, "初始关节格式错误", "指定初始关节必须是逗号分隔的数字，单位 rad。")
+                    return False
+                if len(values) not in {14, 21}:
+                    QMessageBox.warning(
+                        self,
+                        "初始关节数量错误",
+                        f"指定初始关节需要 14 个双臂关节或 21 个全身关节，当前为 {len(values)} 个。",
+                    )
+                    return False
         if preview_only:
+            return True
+        if not self.joint_plan_connect_robot.isChecked():
             return True
         answer = QMessageBox.question(
             self,
             "确认执行关节规划",
-            "执行规划会启动可播放轨迹的 RoboPlan/TOPPRA 示例。\n\n"
-            "请先完成预览并确认轨迹、碰撞检查和工作空间安全。\n\n"
+            "执行规划会启动 LeRobot RoboPlan/TOPPRA 程序，并允许在 Viser 中向实物机器人发送左右臂 LCM 关节命令。\n\n"
+            "请先完成预览并确认轨迹、碰撞检查、急停和工作空间安全。\n\n"
             "确认继续吗？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
@@ -7121,8 +7331,8 @@ class WheeledArmGui(QMainWindow):
         self._save_settings()
         if self.joint_plan_runner.start(
             self.build_joint_plan_command(preview_only=preview_only),
-            cwd=ROBOPLAN_EXAMPLE_DIR,
-            env_overrides=_roboplan_env_overrides(),
+            cwd=PROJECT_ROOT,
+            env_overrides=_toppra_env_overrides(),
         ):
             self.preview_joint_plan_btn.setEnabled(False)
             self.start_joint_plan_btn.setEnabled(False)
@@ -7130,7 +7340,9 @@ class WheeledArmGui(QMainWindow):
             self.status_label.setText("关节规划运行中")
             self.preview_tabs.setCurrentWidget(self.joint_plan_command_preview)
             if self.joint_plan_auto_refresh.isChecked():
-                QTimer.singleShot(1600, self.refresh_joint_plan_viser_view)
+                self._schedule_joint_plan_viser_refresh()
+            if self.joint_plan_connect_robot.isChecked() and self.joint_plan_lcm_url.text().strip():
+                self._ensure_robot_status_monitor(self.joint_plan_lcm_url.text().strip())
 
     @Slot()
     def preview_joint_plan(self) -> None:
@@ -7143,6 +7355,7 @@ class WheeledArmGui(QMainWindow):
     @Slot()
     def stop_joint_plan(self) -> None:
         self._stop_requested_sources.add("规划")
+        self._joint_plan_viser_refresh_generation += 1
         self.joint_plan_runner.interrupt()
         QTimer.singleShot(3000, self._offer_joint_plan_kill_if_running)
 
@@ -7258,6 +7471,8 @@ class WheeledArmGui(QMainWindow):
             return self.lcm_spy_url.text().strip()
         if self.tabs.currentWidget() is self.joint_jog_tab:
             return self.joint_jog_lcm_url.text().strip()
+        if self.tabs.currentWidget() is self.joint_plan_tab:
+            return self.joint_plan_lcm_url.text().strip()
         return self.lcm_url.text().strip()
 
     def _ensure_robot_status_monitor(self, lcm_url: str) -> None:
@@ -7541,6 +7756,7 @@ class WheeledArmGui(QMainWindow):
 
     @Slot(int)
     def _on_joint_plan_finished(self, code: int) -> None:
+        self._joint_plan_viser_refresh_generation += 1
         self.preview_joint_plan_btn.setEnabled(True)
         self.start_joint_plan_btn.setEnabled(True)
         self.stop_joint_plan_btn.setEnabled(False)

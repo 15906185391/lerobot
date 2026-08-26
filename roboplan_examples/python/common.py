@@ -11,7 +11,7 @@ from numpy.typing import NDArray
 import pinocchio as pin
 
 from roboplan.core import Box, Cylinder, Mesh, Scene, Sphere, OcTree
-from roboplan.example_models import get_package_models_dir
+from roboplan.example_models import get_package_models_dir, get_package_share_dir
 
 
 @dataclass
@@ -148,13 +148,46 @@ class RobotModelConfig:
 
 
 # Base directory for all robot models
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 ROBOPLAN_MODELS_DIR = get_package_models_dir()
-SOURCE_ROBOPLAN_MODELS_DIR = (
-    Path(__file__).resolve().parents[2] / "roboplan_example_models" / "models"
+ROBOPLAN_SHARE_DIR = get_package_share_dir()
+SOURCE_ROBOPLAN_MODELS_DIR = REPOSITORY_ROOT / "roboplan_example_models" / "models"
+WHEELED_ROBOT_ASSETS_DIR = (
+    REPOSITORY_ROOT
+    / "src"
+    / "lerobot"
+    / "teleoperators"
+    / "wheeled_arm_pico"
+    / "assets"
 )
-REAL_ROBOT_MODELS_DIR = SOURCE_ROBOPLAN_MODELS_DIR / "wheeled_robot_sim" / "urdf"
-if not (REAL_ROBOT_MODELS_DIR / "real_robot.urdf").exists():
-    REAL_ROBOT_MODELS_DIR = ROBOPLAN_MODELS_DIR / "wheeled_robot_sim" / "urdf"
+REAL_ROBOT_MODEL_CANDIDATES = (
+    WHEELED_ROBOT_ASSETS_DIR / "wheeled_robot_sim" / "urdf",
+    SOURCE_ROBOPLAN_MODELS_DIR / "wheeled_robot_sim" / "urdf",
+    ROBOPLAN_MODELS_DIR / "wheeled_robot_sim" / "urdf",
+)
+REAL_ROBOT_MODELS_DIR = next(
+    (
+        candidate
+        for candidate in REAL_ROBOT_MODEL_CANDIDATES
+        if (candidate / "real_robot.urdf").exists()
+    ),
+    REAL_ROBOT_MODEL_CANDIDATES[-1],
+)
+
+
+def get_package_paths() -> list[Path]:
+    """Return package search paths for RoboPlan and local LeRobot model assets."""
+    candidates = (
+        WHEELED_ROBOT_ASSETS_DIR,
+        SOURCE_ROBOPLAN_MODELS_DIR,
+        ROBOPLAN_MODELS_DIR,
+        ROBOPLAN_SHARE_DIR,
+    )
+    paths: list[Path] = []
+    for candidate in candidates:
+        if candidate.exists() and candidate not in paths:
+            paths.append(candidate)
+    return paths
 
 
 def get_model_data():

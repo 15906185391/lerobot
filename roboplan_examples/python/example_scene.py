@@ -2,9 +2,8 @@
 
 import numpy as np
 
-from common import get_model_data
+from common import get_model_data, get_package_paths
 from roboplan.core import JointConfiguration, Scene
-from roboplan.example_models import get_package_share_dir
 
 
 if __name__ == "__main__":
@@ -19,7 +18,7 @@ if __name__ == "__main__":
 
     model = "ur5"
     model_data = get_model_data()[model]
-    package_paths = [get_package_share_dir()]
+    package_paths = get_package_paths()
 
     scene = Scene(
         "test_scene", model_data.urdf_path, model_data.srdf_path, package_paths

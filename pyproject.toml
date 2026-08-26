@@ -365,6 +365,7 @@ lerobot-annotate="lerobot.scripts.lerobot_annotate:main"
 lerobot-rollout="lerobot.scripts.lerobot_rollout:main"
 lerobot-wheeled-arm-gui="lerobot.scripts.wheeled_arm_gui:main"
 lerobot-wheeled-arm-joint-jog="lerobot.scripts.wheeled_arm_joint_jog:main"
+lerobot-wheeled-arm-toppra-joint-planning="lerobot.scripts.wheeled_arm_toppra_joint_planning:main"
 
 # ---------------- Tool Configurations ----------------
 
