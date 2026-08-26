@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<robot name="real_robot">
+  <group name="left_arm">
+    <chain base_link="arm_base_link" tip_link="AR5-5_07L-W4C4A2_tcp"/>
+  </group>
+  <group name="right_arm">
+    <chain base_link="arm_base_link" tip_link="AR5-5_07R-W4C4A2_tcp"/>
+  </group>
+  <group name="dual_arm">
+    <group name="left_arm"/>
+    <group name="right_arm"/>
+  </group>
+
+  <disable_collisions link1="torso" link2="neck_yaw_link" reason="Adjacent"/>
+  <disable_collisions link1="neck_yaw_link" link2="head" reason="Adjacent"/>
+  <disable_collisions link1="head" link2="head_rgbd_camera" reason="Adjacent"/>
+  <disable_collisions link1="torso" link2="pelvis" reason="Adjacent"/>
+  <disable_collisions link1="pelvis" link2="hip_roll_link" reason="Adjacent"/>
+  <disable_collisions link1="hip_roll_link" link2="thigh" reason="Adjacent"/>
+  <disable_collisions link1="thigh" link2="knee_pitch_link" reason="Adjacent"/>
+  <disable_collisions link1="knee_pitch_link" link2="ankle_pitch_link" reason="Adjacent"/>
+  <disable_collisions link1="torso" link2="arm_base_link" reason="Adjacent"/>
+
+  <disable_collisions link1="torso" link2="AR5-5_07L-W4C4A2_link1" reason="Adjacent"/>
+  <disable_collisions link1="torso" link2="AR5-5_07R-W4C4A2_link1" reason="Adjacent"/>
+
+  <disable_collisions link1="AR5-5_07L-W4C4A2_link5" link2="AR5-5_07L-W4C4A2_link7" reason="Never"/>
+  <disable_collisions link1="AR5-5_07R-W4C4A2_link5" link2="AR5-5_07R-W4C4A2_link7" reason="Never"/>
+
+
+  <disable_collisions link1="arm_base_link" link2="AR5-5_07R-W4C4A2_base" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07R-W4C4A2_base" link2="AR5-5_07R-W4C4A2_link1" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07R-W4C4A2_link1" link2="AR5-5_07R-W4C4A2_link2" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07R-W4C4A2_link2" link2="AR5-5_07R-W4C4A2_link3" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07R-W4C4A2_link3" link2="AR5-5_07R-W4C4A2_link4" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07R-W4C4A2_link4" link2="AR5-5_07R-W4C4A2_link5" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07R-W4C4A2_link5" link2="AR5-5_07R-W4C4A2_link6" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07R-W4C4A2_link6" link2="AR5-5_07R-W4C4A2_link7" reason="Adjacent"/>
+
+  <disable_collisions link1="arm_base_link" link2="AR5-5_07L-W4C4A2_base" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07L-W4C4A2_base" link2="AR5-5_07L-W4C4A2_link1" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07L-W4C4A2_link1" link2="AR5-5_07L-W4C4A2_link2" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07L-W4C4A2_link2" link2="AR5-5_07L-W4C4A2_link3" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07L-W4C4A2_link3" link2="AR5-5_07L-W4C4A2_link4" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07L-W4C4A2_link4" link2="AR5-5_07L-W4C4A2_link5" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07L-W4C4A2_link5" link2="AR5-5_07L-W4C4A2_link6" reason="Adjacent"/>
+  <disable_collisions link1="AR5-5_07L-W4C4A2_link6" link2="AR5-5_07L-W4C4A2_link7" reason="Adjacent"/>
+</robot>

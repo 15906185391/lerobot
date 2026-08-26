@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+
+import sys
+import time
+from collections import deque
+import tyro
+import xacro
+
+import numpy as np
+import pinocchio as pin
+from pinocchio.visualize import ViserVisualizer
+
+from common import get_model_data
+from roboplan.core import Scene, JointConfiguration, CartesianConfiguration
+from roboplan.example_models import get_package_share_dir
+from roboplan.simple_ik import SimpleIkOptions, SimpleIk
+
+
+def main(
+    model: str = "ur5",
+    max_iters: int = 100,
+    step_size: float = 1.0,
+    max_linear_error_norm: float = 0.001,
+    max_angular_error_norm: float = 0.001,
+    check_collisions: bool = True,
+    host: str = "localhost",
+    port: str = "8000",
+):
+    """
+    Run the IK example with the provided parameters.
+
+
+    Parameters:
+        model: The name of the model to use.
+        max_iters: Maximum number of iterations for the IK solver.
+        step_size: Integration step size for the IK solver.
+        max_linear_error_norm: The maximum linear error norm for the IK solver.
+        max_angular_error_norm: The maximum angular error norm for the IK solver.
+        check_collisions: Whether to check for collisions when solving IK.
+        host: The host for the ViserVisualizer.
+        port: The port for the ViserVisualizer.
+    """
+    model_data = get_model_data().get(model)
+    if model_data is None:
+        print(f"Invalid model requested: {model}")
+        sys.exit(1)
+
+    # Pre-process with xacro. This is not necessary for raw URDFs.
+    urdf_xml = xacro.process_file(model_data.urdf_path).toxml()
+    srdf_xml = xacro.process_file(model_data.srdf_path).toxml()
+    package_paths = [get_package_share_dir()]
+
+    # Specify argument names to distinguish overloaded Scene constructors from python.
+    scene = Scene(
+        "test_scene",
+        urdf=urdf_xml,
+        srdf=srdf_xml,
+        package_paths=package_paths,
+        yaml_config_path=model_data.yaml_config_path,
+    )
+    q_indices = scene.getJointGroupInfo(model_data.default_joint_group).q_indices
+
+    # Create a redundant Pinocchio model just for visualization with mimic joints.
+    # When Pinocchio 4.x releases nanobind bindings, we should be able to directly grab the model from the scene instead.
+    model = pin.buildModelFromXML(urdf_xml, mimic=True)
+    collision_model = pin.buildGeomFromUrdfString(
+        model, urdf_xml, pin.GeometryType.COLLISION, package_dirs=package_paths
+    )
+    visual_model = pin.buildGeomFromUrdfString(
+        model, urdf_xml, pin.GeometryType.VISUAL, package_dirs=package_paths
+    )
+
+    viz = ViserVisualizer(model, collision_model, visual_model)
+    viz.initViewer(open=False, loadModel=True, host=host, port=port)
+
+    # Set up an IK solver
+    options = SimpleIkOptions(
+        group_name=model_data.default_joint_group,
+        max_iters=max_iters,
+        step_size=step_size,
+        max_linear_error_norm=max_linear_error_norm,
+        max_angular_error_norm=max_angular_error_norm,
+        check_collisions=check_collisions,
+    )
+    ik_solver = SimpleIk(scene, options)
+
+    start = JointConfiguration()
+    start.positions = np.array(model_data.starting_joint_config)[q_indices]
+
+    goals = []
+    transform_controls = []
+    solution = JointConfiguration()
+    solve_times = deque(maxlen=30)
+    solve_stats = viz.viewer.gui.add_text(
+        "Solve stats",
+        "Waiting for the first solve.",
+        disabled=True,
+    )
+
+    for ee_name in model_data.ee_names:
+        goal = CartesianConfiguration()
+        goal.base_frame = model_data.base_link
+        goal.tip_frame = ee_name
+        goals.append(goal)
+
+    def solveIk(_):
+        t_start = time.perf_counter()
+        q_full = scene.getCurrentJointPositions()
+        world_T_base = scene.forwardKinematics(q_full, model_data.base_link)
+        for goal, controls in zip(goals, transform_controls):
+            world_T_target = pin.SE3(
+                pin.Quaternion(controls.wxyz[[1, 2, 3, 0]]), controls.position
+            ).homogeneous
+            goal.tform = np.linalg.inv(world_T_base) @ world_T_target
+
+        result = ik_solver.solveIk(goals, start, solution)
+        elapsed = time.perf_counter() - t_start
+        solve_times.append(elapsed)
+        avg = sum(solve_times) / len(solve_times)
+        freq = 1.0 / avg if avg > 0.0 else 0.0
+        stats = (
+            f"last {elapsed * 1000.0:.1f} ms | "
+            f"avg {avg * 1000.0:.1f} ms | "
+            f"{freq:.1f} Hz"
+        )
+        solve_stats.value = stats
+        print(f"Solve stats: {stats}")
+        if result:
+            q_full = scene.toFullJointPositions(
+                model_data.default_joint_group, solution.positions
+            )
+            viz.display(q_full)
+            scene.setJointPositions(q_full)
+            start.positions = solution.positions
+
+    for ee_name in model_data.ee_names:
+        controls = viz.viewer.scene.add_transform_controls(
+            f"/ik_markers/{ee_name}",
+            depth_test=False,
+            scale=0.2,
+            disable_sliders=True,
+            visible=True,
+        )
+        controls.on_update(solveIk)
+        transform_controls.append(controls)
+
+    # Create a marker reset button.
+    reset_button = viz.viewer.gui.add_button("Reset Marker")
+
+    @reset_button.on_click
+    def reset_position(_):
+        for goal, controls in zip(goals, transform_controls):
+            world_T_target = scene.forwardKinematics(
+                scene.getCurrentJointPositions(), goal.tip_frame
+            )
+            controls.position = world_T_target[:3, 3]
+            controls.wxyz = pin.Quaternion(world_T_target[:3, :3]).coeffs()[
+                [3, 0, 1, 2]
+            ]
+
+    random_button = viz.viewer.gui.add_button("Randomize Pose")
+
+    @random_button.on_click
+    def randomize_position(pos):
+        q_rand = scene.randomCollisionFreePositions()[q_indices]
+        q_full = scene.toFullJointPositions(model_data.default_joint_group, q_rand)
+        scene.setJointPositions(q_full)
+        viz.display(q_full)
+        start.positions = q_rand
+        reset_position(pos)
+
+    # Display the arm and marker at the starting position, then sleep forever.
+    randomize_position(None)
+    try:
+        while True:
+            time.sleep(10.0)
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    tyro.cli(main)
