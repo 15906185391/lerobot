@@ -6449,7 +6449,7 @@ class WheeledArmGui(QMainWindow):
         if self.lcm_spy_runner.start(
             self.build_lcm_spy_command(),
             cwd=LCM_TYPES_DIR,
-            env_overrides={"PATH": _env_path_with_current_python_bin()},
+            env_overrides={"PATH": _env_path_with_current_python_bin(), "LD_LIBRARY_PATH": None},
         ):
             self.start_lcm_spy_btn.setEnabled(False)
             self.stop_lcm_spy_btn.setEnabled(True)

@@ -5,6 +5,7 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 JAVA_DIR="${DIR}/java"
 DEFAULT_PORT=8880
 DEFAULT_TTL=255
+JCHART2D_JAR="${JCHART2D_JAR:-/usr/share/java/jchart2d-3.2.2.jar}"
 
 usage() {
   cat <<EOF
@@ -45,5 +46,10 @@ else
 fi
 
 cd "${JAVA_DIR}"
-export CLASSPATH="${JAVA_DIR}/my_types.jar:${JAVA_DIR}/lcm.jar"
-exec lcm-spy --lcm-url="${lcm_url}"
+classpath="${JAVA_DIR}/my_types.jar:${JAVA_DIR}/lcm.jar"
+if [[ -f "${JCHART2D_JAR}" ]]; then
+  classpath="${classpath}:${JCHART2D_JAR}"
+fi
+
+exec java -server -Djava.net.preferIPv4Stack=true -Xmx128m -Xms64m -ea \
+  -cp "${classpath}" lcm.spy.Spy --lcm-url="${lcm_url}"
