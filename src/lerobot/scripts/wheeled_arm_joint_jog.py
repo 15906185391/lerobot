@@ -32,6 +32,11 @@ from pathlib import Path
 
 import numpy as np
 
+from lerobot.robots.wheeled_arm.config_wheeled_arm import (
+    WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR,
+    WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR,
+    WHEELED_ARM_END_EFFECTOR_TYPES,
+)
 
 QT_XCB_INSTALL_HINT = (
     "sudo apt-get update && sudo apt-get install -y "
@@ -95,6 +100,7 @@ try:
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
+        QComboBox,
         QDoubleSpinBox,
         QFileDialog,
         QFormLayout,
@@ -137,12 +143,24 @@ MAX_SPEED_DEG_S = 20.0
 DEFAULT_MAX_ACCEL_DEG_S2 = 30.0
 MAX_ACCEL_DEG_S2 = 120.0
 DEFAULT_TARGET_TOLERANCE_DEG = 0.03
+DEFAULT_GRIPPER_MAX_SPEED = 30.0
+MAX_GRIPPER_MAX_SPEED = 130.0
+DEFAULT_GRIPPER_MAX_ACCELERATION = 120.0
+MAX_GRIPPER_MAX_ACCELERATION = 520.0
+DEFAULT_GRIPPER_TARGET_TOLERANCE = 0.05
+DEFAULT_GRIPPER_JOG_STEP = 5.0
+MIN_GRIPPER_JOG_STEP = 0.1
+MAX_GRIPPER_JOG_STEP = 30.0
+GRIPPER_POSITION_LOWER = 0.0
+GRIPPER_POSITION_UPPER = 130.0
+SUCTION_POSITION_LOWER = 0.0
+SUCTION_POSITION_UPPER = 1.0
 ARM_JOINT_NAMES = [f"left_arm_{i}" for i in range(7)] + [f"right_arm_{i}" for i in range(7)]
 GRIPPER_JOINT_NAMES = ["left_gripper", "right_gripper"]
 HEAD_JOINT_NAMES = ["neck_yaw", "neck_pitch"]
 JOINT_NAMES = [*ARM_JOINT_NAMES, *GRIPPER_JOINT_NAMES, *HEAD_JOINT_NAMES]
 HEAD_JOINT_INDICES = {16, 17}
-GRIPPER_JOINT_INDICES = {14, 15}
+END_EFFECTOR_JOINT_INDICES = {14, 15}
 RESET_LEFT_ARM_DEG = np.array([20.0, 70.0, -75.0, 100.0, -25.0, 0.0, 0.0], dtype=np.float32)
 RESET_RIGHT_ARM_DEG = np.array([-20.0, 70.0, 75.0, 100.0, 25.0, 0.0, 0.0], dtype=np.float32)
 
@@ -177,18 +195,26 @@ def _embedded_viser_placeholder_html() -> str:
     """
 
 
-def _part_for_index(index: int) -> str:
+def _part_for_index(index: int, left_end_effector: str, right_end_effector: str) -> str:
     if index < 7:
         return "left_arm"
     if index < 14:
         return "right_arm"
     if index == 14:
-        return "left_gripper"
+        return f"left_{left_end_effector}"
     if index == 15:
-        return "right_gripper"
+        return f"right_{right_end_effector}"
     if index in HEAD_JOINT_INDICES:
         return "head"
     raise ValueError(f"Unknown joint index for jogging: {index}")
+
+
+def _end_effector_joint_name(index: int, left_end_effector: str, right_end_effector: str) -> str:
+    if index == 14:
+        return f"left_{left_end_effector}"
+    if index == 15:
+        return f"right_{right_end_effector}"
+    return JOINT_NAMES[index]
 
 
 def _urdf_joint_name(index: int) -> str | None:
@@ -311,6 +337,11 @@ class JointJogSession(QObject):
         self.max_speed_rad_s = _deg_to_rad(DEFAULT_MAX_SPEED_DEG_S)
         self.max_accel_rad_s2 = _deg_to_rad(DEFAULT_MAX_ACCEL_DEG_S2)
         self.target_tolerance_rad = _deg_to_rad(DEFAULT_TARGET_TOLERANCE_DEG)
+        self.gripper_max_speed = DEFAULT_GRIPPER_MAX_SPEED
+        self.gripper_max_accel = DEFAULT_GRIPPER_MAX_ACCELERATION
+        self.gripper_target_tolerance = DEFAULT_GRIPPER_TARGET_TOLERANCE
+        self.left_end_effector = WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR
+        self.right_end_effector = WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR
         self.command_lock = threading.Lock()
         self.command_stop_event = threading.Event()
         self.command_thread: threading.Thread | None = None
@@ -335,6 +366,8 @@ class JointJogSession(QObject):
         max_acceleration_deg_s2: float,
         visualize: bool,
         urdf_path: Path,
+        left_end_effector: str = WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR,
+        right_end_effector: str = WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR,
         visualization_host: str,
         visualization_port: int,
         visualization_open_browser: bool,
@@ -354,7 +387,13 @@ class JointJogSession(QObject):
             return
 
         try:
-            self.handler = LCMHandler(lcm_url=lcm_url)
+            self.handler = LCMHandler(
+                lcm_url=lcm_url,
+                left_end_effector=left_end_effector,
+                right_end_effector=right_end_effector,
+            )
+            self.left_end_effector = left_end_effector
+            self.right_end_effector = right_end_effector
             self.feedback_timeout_s = feedback_timeout_s
             self.command_hz = _clip(command_hz, 1.0, MAX_COMMAND_HZ)
             self.max_speed_rad_s = _deg_to_rad(_clip(max_speed_deg_s, 0.1, MAX_SPEED_DEG_S))
@@ -406,6 +445,16 @@ class JointJogSession(QObject):
             return bool(self.handler.has_arm_state_feedback(self.feedback_timeout_s))
         except TypeError:
             return bool(self.handler.has_arm_state_feedback(self.feedback_timeout_s))
+
+    def _is_gripper_joint(self, index: int) -> bool:
+        return (index == 14 and self.left_end_effector == "gripper") or (
+            index == 15 and self.right_end_effector == "gripper"
+        )
+
+    def _is_suction_joint(self, index: int) -> bool:
+        return (index == 14 and self.left_end_effector == "suction") or (
+            index == 15 and self.right_end_effector == "suction"
+        )
 
     @Slot()
     def poll_feedback(self) -> None:
@@ -587,12 +636,23 @@ class JointJogSession(QObject):
             moving_indices = self.active_target.moving_indices.copy()
             target = self.active_target.target.copy()
             done = True
-            max_speed = self.max_speed_rad_s
-            max_accel_delta = self.max_accel_rad_s2 * dt
 
             for index in moving_indices:
+                if self._is_suction_joint(index):
+                    package[index] = float(_clip(target[index], SUCTION_POSITION_LOWER, SUCTION_POSITION_UPPER))
+                    velocity[index] = 0.0
+                    continue
+                is_gripper = self._is_gripper_joint(index)
+                target_tolerance = (
+                    self.gripper_target_tolerance if is_gripper else self.target_tolerance_rad
+                )
+                max_speed = self.gripper_max_speed if is_gripper else self.max_speed_rad_s
+                max_accel_delta = (
+                    self.gripper_max_accel if is_gripper else self.max_accel_rad_s2
+                ) * dt
+
                 delta = float(target[index] - package[index])
-                if abs(delta) <= self.target_tolerance_rad:
+                if abs(delta) <= target_tolerance:
                     package[index] = target[index]
                     velocity[index] = 0.0
                     continue
@@ -650,12 +710,17 @@ class JointJogSession(QObject):
     def _set_moving_flags(self, moving_indices: set[int]) -> None:
         if self.handler is None:
             return
-        parts = {_part_for_index(index) for index in moving_indices}
+        parts = {
+            _part_for_index(index, self.left_end_effector, self.right_end_effector)
+            for index in moving_indices
+        }
         for part, flag_name in (
             ("left_arm", "left_arm_moving"),
             ("right_arm", "right_arm_moving"),
             ("left_gripper", "left_gripper_moving"),
             ("right_gripper", "right_gripper_moving"),
+            ("left_suction", "left_suction_moving"),
+            ("right_suction", "right_suction_moving"),
             ("head", "head_moving"),
             ("waist", "waist_moving"),
             ("leg", "leg_moving"),
@@ -668,13 +733,15 @@ class JointRow(QWidget):
     jogRequested = Signal(int, float)
     targetChanged = Signal()
 
-    def __init__(self, index: int, name: str, lower: float, upper: float, is_gripper: bool = False) -> None:
+    def __init__(self, index: int, name: str, lower: float, upper: float, joint_kind: str = "joint") -> None:
         super().__init__()
         self.index = index
         self.name = name
         self.lower = lower
         self.upper = upper
-        self.is_gripper = is_gripper
+        self.joint_kind = joint_kind
+        self.is_gripper = joint_kind == "gripper"
+        self.is_suction = joint_kind == "suction"
         self.current_value = 0.0
         self.target_initialized = False
         self.setMinimumHeight(44)
@@ -690,10 +757,10 @@ class JointRow(QWidget):
         self.current_label = QLabel("-")
         self.current_label.setMinimumWidth(96)
         self.target = QDoubleSpinBox()
-        self.target.setDecimals(3 if is_gripper else 2)
+        self.target.setDecimals(0 if self.is_suction else (3 if self.is_gripper else 2))
         self.target.setRange(lower, upper)
-        self.target.setSingleStep(0.02 if is_gripper else 1.0)
-        self.target.setSuffix("" if is_gripper else " deg")
+        self.target.setSingleStep(1.0 if self.is_suction else (5.0 if self.is_gripper else 1.0))
+        self.target.setSuffix("" if self.is_gripper or self.is_suction else " deg")
         self.target.setMinimumWidth(132)
         self.target.valueChanged.connect(lambda _value: self.targetChanged.emit())
         self.minus_btn = QPushButton("-")
@@ -712,13 +779,15 @@ class JointRow(QWidget):
         layout.setColumnStretch(3, 1)
 
     def set_current(self, raw_value: float) -> None:
-        self.current_value = float(raw_value if self.is_gripper else _rad_to_deg(raw_value))
-        suffix = "" if self.is_gripper else " deg"
-        self.current_label.setText(
-            f"{self.current_value:.3f}{suffix}"
-            if self.is_gripper
-            else f"{self.current_value:.2f}{suffix}"
-        )
+        if self.is_suction:
+            self.current_value = float(raw_value)
+            self.current_label.setText(f"{self.current_value:.2f} kPa")
+        elif self.is_gripper:
+            self.current_value = float(raw_value)
+            self.current_label.setText(f"{self.current_value:.3f}")
+        else:
+            self.current_value = float(_rad_to_deg(raw_value))
+            self.current_label.setText(f"{self.current_value:.2f} deg")
         if not self.target_initialized:
             self.sync_target()
 
@@ -731,19 +800,17 @@ class JointRow(QWidget):
 
     def raw_target(self) -> float:
         value = _clip(float(self.target.value()), self.lower, self.upper)
-        return value if self.is_gripper else _deg_to_rad(value)
+        return value if self.is_gripper or self.is_suction else _deg_to_rad(value)
 
     def _request_jog(self, direction: float) -> None:
         window = self.window()
         step = getattr(window, "jog_step", None)
-        if callable(step):
-            jog_step = float(step(self.is_gripper))
-        else:
-            jog_step = 0.02 if self.is_gripper else 1.0
+        default_step = 1.0 if self.is_suction else (5.0 if self.is_gripper else 1.0)
+        jog_step = float(step(self.joint_kind)) if callable(step) else default_step
         target = _clip(float(self.target.value()) + direction * jog_step, self.lower, self.upper)
         self.target.setValue(target)
         self.target_initialized = True
-        self.jogRequested.emit(self.index, target if self.is_gripper else _deg_to_rad(target))
+        self.jogRequested.emit(self.index, target if self.is_gripper or self.is_suction else _deg_to_rad(target))
 
 
 class PathPicker(QWidget):
@@ -846,10 +913,18 @@ class JointJogWindow(QMainWindow):
         self.jog_step_deg.setValue(1.0)
         self.jog_step_deg.setSuffix(" deg")
         self.jog_step_gripper = QDoubleSpinBox()
-        self.jog_step_gripper.setRange(0.001, 0.2)
-        self.jog_step_gripper.setValue(0.02)
+        self.jog_step_gripper.setRange(MIN_GRIPPER_JOG_STEP, MAX_GRIPPER_JOG_STEP)
+        self.jog_step_gripper.setValue(DEFAULT_GRIPPER_JOG_STEP)
+        self.left_end_effector = QComboBox()
+        self.left_end_effector.addItems(list(WHEELED_ARM_END_EFFECTOR_TYPES))
+        self.left_end_effector.setCurrentText(WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR)
+        self.right_end_effector = QComboBox()
+        self.right_end_effector.addItems(list(WHEELED_ARM_END_EFFECTOR_TYPES))
+        self.right_end_effector.setCurrentText(WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR)
         form.addRow("LCM URL", self.lcm_url)
         form.addRow("URDF", self.urdf_path)
+        form.addRow("左臂末端", self.left_end_effector)
+        form.addRow("右臂末端", self.right_end_effector)
         form.addRow("", self.visualize)
         form.addRow("viser host", self.visualization_host)
         form.addRow("viser port", self.visualization_port)
@@ -903,8 +978,8 @@ class JointJogWindow(QMainWindow):
         self.reset_head_btn = QPushButton("头部默认目标")
         self.select_left_btn = QPushButton("勾选左臂")
         self.select_right_btn = QPushButton("勾选右臂")
-        self.select_left_gripper_btn = QPushButton("勾选左夹爪")
-        self.select_right_gripper_btn = QPushButton("勾选右夹爪")
+        self.select_left_gripper_btn = QPushButton("勾选左末端")
+        self.select_right_gripper_btn = QPushButton("勾选右末端")
         self.select_head_btn = QPushButton("勾选头部")
         self.clear_selection_btn = QPushButton("取消勾选")
         preset_buttons = (
@@ -938,7 +1013,7 @@ class JointJogWindow(QMainWindow):
         joints_layout.setVerticalSpacing(10)
         header = QLabel(
             "勾选关节后可批量点动到目标；单行 +/- 会按当前反馈做小步点动。"
-            "手臂和头部角度单位为 degree，夹爪目标为归一化位置 [0, 1]。"
+            "手臂和头部角度单位为 degree，夹爪目标范围为 [0, 130]，吸盘目标范围为 [0, 1]。"
         )
         header.setObjectName("Hint")
         header.setWordWrap(True)
@@ -1020,10 +1095,12 @@ class JointJogWindow(QMainWindow):
         self.reset_head_btn.clicked.connect(lambda: self.set_reset_targets("head"))
         self.select_left_btn.clicked.connect(lambda: self.select_arm("left"))
         self.select_right_btn.clicked.connect(lambda: self.select_arm("right"))
-        self.select_left_gripper_btn.clicked.connect(lambda: self.select_gripper("left"))
-        self.select_right_gripper_btn.clicked.connect(lambda: self.select_gripper("right"))
+        self.select_left_gripper_btn.clicked.connect(lambda: self.select_end_effector("left"))
+        self.select_right_gripper_btn.clicked.connect(lambda: self.select_end_effector("right"))
         self.select_head_btn.clicked.connect(lambda: self.select_arm("head"))
         self.clear_selection_btn.clicked.connect(lambda: self.select_arm("none"))
+        self.left_end_effector.currentTextChanged.connect(lambda *_: self._rebuild_joint_rows())
+        self.right_end_effector.currentTextChanged.connect(lambda *_: self._rebuild_joint_rows())
         self.urdf_path.changed.connect(self._rebuild_joint_rows)
 
     def _connect_session(self) -> None:
@@ -1040,6 +1117,8 @@ class JointJogWindow(QMainWindow):
         self.visualization_port.setValue(self.args.visualization_port)
         self.visualize.setChecked(self.args.visualize)
         self.open_browser.setChecked(self.args.open_browser)
+        self.left_end_effector.setCurrentText(self.args.left_end_effector)
+        self.right_end_effector.setCurrentText(self.args.right_end_effector)
         self.command_hz.setValue(self.args.command_hz)
         self.max_speed.setValue(self.args.max_speed_deg_s)
         self.max_accel.setValue(self.args.max_acceleration_deg_s2)
@@ -1050,16 +1129,39 @@ class JointJogWindow(QMainWindow):
         self.joint_rows = []
 
         limits = _read_joint_limits_deg(Path(self.urdf_path.text() or DEFAULT_URDF_PATH).expanduser())
+        left_end_effector = self.left_end_effector.currentText()
+        right_end_effector = self.right_end_effector.currentText()
         for index, name in enumerate(JOINT_NAMES):
-            is_gripper = index in GRIPPER_JOINT_INDICES
-            lower, upper = (0.0, 1.0) if is_gripper else limits[index]
-            row = JointRow(index, name, lower, upper, is_gripper=is_gripper)
+            if index == 14:
+                joint_kind = left_end_effector
+                name = _end_effector_joint_name(index, left_end_effector, right_end_effector)
+                lower, upper = (
+                    (SUCTION_POSITION_LOWER, SUCTION_POSITION_UPPER)
+                    if joint_kind == "suction"
+                    else (GRIPPER_POSITION_LOWER, GRIPPER_POSITION_UPPER)
+                )
+            elif index == 15:
+                joint_kind = right_end_effector
+                name = _end_effector_joint_name(index, left_end_effector, right_end_effector)
+                lower, upper = (
+                    (SUCTION_POSITION_LOWER, SUCTION_POSITION_UPPER)
+                    if joint_kind == "suction"
+                    else (GRIPPER_POSITION_LOWER, GRIPPER_POSITION_UPPER)
+                )
+            else:
+                joint_kind = "joint"
+                lower, upper = limits[index]
+            row = JointRow(index, name, lower, upper, joint_kind=joint_kind)
             row.jogRequested.connect(self.session.jog_to)
             self.joint_rows.append(row)
             self.joint_layout.addWidget(row, index, 0)
 
-    def jog_step(self, is_gripper: bool) -> float:
-        return self.jog_step_gripper.value() if is_gripper else self.jog_step_deg.value()
+    def jog_step(self, joint_kind: str) -> float:
+        if joint_kind == "suction":
+            return 1.0
+        if joint_kind == "gripper":
+            return self.jog_step_gripper.value()
+        return self.jog_step_deg.value()
 
     @Slot()
     def start_session(self) -> None:
@@ -1075,6 +1177,8 @@ class JointJogWindow(QMainWindow):
             max_acceleration_deg_s2=self.max_accel.value(),
             visualize=self.visualize.isChecked(),
             urdf_path=Path(self.urdf_path.text()).expanduser(),
+            left_end_effector=self.left_end_effector.currentText(),
+            right_end_effector=self.right_end_effector.currentText(),
             visualization_host=self.visualization_host.text().strip() or "0.0.0.0",
             visualization_port=self.visualization_port.value(),
             visualization_open_browser=self.open_browser.isChecked(),
@@ -1087,6 +1191,8 @@ class JointJogWindow(QMainWindow):
         self.stop_publish_btn.setEnabled(connected)
         self.sync_btn.setEnabled(connected)
         self.move_selected_btn.setEnabled(connected)
+        self.left_end_effector.setEnabled(not connected)
+        self.right_end_effector.setEnabled(not connected)
         for button in (
             self.reset_left_btn,
             self.reset_right_btn,
@@ -1163,15 +1269,15 @@ class JointJogWindow(QMainWindow):
             for row in self.joint_rows:
                 row.enable.setChecked(False)
 
-    def select_gripper(self, side: str) -> None:
-        gripper_index_by_side = {"left": 14, "right": 15}
-        if side not in gripper_index_by_side and side != "both":
-            raise ValueError(f"Unknown gripper side: {side}")
+    def select_end_effector(self, side: str) -> None:
+        end_effector_index_by_side = {"left": 14, "right": 15}
+        if side not in end_effector_index_by_side and side != "both":
+            raise ValueError(f"Unknown end effector side: {side}")
         for row in self.joint_rows:
             checked = (
-                (side == "left" and row.index == gripper_index_by_side["left"])
-                or (side == "right" and row.index == gripper_index_by_side["right"])
-                or (side == "both" and row.index in gripper_index_by_side.values())
+                (side == "left" and row.index == end_effector_index_by_side["left"])
+                or (side == "right" and row.index == end_effector_index_by_side["right"])
+                or (side == "both" and row.index in end_effector_index_by_side.values())
             )
             row.enable.setChecked(checked)
 
@@ -1368,6 +1474,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lcm-url", default=DEFAULT_LCM_URL)
     parser.add_argument("--urdf-path", type=Path, default=DEFAULT_URDF_PATH)
+    parser.add_argument(
+        "--left-end-effector",
+        choices=WHEELED_ARM_END_EFFECTOR_TYPES,
+        default=WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR,
+    )
+    parser.add_argument(
+        "--right-end-effector",
+        choices=WHEELED_ARM_END_EFFECTOR_TYPES,
+        default=WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR,
+    )
     parser.add_argument("--visualize", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visualization-host", default="0.0.0.0")
     parser.add_argument("--visualization-port", type=int, default=8092)

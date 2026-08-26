@@ -3505,6 +3505,8 @@ class WheeledArmGui(QMainWindow):
         self.joint_jog_lcm_url = QLineEdit("udpm://239.255.76.67:8880?ttl=1")
         self.joint_jog_urdf_path = PathPicker("默认使用 wheeled_arm_pico assets/real_robot.urdf", directory=False)
         self.joint_jog_urdf_path.setText(str(DEFAULT_WHEELED_ARM_URDF))
+        self.joint_jog_left_end_effector = self._end_effector_combo(WHEELED_ARM_DEFAULT_LEFT_END_EFFECTOR)
+        self.joint_jog_right_end_effector = self._end_effector_combo(WHEELED_ARM_DEFAULT_RIGHT_END_EFFECTOR)
         self.joint_jog_visualize = QCheckBox("启动 viser URDF 可视化")
         self.joint_jog_visualize.setChecked(False)
         self.joint_jog_visualization_host = QLineEdit("0.0.0.0")
@@ -3513,6 +3515,8 @@ class WheeledArmGui(QMainWindow):
         self.joint_jog_open_browser.setChecked(True)
         form.addRow("LCM URL", self.joint_jog_lcm_url)
         form.addRow("URDF", self.joint_jog_urdf_path)
+        form.addRow("左臂末端", self.joint_jog_left_end_effector)
+        form.addRow("右臂末端", self.joint_jog_right_end_effector)
         form.addRow("", self.joint_jog_visualize)
         form.addRow("viser host", self.joint_jog_visualization_host)
         form.addRow("viser port", self.joint_jog_visualization_port)
@@ -3554,6 +3558,8 @@ class WheeledArmGui(QMainWindow):
 
         for widget in (
             self.joint_jog_lcm_url,
+            self.joint_jog_left_end_effector,
+            self.joint_jog_right_end_effector,
             self.joint_jog_visualize,
             self.joint_jog_visualization_host,
             self.joint_jog_visualization_port,
@@ -3561,6 +3567,8 @@ class WheeledArmGui(QMainWindow):
         ):
             self._connect_preview_signal(widget, self.update_joint_jog_preview)
         self.joint_jog_urdf_path.changed.connect(self.update_joint_jog_preview)
+        self.joint_jog_left_end_effector.currentTextChanged.connect(self.update_joint_jog_preview)
+        self.joint_jog_right_end_effector.currentTextChanged.connect(self.update_joint_jog_preview)
 
         return self._scrollable(page)
 
@@ -5165,6 +5173,8 @@ class WheeledArmGui(QMainWindow):
         self.joint_jog_urdf_path.setText(
             self.settings.value("joint_jog/urdf_path", self.joint_jog_urdf_path.text())
         )
+        self._load_end_effector_setting(self.joint_jog_left_end_effector, "joint_jog/left_end_effector")
+        self._load_end_effector_setting(self.joint_jog_right_end_effector, "joint_jog/right_end_effector")
         self.joint_jog_visualization_host.setText(
             self.settings.value("joint_jog/visualization_host", self.joint_jog_visualization_host.text())
         )
@@ -5331,6 +5341,8 @@ class WheeledArmGui(QMainWindow):
         )
         self.settings.setValue("joint_jog/lcm_url", self.joint_jog_lcm_url.text())
         self.settings.setValue("joint_jog/urdf_path", self.joint_jog_urdf_path.text())
+        self.settings.setValue("joint_jog/left_end_effector", self.joint_jog_left_end_effector.currentText())
+        self.settings.setValue("joint_jog/right_end_effector", self.joint_jog_right_end_effector.currentText())
         self.settings.setValue("joint_jog/visualization_host", self.joint_jog_visualization_host.text())
         self.settings.setValue("joint_jog/visualization_port", self.joint_jog_visualization_port.value())
         self.settings.setValue("joint_jog/visualize", self.joint_jog_visualize.isChecked())
@@ -6034,6 +6046,8 @@ class WheeledArmGui(QMainWindow):
         command = _module_command("lerobot.scripts.wheeled_arm_joint_jog")
         command.extend(["--lcm-url", self.joint_jog_lcm_url.text().strip()])
         command.extend(["--urdf-path", self.joint_jog_urdf_path.text()])
+        command.extend(["--left-end-effector", self.joint_jog_left_end_effector.currentText()])
+        command.extend(["--right-end-effector", self.joint_jog_right_end_effector.currentText()])
         command.extend(["--visualization-host", self.joint_jog_visualization_host.text().strip() or "0.0.0.0"])
         command.extend(["--visualization-port", str(self.joint_jog_visualization_port.value())])
         command.append("--visualize" if self.joint_jog_visualize.isChecked() else "--no-visualize")
