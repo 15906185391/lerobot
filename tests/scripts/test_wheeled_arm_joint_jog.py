@@ -66,6 +66,40 @@ def test_wheeled_arm_gui_plumbs_roboplan_joint_planning_page():
     assert 'self.settings.setValue("joint_plan/model", self.joint_plan_model.currentText())' in source
 
 
+def test_wheeled_arm_gui_help_describes_current_pico_recording_controls():
+    source = Path("src/lerobot/scripts/wheeled_arm_gui.py").read_text()
+
+    assert "默认末端配置为左臂 suction、右臂 gripper" in source
+    assert "gripper 连续开合，suction 按阈值吸取/释放" in source
+    assert "PICO 位置/姿态滤波" in source
+    assert "Grip 软释放" in source
+    assert "覆盖 front ROS2 相机参数" in source
+    assert "右侧状态、命令预览和运行日志可折叠" in source
+
+
+def test_wheeled_arm_gui_help_includes_joint_planning_and_zoom_controls():
+    source = Path("src/lerobot/scripts/wheeled_arm_gui.py").read_text()
+
+    assert 'self.tabs.addTab(self._page(_HELP_JOINT_PLAN_HTML), "关节规划")' in source
+    assert "RoboPlan TOPPRA 关节规划" in source
+    assert "Plan trajectory" in source
+    assert "Execute on robot" in source
+    assert "setSizeGripEnabled(True)" in source
+    assert "WindowMaximizeButtonHint" in source
+    assert "def _set_help_font_size(self, font_size: int)" in source
+    assert "Ctrl+= / Ctrl++" in source
+
+
+def test_wheeled_arm_gui_right_panel_can_collapse():
+    source = Path("src/lerobot/scripts/wheeled_arm_gui.py").read_text()
+
+    assert "self.right_panel_scroll = self._make_right_panel()" in source
+    assert "self.right_panel_rail = self._make_right_panel_rail()" in source
+    assert "def _set_right_panel_collapsed(self, collapsed: bool, *, persist: bool = False)" in source
+    assert "self.root_layout.setColumnStretch(2, 0 if collapsed else 4)" in source
+    assert "self.settings.setValue(\"view/right_panel_collapsed\", self._right_panel_collapsed)" in source
+
+
 def test_wheeled_arm_toppra_joint_planning_script_registered():
     pyproject = Path("pyproject.toml").read_text()
     source = Path("src/lerobot/scripts/wheeled_arm_toppra_joint_planning.py").read_text()

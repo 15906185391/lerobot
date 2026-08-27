@@ -147,8 +147,8 @@ try:
         QPushButton,
         QScrollArea,
         QSizePolicy,
-        QSplitter,
         QSpinBox,
+        QSplitter,
         QStackedWidget,
         QTabWidget,
         QTextBrowser,
@@ -2309,11 +2309,30 @@ class PathPicker(QWidget):
 
 
 class HelpDialog(QDialog):
+    MIN_HELP_FONT_SIZE = 12
+    DEFAULT_HELP_FONT_SIZE = 14
+    MAX_HELP_FONT_SIZE = 24
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.settings = QSettings("LeRobot", "WheeledArmPicoGui")
+        self._help_font_size = int(
+            self.settings.value("help/font_size", self.DEFAULT_HELP_FONT_SIZE)
+        )
+        self._help_font_size = max(
+            self.MIN_HELP_FONT_SIZE,
+            min(self.MAX_HELP_FONT_SIZE, self._help_font_size),
+        )
+        self._help_pages: list[QTextBrowser] = []
         self.setObjectName("HelpDialog")
         self.setWindowTitle("Wheeled Arm PICO 使用说明")
         self.setMinimumSize(QSize(920, 700))
+        self.setSizeGripEnabled(True)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
         self.setAutoFillBackground(True)
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.Window, QColor("#f7f9fc"))
@@ -2328,21 +2347,43 @@ class HelpDialog(QDialog):
 
         title = QLabel("Wheeled Arm PICO 使用说明")
         title.setObjectName("DialogTitle")
-        subtitle = QLabel("按现场流程整理：采集前检查、PICO 遥操作、episode 控制、复位急停、查看和数据处理。")
+        subtitle = QLabel("按现场流程整理：采集前检查、末端工具选择、PICO 遥操作、关节规划、episode 控制、复位急停、查看和数据处理。")
         subtitle.setObjectName("MutedLabel")
         subtitle.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
-        tabs = QTabWidget()
-        tabs.setObjectName("HelpTabs")
-        tabs.addTab(self._page(_HELP_RECORDING_HTML), "采集")
-        tabs.addTab(self._page(_HELP_TELEOP_HTML), "遥操作流程")
-        tabs.addTab(self._page(_HELP_DATASET_HTML), "数据集")
-        tabs.addTab(self._page(_HELP_COMMANDS_HTML), "常用命令")
-        tabs.addTab(self._page(_HELP_JOINT_JOG_HTML), "关节点动")
-        tabs.addTab(self._page(_HELP_TROUBLESHOOTING_HTML), "故障排查")
-        layout.addWidget(tabs, 1)
+        zoom_row = QHBoxLayout()
+        zoom_row.setContentsMargins(0, 0, 0, 0)
+        zoom_row.setSpacing(8)
+        self.zoom_out_btn = QPushButton("A-")
+        self.zoom_reset_btn = QPushButton("100%")
+        self.zoom_in_btn = QPushButton("A+")
+        for button in (self.zoom_out_btn, self.zoom_reset_btn, self.zoom_in_btn):
+            button.setObjectName("HelpZoomButton")
+            button.setFixedHeight(32)
+        self.zoom_out_btn.setToolTip("缩小说明文字 (Ctrl+-)")
+        self.zoom_reset_btn.setToolTip("恢复默认字号 (Ctrl+0)")
+        self.zoom_in_btn.setToolTip("放大说明文字 (Ctrl+= / Ctrl++)")
+        self.zoom_out_btn.clicked.connect(lambda: self._adjust_help_zoom(-1))
+        self.zoom_reset_btn.clicked.connect(self._reset_help_zoom)
+        self.zoom_in_btn.clicked.connect(lambda: self._adjust_help_zoom(1))
+        zoom_row.addStretch(1)
+        zoom_row.addWidget(self.zoom_out_btn)
+        zoom_row.addWidget(self.zoom_reset_btn)
+        zoom_row.addWidget(self.zoom_in_btn)
+        layout.addLayout(zoom_row)
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("HelpTabs")
+        self.tabs.addTab(self._page(_HELP_RECORDING_HTML), "采集")
+        self.tabs.addTab(self._page(_HELP_TELEOP_HTML), "遥操作流程")
+        self.tabs.addTab(self._page(_HELP_JOINT_PLAN_HTML), "关节规划")
+        self.tabs.addTab(self._page(_HELP_DATASET_HTML), "数据集")
+        self.tabs.addTab(self._page(_HELP_COMMANDS_HTML), "常用命令")
+        self.tabs.addTab(self._page(_HELP_JOINT_JOG_HTML), "关节点动")
+        self.tabs.addTab(self._page(_HELP_TROUBLESHOOTING_HTML), "故障排查")
+        layout.addWidget(self.tabs, 1)
 
         button_row = QHBoxLayout()
         copy_btn = QPushButton("复制说明")
@@ -2354,11 +2395,62 @@ class HelpDialog(QDialog):
         button_row.addWidget(copy_btn)
         button_row.addWidget(close_btn)
         layout.addLayout(button_row)
+        self._update_help_zoom_buttons()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            key = event.key()
+            if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+                self._adjust_help_zoom(1)
+                event.accept()
+                return
+            if key == Qt.Key.Key_Minus:
+                self._adjust_help_zoom(-1)
+                event.accept()
+                return
+            if key == Qt.Key.Key_0:
+                self._reset_help_zoom()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _help_text_stylesheet(self) -> str:
+        body_size = self._help_font_size
+        return (
+            f"body {{ background-color: #ffffff; color: #172033; font-size: {body_size}px; line-height: 1.55; }} "
+            f"h1 {{ color: #101827; font-size: {body_size + 10}px; margin: 0 0 8px 0; }} "
+            f"h2 {{ color: #101827; font-size: {body_size + 4}px; margin: 20px 0 8px 0; }} "
+            f"h3 {{ color: #1f3b57; font-size: {body_size + 1}px; margin: 12px 0 6px 0; }} "
+            "p { margin: 6px 0 10px 0; } "
+            "ol, ul { margin: 6px 0 12px 22px; padding: 0; } "
+            "li { margin: 6px 0; } "
+            "b { color: #101827; } "
+            "code { background-color: #eef3f8; color: #172033; padding: 2px 5px; border-radius: 4px; } "
+            "pre { background-color: #f3f6fa; color: #172033; border: 1px solid #d7e0eb; "
+            "border-radius: 8px; padding: 10px 12px; margin: 8px 0 12px 0; } "
+            "table { border-collapse: collapse; margin: 8px 0 14px 0; width: 100%; } "
+            "th { background-color: #edf4fb; color: #102036; font-weight: 700; } "
+            "td, th { border: 1px solid #d7e0eb; padding: 8px 10px; vertical-align: top; } "
+            f".lead {{ color: #405169; font-size: {body_size + 1}px; margin-bottom: 12px; }} "
+            ".note { background-color: #f5f8fc; border: 1px solid #d7e0eb; border-radius: 8px; "
+            "padding: 10px 12px; margin: 10px 0 14px 0; } "
+            ".safe { background-color: #eefbf4; border: 1px solid #b8e4c8; border-radius: 8px; "
+            "padding: 10px 12px; margin: 10px 0 14px 0; } "
+            ".warn { background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; "
+            "padding: 10px 12px; margin: 10px 0 14px 0; } "
+            ".step { background-color: #ffffff; border: 1px solid #d9e3ee; border-radius: 8px; "
+            "padding: 10px 12px; margin: 8px 0; } "
+            ".step-title { color: #102036; font-weight: 700; } "
+            ".muted { color: #647084; } "
+            ".kbd { background-color: #172033; color: #ffffff; border-radius: 4px; padding: 2px 6px; "
+            "font-weight: 700; }"
+        )
 
     def _page(self, html: str) -> QTextBrowser:
         page = QTextBrowser()
         page.setReadOnly(True)
         page.setObjectName("HelpText")
+        page.setProperty("help_html", html)
         page.setAutoFillBackground(True)
         palette = page.palette()
         palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
@@ -2374,37 +2466,39 @@ class HelpDialog(QDialog):
             "}"
         )
         page.viewport().setStyleSheet("background-color: #ffffff; color: #172033;")
-        page.document().setDefaultStyleSheet(
-            "body { background-color: #ffffff; color: #172033; font-size: 14px; line-height: 1.55; } "
-            "h1 { color: #101827; font-size: 24px; margin: 0 0 8px 0; } "
-            "h2 { color: #101827; font-size: 18px; margin: 20px 0 8px 0; } "
-            "h3 { color: #1f3b57; font-size: 15px; margin: 12px 0 6px 0; } "
-            "p { margin: 6px 0 10px 0; } "
-            "ol, ul { margin: 6px 0 12px 22px; padding: 0; } "
-            "li { margin: 6px 0; } "
-            "b { color: #101827; } "
-            "code { background-color: #eef3f8; color: #172033; padding: 2px 5px; border-radius: 4px; } "
-            "pre { background-color: #f3f6fa; color: #172033; border: 1px solid #d7e0eb; "
-            "border-radius: 8px; padding: 10px 12px; margin: 8px 0 12px 0; } "
-            "table { border-collapse: collapse; margin: 8px 0 14px 0; width: 100%; } "
-            "th { background-color: #edf4fb; color: #102036; font-weight: 700; } "
-            "td, th { border: 1px solid #d7e0eb; padding: 8px 10px; vertical-align: top; } "
-            ".lead { color: #405169; font-size: 15px; margin-bottom: 12px; } "
-            ".note { background-color: #f5f8fc; border: 1px solid #d7e0eb; border-radius: 8px; "
-            "padding: 10px 12px; margin: 10px 0 14px 0; } "
-            ".safe { background-color: #eefbf4; border: 1px solid #b8e4c8; border-radius: 8px; "
-            "padding: 10px 12px; margin: 10px 0 14px 0; } "
-            ".warn { background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; "
-            "padding: 10px 12px; margin: 10px 0 14px 0; } "
-            ".step { background-color: #ffffff; border: 1px solid #d9e3ee; border-radius: 8px; "
-            "padding: 10px 12px; margin: 8px 0; } "
-            ".step-title { color: #102036; font-weight: 700; } "
-            ".muted { color: #647084; } "
-            ".kbd { background-color: #172033; color: #ffffff; border-radius: 4px; padding: 2px 6px; "
-            "font-weight: 700; }"
-        )
-        page.setHtml(f"<body>{html}</body>")
+        self._apply_help_zoom(page)
+        self._help_pages.append(page)
         return page
+
+    def _apply_help_zoom(self, page: QTextBrowser) -> None:
+        html_text = str(page.property("help_html") or "")
+        vertical_scrollbar = page.verticalScrollBar()
+        scroll_value = vertical_scrollbar.value()
+        page.document().setDefaultStyleSheet(self._help_text_stylesheet())
+        page.setHtml(f"<body>{html_text}</body>")
+        vertical_scrollbar.setValue(min(scroll_value, vertical_scrollbar.maximum()))
+
+    @Slot()
+    def _reset_help_zoom(self) -> None:
+        self._set_help_font_size(self.DEFAULT_HELP_FONT_SIZE)
+
+    def _adjust_help_zoom(self, delta: int) -> None:
+        self._set_help_font_size(self._help_font_size + delta)
+
+    def _set_help_font_size(self, font_size: int) -> None:
+        font_size = max(self.MIN_HELP_FONT_SIZE, min(self.MAX_HELP_FONT_SIZE, font_size))
+        if font_size == self._help_font_size:
+            return
+        self._help_font_size = font_size
+        for page in self._help_pages:
+            self._apply_help_zoom(page)
+        self.settings.setValue("help/font_size", self._help_font_size)
+        self._update_help_zoom_buttons()
+
+    def _update_help_zoom_buttons(self) -> None:
+        self.zoom_out_btn.setEnabled(self._help_font_size > self.MIN_HELP_FONT_SIZE)
+        self.zoom_in_btn.setEnabled(self._help_font_size < self.MAX_HELP_FONT_SIZE)
+        self.zoom_reset_btn.setText(f"{round(self._help_font_size / self.DEFAULT_HELP_FONT_SIZE * 100)}%")
 
     def _copy_all(self) -> None:
         QApplication.clipboard().setText(HELP_PLAIN_TEXT)
@@ -2468,19 +2562,20 @@ class RuntimeExceptionDialog(QDialog):
 
 _HELP_RECORDING_HTML = """
 <h1>数据采集，一次完整流程</h1>
-<p class="lead">这一页适合第一次上手机器人的用户。按顺序做，不需要记命令行；右侧命令预览只是给现场排查使用。</p>
+<p class="lead">这一页适合第一次上手机器人的用户。按顺序做，不需要记命令行；右侧状态、命令预览和运行日志可折叠，需要排查时再展开。</p>
 
 <div class="safe">
   <b>实物安全前提：</b>程序默认要求新鲜左右臂 LCM 状态。没有读到
   <code>MANIP_LEFT_ARM_STATE</code> 和 <code>MANIP_RIGHT_ARM_STATE</code> 时会停止启动，避免机器人从零位或旧状态跳变。
+  默认末端配置为左臂 suction、右臂 gripper，请在实物连接前确认和当前机器人一致。
 </div>
 
 <h2>采集前</h2>
 <table>
   <tr><th>步骤</th><th>要做什么</th><th>确认结果</th></tr>
   <tr><td>1. 检查现场</td><td>确认急停、供电、机器人工作空间、相机节点、PICO 服务和 LCM 网络。</td><td>人员和障碍物离开工作空间。</td></tr>
-  <tr><td>2. 填写数据集</td><td>填写 Repo ID、任务描述、集数、单集秒数、FPS 和 LCM URL。</td><td>任务描述与实际演示动作一致。</td></tr>
-  <tr><td>3. 打开可视化</td><td>保持 Rerun 数据窗口和 Rerun 机器人 3D 开启；viser URDF 默认关闭，只有排查 IK/URDF 时再手动开启。</td><td>一个看数据流，一个看机器人模型。</td></tr>
+  <tr><td>2. 填写数据集</td><td>填写 Repo ID、任务描述、集数、单集秒数、FPS、LCM URL，并确认左/右臂末端类型。</td><td>任务描述与实际演示动作一致；末端类型和实物一致。</td></tr>
+  <tr><td>3. 设置显示和稳定性</td><td>保持 Rerun 数据窗口和 Rerun 机器人 3D 开启；viser URDF 默认关闭。需要时调整 PICO 滤波、死区、关节平滑、最大速度/加速度和 Grip 软释放。</td><td>一个看数据流，一个看机器人模型；动作稳定且延迟可接受。</td></tr>
 </table>
 
 <h2>采集中</h2>
@@ -2488,7 +2583,7 @@ _HELP_RECORDING_HTML = """
   <tr><th>步骤</th><th>要做什么</th><th>确认结果</th></tr>
   <tr><td>4. 开始采集</td><td>点击“开始采集”，观察右侧运行日志。</td><td>robot、teleop、camera 和 PICO 连接成功。</td></tr>
   <tr><td>5. 摆起始姿态</td><td>等待阶段可遥操作但不保存。移动到任务起点后按 <span class="kbd">A</span>。</td><td>episode 开始写入。</td></tr>
-  <tr><td>6. 完成演示</td><td>按住 grip 控制机械臂，trigger 控制夹爪。</td><td>时间到自动结束，也可按 <span class="kbd">A</span> 提前结束。</td></tr>
+  <tr><td>6. 完成演示</td><td>按住 grip 控制机械臂，trigger 控制对应末端工具：gripper 连续开合，suction 按阈值吸取/释放。</td><td>时间到自动结束，也可按 <span class="kbd">A</span> 提前结束。</td></tr>
 </table>
 
 <h2>一集结束后</h2>
@@ -2504,13 +2599,21 @@ _HELP_RECORDING_HTML = """
 </div>
 
 <div class="note">
-  <b>抖动排查：</b>需要观察最终下发关节命令时，可勾选“发布 action 到 ROS2”，默认发布到 <code>/lerobot/action</code>。
+  <b>末端工具：</b>默认左臂为 <code>suction</code>、右臂为 <code>gripper</code>。采集、常用命令里的遥操作/回放/查关节限位/rollout、关节规划和关节点动都会把左/右末端配置传给对应程序。
+</div>
+
+<div class="note">
+  <b>相机参数：</b>默认使用 robot 配置里的 front ROS2 相机。只有 topic、分辨率或 FPS 与现场不同，才勾选“覆盖 front ROS2 相机参数”。
+</div>
+
+<div class="note">
+  <b>抖动排查：</b>需要观察最终下发关节命令时，可勾选“发布 action 到 ROS2”，默认发布到 <code>/lerobot/action</code>。PICO 输入滤波/死区主要抑制手柄噪声；关节平滑、最大速度/加速度和 Grip 软释放主要抑制 IK 输出和松手瞬间的抖动。
 </div>
 """
 
 _HELP_TELEOP_HTML = """
 <h1>PICO 遥操作流程</h1>
-<p class="lead">遥操作时请把注意力放在机器人和 Rerun 状态上。按住 grip 才会移动对应机械臂，松开后保持当前位置。</p>
+<p class="lead">遥操作时请把注意力放在机器人和 Rerun 状态上。按住 grip 才会移动对应机械臂，松开后会短暂软释放减速，然后保持当前位置。</p>
 
 <div class="safe">
   <b>启动同步：</b>开始遥操作前，程序会从 LCM 读取当前左右臂关节状态，同步到 PICO IK，并重置 PICO 相对位姿基线。
@@ -2523,7 +2626,7 @@ _HELP_TELEOP_HTML = """
   <tr><td>启动</td><td>点击 GUI 的“开始采集”。</td><td>看运行日志是否完成 robot、PICO、相机连接。</td></tr>
   <tr><td>摆起始姿态</td><td>在等待阶段遥操作机器人到任务起点。</td><td>此时不会写入 episode。</td></tr>
   <tr><td>开始录制</td><td>按 <span class="kbd">A</span> 开始当前 episode。</td><td>Rerun 显示 observation、action、图像和机器人 3D。</td></tr>
-  <tr><td>演示动作</td><td>按住 grip 移动机械臂，trigger 控制夹爪。</td><td>动作不满意可按 <span class="kbd">B</span> 重录。</td></tr>
+  <tr><td>演示动作</td><td>按住 grip 移动机械臂，trigger 控制对应末端工具。</td><td>动作不满意可按 <span class="kbd">B</span> 重录。</td></tr>
   <tr><td>结束</td><td>时间到自动结束，或按 <span class="kbd">A</span> 提前进入下一阶段。</td><td>每集结束后会自动 movej 复位。</td></tr>
 </table>
 
@@ -2532,11 +2635,28 @@ _HELP_TELEOP_HTML = """
   <tr><th>输入</th><th>作用</th><th>建议</th></tr>
   <tr><td><span class="kbd">Left grip</span></td><td>激活左臂跟随左手柄</td><td>移动前先小幅试探。</td></tr>
   <tr><td><span class="kbd">Right grip</span></td><td>激活右臂跟随右手柄</td><td>松开后右臂保持当前位置。</td></tr>
-  <tr><td><span class="kbd">Trigger</span></td><td>控制对应夹爪开合</td><td>夹爪范围可在高级参数调整。</td></tr>
+  <tr><td><span class="kbd">Trigger</span></td><td>控制对应末端工具</td><td>gripper 为连续开合；suction 为超过阈值吸取、低于阈值释放。</td></tr>
   <tr><td><span class="kbd">A</span></td><td>开始 episode 或提前进入下一阶段</td><td>等待阶段最常用。</td></tr>
   <tr><td><span class="kbd">B</span></td><td>丢弃当前 episode 并重录</td><td>动作失败时使用。</td></tr>
   <tr><td><span class="kbd">X</span></td><td>停止整次采集；reset 时按住会中断 movej 复位轨迹</td><td>异常时优先使用硬件急停。</td></tr>
   <tr><td><span class="kbd">Y</span></td><td>重置 PICO 相对位姿基线</td><td>先松开 grip，再按 Y。</td></tr>
+</table>
+
+<h2>末端工具与 trigger 映射</h2>
+<table>
+  <tr><th>末端类型</th><th>动作 feature</th><th>trigger 行为</th><th>默认</th></tr>
+  <tr><td><code>suction</code></td><td><code>left_suction.pos</code> / <code>right_suction.pos</code></td><td>二值化：大于等于阈值发布吸取，小于阈值发布释放。</td><td>左臂</td></tr>
+  <tr><td><code>gripper</code></td><td><code>left_gripper.pos</code> / <code>right_gripper.pos</code></td><td>连续映射：0 接近 open，1 接近 closed，并经过死区和平滑。</td><td>右臂</td></tr>
+</table>
+
+<h2>动作稳定性参数</h2>
+<table>
+  <tr><th>GUI 字段</th><th>作用</th><th>调参方向</th></tr>
+  <tr><td>PICO 位置/姿态滤波</td><td>对手柄输入做平滑。</td><td>数值越小越稳，但延迟越大；1.0 表示不滤波。</td></tr>
+  <tr><td>PICO 位置/姿态死区</td><td>忽略很小的手柄抖动。</td><td>抖动明显时适当增大，动作变钝时减小。</td></tr>
+  <tr><td>关节平滑系数</td><td>对 IK 后的关节目标做 EMA。</td><td>越小越稳但跟随越慢。</td></tr>
+  <tr><td>最大关节速度/加速度</td><td>对每个关节目标做软限幅。</td><td>实机第一次测试建议保守；动作太慢再逐步放大。</td></tr>
+  <tr><td>Grip 软释放</td><td>松开 grip 后继续短暂发送减速指令。</td><td>松手抖动或硬刹明显时适当增大。</td></tr>
 </table>
 
 <h2>复位姿态</h2>
@@ -2546,6 +2666,52 @@ _HELP_TELEOP_HTML = """
 
 <div class="warn">
   <b>注意：</b><span class="kbd">X</span> 是软件层停止请求。reset 中断会停止继续发布 movej 并关闭 moving flags，但不能替代硬件急停、断电保护或底层控制器安全机制。
+</div>
+"""
+
+_HELP_JOINT_PLAN_HTML = """
+<h1>RoboPlan TOPPRA 关节规划</h1>
+<p class="lead">关节规划页用于启动 <code>lerobot-wheeled-arm-toppra-joint-planning</code>。先在 Viser 里预览轨迹，确认路径和安全边界，再决定是否连接实物执行。</p>
+
+<div class="warn">
+  <b>安全前提：</b>勾选“连接机器人实物”并点击“执行规划”后，Viser 中的 Execute on robot 会向左右臂 LCM 发布关节命令。执行前确认硬件急停、工作空间、负载和旁站人员安全。
+</div>
+
+<h2>推荐流程</h2>
+<table>
+  <tr><th>步骤</th><th>操作</th><th>确认</th></tr>
+  <tr><td>1. 离线预览</td><td>保持“连接机器人实物”关闭，点击“预览规划”。</td><td>右侧内嵌 Viser 或浏览器能打开规划界面。</td></tr>
+  <tr><td>2. 设置目标</td><td>在 Viser 中使用交互式关节滑条调整目标，并点击 Plan trajectory。</td><td>轨迹曲线生成，透明预览机器人动作合理。</td></tr>
+  <tr><td>3. 检查约束</td><td>查看速度、加速度、碰撞提示和路径是否越界。</td><td>没有不可接受的碰撞、突变或姿态穿模。</td></tr>
+  <tr><td>4. 实物执行</td><td>确认安全后勾选“连接机器人实物”，点击“执行规划”，再在 Viser 中点击 Execute on robot。</td><td>程序读取新鲜 LCM 初始状态，并按发布频率发送轨迹。</td></tr>
+  <tr><td>5. 停止清理</td><td>执行完或需要中止时点击“停止规划”。</td><td>规划进程退出，右侧日志显示结束状态。</td></tr>
+</table>
+
+<h2>初始状态怎么选</h2>
+<table>
+  <tr><th>模式</th><th>初始状态来源</th><th>适用场景</th></tr>
+  <tr><td>预览规划</td><td>使用“指定初始关节”，可填 14 个双臂关节或 21 个全身关节，单位 rad。</td><td>离线设计目标姿态，不连接实物。</td></tr>
+  <tr><td>执行规划</td><td>勾选“连接机器人实物”后，从 LCM 读取当前左右臂反馈作为起点。</td><td>让规划轨迹从实物当前姿态开始，避免起点跳变。</td></tr>
+</table>
+
+<h2>关键参数</h2>
+<table>
+  <tr><th>GUI 字段</th><th>作用</th><th>调参建议</th></tr>
+  <tr><td>机器人模型</td><td>选择规划脚本支持的模型，默认优先 real_robot。</td><td>通常保持默认。</td></tr>
+  <tr><td>TOPPRA 模式</td><td>选择时间参数化/插值策略，例如 Adaptive、Hermite、Cubic、LinearBlend。</td><td>Adaptive 通常更稳；需要平滑形状时再试 Hermite/Cubic。</td></tr>
+  <tr><td>路点数量、路径跨度、曲率系数</td><td>生成预览路径的形状和复杂度。</td><td>先用默认值，路径太激进时减小跨度或曲率。</td></tr>
+  <tr><td>采样步长</td><td>轨迹离散时间步长。</td><td>越小越细但计算/发布点更多。</td></tr>
+  <tr><td>速度缩放、加速度缩放</td><td>按比例降低模型速度/加速度限制。</td><td>实物第一次测试建议小于 1.0。</td></tr>
+  <tr><td>发布频率、执行时长</td><td>控制发送 LCM 命令的频率和轨迹执行时间。</td><td>执行时长为“自动”时使用规划轨迹时长。</td></tr>
+  <tr><td>左臂末端、右臂末端</td><td>决定命令和状态中的末端工具 feature。</td><td>必须和实物、数据集配置一致。</td></tr>
+</table>
+
+<div class="note">
+  <b>内嵌 Viser：</b>“启动后刷新内嵌 Viser”会自动把右侧预览指向 <code>viser host</code> 和 <code>viser port</code>。如果内嵌页面打不开，可点击“浏览器打开”访问同一地址。
+</div>
+
+<div class="note">
+  <b>排查：</b>缺少反馈时先确认 LCM URL 和左右臂状态话题；轨迹过快或过猛时先降低速度缩放/加速度缩放；目标无法到达时检查关节限位、末端类型和模型是否匹配。
 </div>
 """
 
@@ -2581,13 +2747,13 @@ _HELP_DATASET_HTML = """
 
 _HELP_COMMANDS_HTML = """
 <h1>常用命令怎么选</h1>
-<p class="lead">这一页把命令行工具变成按钮。每次运行前都可以先看右侧“命令预览”，确认参数没问题。</p>
+<p class="lead">这一页把命令行工具变成按钮。每次运行前都可以先展开右侧“命令预览”，确认参数没问题；平时可把右侧面板收起，给操作区留更多空间。</p>
 
 <table>
   <tr><th>目标</th><th>选择</th><th>什么时候用</th></tr>
   <tr><td>检查环境</td><td>系统信息</td><td>确认 Python、LeRobot、PyTorch、CUDA、FFmpeg。</td></tr>
   <tr><td>检查硬件</td><td>查找相机 / 查找串口 / 设置 CAN</td><td>采集前排查连接和权限。</td></tr>
-  <tr><td>只试遥操作</td><td>遥操作</td><td>不保存数据，只验证 PICO、IK、LCM 和可视化链路。</td></tr>
+  <tr><td>只试遥操作</td><td>遥操作</td><td>不保存数据，只验证 PICO、IK、LCM、左右末端工具和可视化链路。</td></tr>
   <tr><td>检查下发动作</td><td>遥操作/采集中勾选发布 action 到 ROS2</td><td>把最终发送给机器人的 action 发布到 <code>/lerobot/action</code>，用于排查抖动。</td></tr>
   <tr><td>检查数据动作</td><td>回放 Episode</td><td>把数据集动作重新下发给 wheeled_arm。</td></tr>
   <tr><td>训练和部署</td><td>训练策略 / 评估策略 / 策略 Rollout</td><td>数据质量确认后再使用。</td></tr>
@@ -2643,6 +2809,8 @@ _HELP_TROUBLESHOOTING_HTML = """
   <tr><td>缺少 lcm</td><td>当前 conda 环境</td><td>执行 <code>python -m pip install lcm</code>。</td></tr>
   <tr><td>没有机器人反馈</td><td>LCM URL、组播路由、左右臂状态话题</td><td>确认 <code>MANIP_LEFT_ARM_STATE</code> 和 <code>MANIP_RIGHT_ARM_STATE</code> 正常发布。</td></tr>
   <tr><td>PICO 不动</td><td>PICO 服务、XRoboToolkit SDK、控制器名称</td><td>先用 mock PICO 或独立 teleop 脚本验证链路。</td></tr>
+  <tr><td>机械臂跟随抖动</td><td>PICO 滤波/死区、关节平滑、最大速度/加速度、Grip 软释放</td><td>先降低速度/加速度，适当减小平滑系数；再观察 ROS2 action topic。</td></tr>
+  <tr><td>吸盘或夹爪不对</td><td>左/右臂末端类型、trigger 输入、LCM moving flag</td><td>确认 GUI 的左臂末端/右臂末端和实物一致；suction 只在 trigger 越过阈值时切换吸取/释放。</td></tr>
   <tr><td>IK 碰撞或无解</td><td>URDF、初始姿态、自碰撞阈值</td><td>排查时可临时加入 <code>--teleop.use_self_collision=false</code>。</td></tr>
   <tr><td>相机无图</td><td>topic、分辨率、FPS</td><td>先运行“常用命令 > 查找相机”。</td></tr>
   <tr><td>数据集找不到</td><td>Repo ID 和 root</td><td>确认 Repo ID 带用户名；自定义 root 要和采集时一致。</td></tr>
@@ -2659,26 +2827,30 @@ HELP_PLAIN_TEXT = """Wheeled Arm PICO 使用说明
 安全前提:
 - 程序默认要求新鲜左右臂 LCM 状态。
 - 没有读到 MANIP_LEFT_ARM_STATE 和 MANIP_RIGHT_ARM_STATE 时会停止启动，避免机器人从零位或旧状态跳变。
+- 默认末端配置为左臂 suction、右臂 gripper。连接实物前请确认 GUI 的左臂末端/右臂末端和当前机器人一致。
 
 推荐流程:
 1. 检查急停、供电、机器人工作空间、相机节点、PICO 服务和 LCM 网络。
-2. 在“采集”页填写 Repo ID、任务描述、集数、单集秒数、FPS 和 LCM URL。
-3. 实物采集建议保持 Rerun 数据窗口和 Rerun 机器人 3D 开启，viser URDF 窗口默认关闭以降低遥操作开销。
-4. 点击“开始采集”，先看运行日志是否完成 robot、PICO、相机连接。
-5. 默认“等待 PICO 开始每集”开启。先把机器人移动到任务起点，再按 A 开始保存 episode。
-6. 按住左右 grip 控制对应机械臂，trigger 控制夹爪。
-7. 一集结束后自动 movej 复位；需要重录按 B，需要停止整次采集按 X；复位过程中按住 X 会中断 movej 并结束采集。
-8. 采集完成后到“查看数据集”页点击“使用最近采集”，再打开数据集。
-9. 需要排查最终下发关节命令时，可勾选“发布 action 到 ROS2”，默认 topic 为 /lerobot/action。
+2. 在“采集”页填写 Repo ID、任务描述、集数、单集秒数、FPS、LCM URL，并确认左右臂末端类型。
+3. 实物采集建议保持 Rerun 数据窗口和 Rerun 机器人 3D 开启；viser URDF 默认关闭，只有排查 IK/URDF 时再打开。
+4. 需要更稳时，调整 PICO 位置/姿态滤波、PICO 死区、关节平滑系数、最大关节速度/加速度和 Grip 软释放。
+5. 点击“开始采集”，先看运行日志是否完成 robot、PICO、相机连接。右侧状态/命令预览/运行日志可以折叠，需要排查时再展开。
+6. 默认“等待 PICO 开始每集”开启。先把机器人移动到任务起点，再按 A 开始保存 episode。
+7. 按住左右 grip 控制对应机械臂，trigger 控制对应末端工具：gripper 连续开合，suction 按阈值吸取/释放。
+8. 一集结束后自动 movej 复位；需要重录按 B，需要停止整次采集按 X；复位过程中按住 X 会中断 movej 并结束采集。
+9. 采集完成后到“查看数据集”页点击“使用最近采集”，再打开数据集。
+10. 需要排查最终下发关节命令时，可勾选“发布 action 到 ROS2”，默认 topic 为 /lerobot/action。
 
-二、遥操作流程
+二、PICO 遥操作流程
 1. 佩戴 PICO，双手自然放在安全位置，先不要按 grip。
 2. 启动采集后等待日志出现机器人、相机和 PICO 连接信息。
 3. 程序从 LCM 读取当前左右臂关节状态，同步到 PICO IK，并重置相对位姿基线。
 4. 等待阶段可以遥操作但不会写入 episode。
 5. 按 A 开始保存当前 episode。
-6. 按住左 grip/右 grip 后对应机械臂跟随手柄，松开后保持不动。
-7. 左 trigger/右 trigger 控制左右夹爪。
+6. 按住左 grip/右 grip 后对应机械臂跟随手柄；松开后会短暂软释放减速，然后保持不动。
+7. Trigger 控制当前配置的末端工具：
+   - gripper: trigger=0 接近 open，trigger=1 接近 closed，并经过死区和平滑。
+   - suction: trigger 大于等于阈值时吸取，低于阈值时释放。
 8. 手柄相对位置不顺手时，松开 grip 后按 Y 重置 PICO 相对位姿基线。
 9. 动作失败或质量不好时按 B 重录当前 episode。
 10. 按 X 停止全部采集；reset 阶段按住 X 会请求中断 movej，record 会结束本次采集流程。
@@ -2686,25 +2858,46 @@ HELP_PLAIN_TEXT = """Wheeled Arm PICO 使用说明
 三、PICO 按键速查
 Left grip: 激活左臂跟随。
 Right grip: 激活右臂跟随。
-Trigger: 控制对应夹爪开合。
+Trigger: 控制对应末端工具，gripper 连续开合，suction 二值吸取/释放。
 A: 开始 episode 或提前进入下一阶段。
 B: 丢弃当前 episode 并重录。
 X: 停止整次采集；reset 时按住会请求中断 movej。
 Y: 重置 PICO 相对位姿基线，不直接移动机器人。
 
-复位姿态:
+四、动作稳定性参数
+PICO 位置/姿态滤波: 对手柄输入做平滑；越小越稳但延迟越大，1.0 表示不滤波。
+PICO 位置/姿态死区: 忽略很小的手柄抖动；抖动明显时适当增大。
+关节平滑系数: 对 IK 后的关节目标做 EMA；越小越稳但跟随越慢。
+最大关节速度/加速度: 对每个关节目标做软限幅；实机第一次测试建议保守。
+Grip 软释放: 松开 grip 后继续短暂发送减速指令，缓解松手硬刹抖动。
+发布 action 到 ROS2: 默认 /lerobot/action，用于观察最终下发给机器人的 action。
+
+五、末端与相机
+- 默认左臂为 suction、右臂为 gripper；采集、遥操作、回放、查关节限位、rollout、关节规划和关节点动都会传递左右末端配置。
+- suction 的 action feature 是 left_suction.pos / right_suction.pos；gripper 的 action feature 是 left_gripper.pos / right_gripper.pos。
+- 默认使用 robot 配置里的 front ROS2 相机。只有 topic、分辨率或 FPS 与现场不同，才勾选“覆盖 front ROS2 相机参数”。
+
+六、复位姿态
 左臂: [20, 70, -75, 100, -25, 0, 0] 度
 右臂: [-20, 70, 75, 100, 25, 0, 0] 度
-程序会转换为弧度并通过 movej 下发。
+程序会转换为弧度并通过 movej 下发。X 是软件层停止请求，不能替代硬件急停或底层控制器安全机制。
 
-四、数据集
+七、关节规划
+- 关节规划页启动 lerobot-wheeled-arm-toppra-joint-planning，用于在 Viser 中设置目标、生成 TOPPRA 轨迹并按需执行到实物。
+- 推荐先关闭“连接机器人实物”并点击“预览规划”，在 Viser 中调整关节滑条，点击 Plan trajectory，检查轨迹曲线、碰撞提示和透明预览机器人。
+- 预览规划使用“指定初始关节”作为起点，可填 14 个双臂关节或 21 个全身关节，单位 rad。
+- 需要实物运动时，确认安全后勾选“连接机器人实物”，点击“执行规划”，程序会从 LCM 读取当前左右臂反馈作为轨迹起点；之后在 Viser 中点击 Execute on robot。
+- 速度缩放和加速度缩放用于整体降低模型限制，实物第一次测试建议小于 1.0；执行时长为“自动”时使用规划轨迹时长。
+- 左臂末端、右臂末端必须和实物/数据集配置一致；内嵌 Viser 打不开时点击“浏览器打开”。
+
+八、数据集
 1. 先查看最近采集，确认 episode、图像、observation、action 和 metadata 正常。
 2. 在“编辑数据集”页可加载本地预览，切换 episode、播放、拖动帧、Shift+拖动选择区间。
 3. “填入删除当前 Episode”会把当前 episode 写入删除操作；“裁剪区间”只提示当前区间，不会直接删除帧。
 4. 再编辑失败 episode、任务文本、统计或视频。
 5. 删除、覆盖、重编码前建议备份，或输出到新 Repo ID/root。
 
-五、异常姿态救援：关节点动
+九、异常姿态救援：关节点动
 - 主 GUI 的“关节点动”页只负责打开独立控制台，平时不会连接机器人；打开前会弹出安全确认。
 - 独立控制台内仍需手动点击“启动连接”，之后才会创建 LCM handler；viser URDF 可视化默认关闭，勾选后才会启动。
 - 每次发布前检查左右臂新鲜 LCM 反馈，禁止从零位或旧状态发命令。
@@ -2712,11 +2905,13 @@ Y: 重置 PICO 相对位姿基线，不直接移动机器人。
 - 左臂/右臂/双臂默认目标按钮只填入目标并勾选关节，真正移动仍需点击“点动到勾选目标”。
 - 到达安全姿态后点击“停止发布”和“停止连接”。
 
-六、故障排查
+十、故障排查
 - GUI 无法启动: 运行 setup 脚本安装 PySide6 和 Qt/xcb 系统库。
 - 缺少 lcm: python -m pip install lcm
 - 没有机器人反馈: 检查 LCM URL、组播路由和左右臂状态话题。
 - PICO 不动: 检查 XRoboToolkit SDK、PICO 服务和控制器名称。
+- 机械臂跟随抖动: 调整 PICO 滤波/死区、关节平滑、最大速度/加速度和 Grip 软释放；必要时观察 ROS2 action topic。
+- 吸盘或夹爪不对: 检查左/右臂末端类型、trigger 输入和 LCM moving flag。
 - IK 碰撞/无解: 可临时加 --teleop.use_self_collision=false 排查。
 - 相机无图: 先运行“常用命令 > 查找相机”。
 """
@@ -2753,6 +2948,7 @@ class WheeledArmGui(QMainWindow):
         self._shown_failure_dialogs: set[str] = set()
         self._joint_plan_viser_refresh_generation = 0
         self._stop_requested_sources: set[str] = set()
+        self._right_panel_collapsed = False
 
         self.setWindowTitle("LeRobot Wheeled Arm 控制台")
         self.setWindowIcon(_lerobot_logo_icon())
@@ -2818,6 +3014,7 @@ class WheeledArmGui(QMainWindow):
         root = QWidget()
         root.setObjectName("AppRoot")
         root_layout = QGridLayout(root)
+        self.root_layout = root_layout
         root_layout.setContentsMargins(22, 20, 22, 20)
         root_layout.setHorizontalSpacing(18)
         root_layout.setVerticalSpacing(14)
@@ -2829,17 +3026,21 @@ class WheeledArmGui(QMainWindow):
         title_block = QVBoxLayout()
         title_block.addWidget(title)
         title_block.addWidget(subtitle)
-        root_layout.addLayout(title_block, 0, 0, 1, 2)
+
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(12)
+        header_layout.addLayout(title_block, 1)
 
         self.help_btn = QPushButton("使用说明")
         self.help_btn.setObjectName("HelpButton")
         self.help_btn.clicked.connect(self.show_help)
-        root_layout.addWidget(
+        header_layout.addWidget(
             self.help_btn,
             0,
-            2,
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
         )
+        root_layout.addLayout(header_layout, 0, 0, 1, 3)
 
         self.tabs = QTabWidget()
         self.record_tab = self._make_record_tab()
@@ -2863,10 +3064,13 @@ class WheeledArmGui(QMainWindow):
         root_layout.addWidget(sidebar, 1, 0)
         root_layout.addWidget(self.tabs, 1, 1)
 
-        right_panel = self._make_right_panel()
+        self.right_panel_scroll = self._make_right_panel()
+        self.right_panel_rail = self._make_right_panel_rail()
         self.tabs.currentChanged.connect(self.preview_tabs.setCurrentIndex)
         self.tabs.currentChanged.connect(self._sync_sidebar)
-        root_layout.addWidget(right_panel, 1, 2)
+        root_layout.addWidget(self.right_panel_scroll, 1, 2)
+        root_layout.addWidget(self.right_panel_rail, 1, 2, Qt.AlignmentFlag.AlignRight)
+        self.right_panel_rail.hide()
         root_layout.setColumnStretch(0, 0)
         root_layout.setColumnStretch(1, 5)
         root_layout.setColumnStretch(2, 4)
@@ -2934,6 +3138,26 @@ class WheeledArmGui(QMainWindow):
     def _sync_sidebar(self, index: int) -> None:
         if hasattr(self, "sidebar_buttons") and 0 <= index < len(self.sidebar_buttons):
             self.sidebar_buttons[index].setChecked(True)
+
+    @Slot(bool)
+    def _set_right_panel_visible_from_action(self, visible: bool) -> None:
+        self._set_right_panel_collapsed(not visible, persist=True)
+
+    def _set_right_panel_collapsed(self, collapsed: bool, *, persist: bool = False) -> None:
+        self._right_panel_collapsed = collapsed
+        if hasattr(self, "right_panel_scroll"):
+            self.right_panel_scroll.setVisible(not collapsed)
+        if hasattr(self, "right_panel_rail"):
+            self.right_panel_rail.setVisible(collapsed)
+        if hasattr(self, "root_layout"):
+            self.root_layout.setColumnStretch(2, 0 if collapsed else 4)
+            self.root_layout.setColumnMinimumWidth(2, 44 if collapsed else 0)
+        if hasattr(self, "right_panel_action"):
+            self.right_panel_action.blockSignals(True)
+            self.right_panel_action.setChecked(not collapsed)
+            self.right_panel_action.blockSignals(False)
+        if persist:
+            self.settings.setValue("view/right_panel_collapsed", collapsed)
 
     def _apply_panel_shadow(self, widget: QWidget) -> None:
         shadow = QGraphicsDropShadowEffect(widget)
@@ -3009,6 +3233,13 @@ class WheeledArmGui(QMainWindow):
             action = QAction(label, self)
             action.triggered.connect(lambda _checked=False, tab_index=index: self.tabs.setCurrentIndex(tab_index))
             view_menu.addAction(action)
+
+        view_menu.addSeparator()
+        self.right_panel_action = QAction("显示右侧状态与日志", self)
+        self.right_panel_action.setCheckable(True)
+        self.right_panel_action.setChecked(True)
+        self.right_panel_action.triggered.connect(self._set_right_panel_visible_from_action)
+        view_menu.addAction(self.right_panel_action)
 
         run_current_action = QAction("运行当前页命令", self)
         run_current_action.setShortcut("Ctrl+R")
@@ -4723,6 +4954,19 @@ class WheeledArmGui(QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
 
+        panel_tools = QHBoxLayout()
+        panel_tools.setContentsMargins(0, 0, 0, 0)
+        panel_tools.addStretch(1)
+        self.collapse_right_panel_btn = QPushButton(">")
+        self.collapse_right_panel_btn.setObjectName("PanelIconButton")
+        self.collapse_right_panel_btn.setToolTip("收起右侧状态与日志")
+        self.collapse_right_panel_btn.setFixedSize(QSize(34, 34))
+        self.collapse_right_panel_btn.clicked.connect(
+            lambda: self._set_right_panel_collapsed(True, persist=True)
+        )
+        panel_tools.addWidget(self.collapse_right_panel_btn)
+        layout.addLayout(panel_tools)
+
         status_box = QGroupBox("状态")
         status_layout = QVBoxLayout(status_box)
         self.status_label = QLabel("未运行")
@@ -4844,6 +5088,26 @@ class WheeledArmGui(QMainWindow):
         layout.addWidget(log_box, 2)
 
         return self._scrollable(panel)
+
+    def _make_right_panel_rail(self) -> QWidget:
+        rail = QFrame()
+        rail.setObjectName("RightPanelRail")
+        rail.setFixedWidth(44)
+        self._apply_panel_shadow(rail)
+
+        layout = QVBoxLayout(rail)
+        layout.setContentsMargins(6, 12, 6, 12)
+        layout.setSpacing(8)
+        self.expand_right_panel_btn = QPushButton("<")
+        self.expand_right_panel_btn.setObjectName("PanelIconButton")
+        self.expand_right_panel_btn.setToolTip("展开右侧状态与日志")
+        self.expand_right_panel_btn.setFixedSize(QSize(32, 54))
+        self.expand_right_panel_btn.clicked.connect(
+            lambda: self._set_right_panel_collapsed(False, persist=True)
+        )
+        layout.addWidget(self.expand_right_panel_btn, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch(1)
+        return rail
 
     def _spin(self, minimum: int, maximum: int, value: int) -> QSpinBox:
         spin = QSpinBox()
@@ -5657,8 +5921,12 @@ class WheeledArmGui(QMainWindow):
                 self.joint_jog_open_browser.isChecked(),
             )
         )
+        self._set_right_panel_collapsed(
+            _settings_bool(self.settings.value("view/right_panel_collapsed", False), False)
+        )
 
     def _save_settings(self) -> None:
+        self.settings.setValue("view/right_panel_collapsed", self._right_panel_collapsed)
         self.settings.setValue("record/repo_id", self.repo_id.text())
         self.settings.setValue("record/task", self.task.text())
         self.settings.setValue("record/root", self.dataset_root.text())
@@ -8146,10 +8414,13 @@ QTextBrowser#HelpText viewport {
     background-color: #ffffff;
     color: #172033;
 }
-#SidebarPanel, #RightPanel {
+#SidebarPanel, #RightPanel, #RightPanelRail {
     background: rgba(255, 255, 255, 184);
     border: 1px solid rgba(255, 255, 255, 210);
     border-radius: 14px;
+}
+#RightPanelRail {
+    background: rgba(255, 255, 255, 164);
 }
 #LeRobotLogo {
     background: rgba(255, 255, 255, 130);
@@ -8187,6 +8458,23 @@ QTextBrowser#HelpText viewport {
     background: rgba(255, 255, 255, 142);
     border-color: rgba(168, 199, 210, 180);
     color: #2f5f72;
+}
+#PanelIconButton {
+    background: rgba(255, 255, 255, 156);
+    border: 1px solid rgba(168, 183, 202, 170);
+    border-radius: 8px;
+    color: #43516a;
+    font-size: 18px;
+    font-weight: 800;
+    padding: 0;
+}
+#PanelIconButton:hover {
+    background: #ffffff;
+    border-color: #8fa4bc;
+    color: #1f2d42;
+}
+#PanelIconButton:pressed {
+    background: #e6edf5;
 }
 #PreviewEpisodeLabel {
     font-size: 17px;
@@ -8388,6 +8676,10 @@ QMenuBar::item:selected {
 }
 #HelpButton:pressed {
     background: #dceff4;
+}
+#HelpZoomButton {
+    min-width: 54px;
+    padding: 5px 10px;
 }
 #StatusPill {
     background: #eef3f8;
